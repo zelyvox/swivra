@@ -1,9 +1,8 @@
 'use strict';
 
 // Geometry (CSS px). Must match OverlayForm.CssSize / CssGlassInset.
-// DWELL_MS: how long to rest on a slice before it joins the chain. Kept long on purpose:
-// at 540 ms people chained slices just by pausing to read them.
-const RO = 150, RI = 62, C = 170, GAP = 2.4, DWELL_MS = 1000;
+// DWELL_MS: how long to rest on a slice before it joins the chain (must match .dwell in wheel.css).
+const RO = 150, RI = 62, C = 170, GAP = 2.4, DWELL_MS = 540;
 
 const IC = {
   doc: 'M7 3h7l5 5v13H7z M14 3v5h5 M10 13h6 M10 17h4',
