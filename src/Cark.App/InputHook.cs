@@ -7,8 +7,7 @@ public enum WheelMode { Convert, Tools, Send }
 /// <summary>
 /// Global low-level mouse and keyboard hooks. Detects "a modifier was pressed while the
 /// left button is held and the mouse has moved", which is how a wheel is summoned.
-/// Passes every event on, except Alt and Escape while a click-mode wheel is open
-/// (<see cref="SwallowClickKeys"/>), so Explorer does not open its menu bar under the wheel.
+/// Never swallows input: every event is passed on.
 /// </summary>
 internal sealed class InputHook : IDisposable
 {
@@ -23,7 +22,6 @@ internal sealed class InputHook : IDisposable
     private bool _dragging;
     private Point _downAt;
     private readonly HashSet<uint> _held = new();
-    private readonly HashSet<uint> _swallowed = new();
 
     /// <summary>A modifier was pressed during a drag. Point is in physical screen pixels.</summary>
     public event Action<WheelMode, Point>? ModifierDuringDrag;
@@ -31,21 +29,7 @@ internal sealed class InputHook : IDisposable
     /// <summary>The left button was released.</summary>
     public event Action? LeftButtonUp;
 
-    /// <summary>A key went down (repeats excluded). Raised always.</summary>
-    public event Action<uint>? KeyDown;
-
-    /// <summary>The left or right button went down. Point is in physical screen pixels. Raised always.</summary>
-    public event Action<Point>? ButtonDown;
-
     public bool IsDragging => _dragging;
-
-    /// <summary>
-    /// While true, a fresh Alt or Escape press is swallowed. A key-up is swallowed only when
-    /// its key-down was, so no key is ever left stuck.
-    /// </summary>
-    public volatile bool SwallowClickKeys;
-
-    private static bool IsClickKey(uint vk) => vk is 0x12 or 0xA4 or 0xA5 or 0x1B;
 
     public InputHook()
     {
@@ -73,10 +57,6 @@ internal sealed class InputHook : IDisposable
                     _leftDown = true;
                     _dragging = false;
                     _downAt = p;
-                    ButtonDown?.Invoke(p);
-                    break;
-                case Native.WM_RBUTTONDOWN:
-                    ButtonDown?.Invoke(p);
                     break;
                 case Native.WM_MOUSEMOVE:
                     if (_leftDown && !_dragging &&
@@ -107,30 +87,20 @@ internal sealed class InputHook : IDisposable
             if (up)
             {
                 _held.Remove(data.vkCode);
-                if (_swallowed.Remove(data.vkCode)) return 1;
             }
-            else if (down)
+            else if (down && _held.Add(data.vkCode) && _dragging)
             {
-                if (_held.Add(data.vkCode))
+                WheelMode? mode = data.vkCode switch
                 {
-                    if (_dragging)
-                    {
-                        WheelMode? mode = data.vkCode switch
-                        {
-                            0xA0 or 0xA1 or 0x10 => WheelMode.Convert, // Shift
-                            0xA2 or 0xA3 or 0x11 => WheelMode.Tools,   // Ctrl
-                            0xA4 or 0xA5 or 0x12 => WheelMode.Send,    // Alt
-                            _ => null
-                        };
-                        if (mode is not null)
-                        {
-                            ModifierDuringDrag?.Invoke(mode.Value, Cursor.Position);
-                        }
-                    }
-                    KeyDown?.Invoke(data.vkCode);
-                    if (SwallowClickKeys && IsClickKey(data.vkCode)) _swallowed.Add(data.vkCode);
+                    0xA0 or 0xA1 or 0x10 => WheelMode.Convert, // Shift
+                    0xA2 or 0xA3 or 0x11 => WheelMode.Tools,   // Ctrl
+                    0xA4 or 0xA5 or 0x12 => WheelMode.Send,    // Alt
+                    _ => null
+                };
+                if (mode is not null)
+                {
+                    ModifierDuringDrag?.Invoke(mode.Value, Cursor.Position);
                 }
-                if (_swallowed.Contains(data.vkCode)) return 1; // repeats follow their first press
             }
         }
         return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);

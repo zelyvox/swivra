@@ -190,13 +190,13 @@ function renderCenter() {
     titleEl.textContent = h.label;
     subEl.textContent = h.ready ? h.prev : 'Yakında';
     const pos = S.chain.findIndex(c => c.id === h.id);
-    if (pos >= 0) setHint(`Zincirde ${pos + 1}. adım · ${S.click ? 'tıkla' : 'bırak'}`, 'done');
-    else if (S.chain.length) setHint(`${S.click ? 'Tıkla' : 'Bırak'}: ${S.chain.length + 1} adım birden`);
+    if (pos >= 0) setHint(`Zincirde ${pos + 1}. adım · bırak`, 'done');
+    else if (S.chain.length) setHint(`Bırak: ${S.chain.length + 1} adım birden`);
     else if (h.ready) setHint('Beklersen zincire eklenir', 'waiting');
   } else if (S.chain.length) {
     titleEl.textContent = 'Zincir';
     subEl.textContent = S.chain.map(c => c.label).join(' → ');
-    setHint(`Bir dilime ${S.click ? 'tıkla' : 'bırak'}: hepsi sırayla`);
+    setHint('Bir dilime bırak: hepsi sırayla');
   } else if (S.sens.length) {
     titleEl.textContent = 'Dikkat';
     subEl.textContent = S.sens.join(' · ');
@@ -262,7 +262,6 @@ const handlers = {
   },
   open(m) {
     Object.assign(S, { open: true, mode: m.mode || 'convert', file: null, count: 0, sens: [], chain: [], busy: false });
-    S.click = m.inputMode === 'click'; // 'drag' (default) or 'click' from the context menu
     wheel.className = 'wheel';
     badgeEl.textContent = '';
     build();

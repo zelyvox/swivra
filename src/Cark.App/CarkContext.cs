@@ -7,7 +7,7 @@ namespace Cark.App;
 /// Wires the pieces together: hook summons the wheel, the catcher feeds drag events to the
 /// web UI, the web UI picks steps, FileActions runs them.
 /// </summary>
-internal sealed partial class CarkContext : ApplicationContext
+internal sealed class CarkContext : ApplicationContext
 {
     private readonly OverlayForm _overlay = new();
     private readonly CatcherForm _catcher = new();
@@ -51,7 +51,6 @@ internal sealed partial class CarkContext : ApplicationContext
         _catcher.DragDrop += OnDragDrop;
 
         _overlay.Message += OnWebMessage;
-        InitClickMode();
         _ = StartAsync();
     }
 
@@ -61,7 +60,6 @@ internal sealed partial class CarkContext : ApplicationContext
         {
             await _overlay.InitAsync();
             _hook.Install();
-            FlushOpenWhenReady();
             int demo = Array.IndexOf(_args, "--demo");
             if (demo >= 0)
             {
@@ -118,30 +116,27 @@ internal sealed partial class CarkContext : ApplicationContext
         ShowWheel(mode, pt);
     }
 
-    private void ShowWheel(WheelMode mode, Point pt, bool click = false)
+    private void ShowWheel(WheelMode mode, Point pt)
     {
         _hideTimer.Stop();
         _dropping = false;
         _files = [];
-        EndClickMode();
-        _clickMode = click;
         _overlay.ShowAt(pt);
         _catcher.Cover(_overlay.Bounds);
         _catcher.Show();
         _visible = true;
-        _overlay.Post(new { type = "open", mode = ModeName(mode), inputMode = click ? "click" : "drag" });
+        _overlay.Post(new { type = "open", mode = ModeName(mode) });
     }
 
     private void OnLeftUp()
     {
-        if (_visible && !_clickMode) _hideTimer.Start();
+        if (_visible) _hideTimer.Start();
     }
 
     private void CloseWheel()
     {
         if (!_visible) return;
         _visible = false;
-        EndClickMode();
         _overlay.Post(new { type = "close" });
         _catcher.Hide();
         var t = new System.Windows.Forms.Timer { Interval = 180 };
@@ -156,12 +151,7 @@ internal sealed partial class CarkContext : ApplicationContext
     private void OnDragEnter(object? sender, DragEventArgs e)
     {
         e.Effect = DragDropEffects.Copy; // never Move: the original must stay where it is
-        SetFiles(e.Data?.GetData(DataFormats.FileDrop) as string[] ?? []);
-    }
-
-    private void SetFiles(string[] files)
-    {
-        _files = files;
+        _files = e.Data?.GetData(DataFormats.FileDrop) as string[] ?? [];
         var infos = _files.Take(1).Select(p =>
         {
             string ext = Path.GetExtension(p);
@@ -197,11 +187,6 @@ internal sealed partial class CarkContext : ApplicationContext
     private void OnDragDrop(object? sender, DragEventArgs e)
     {
         e.Effect = DragDropEffects.Copy;
-        Drop();
-    }
-
-    private void Drop()
-    {
         _dropping = true;
         _hideTimer.Stop();
         _catcher.Hide();
@@ -306,7 +291,6 @@ internal sealed partial class CarkContext : ApplicationContext
     protected override void ExitThreadCore()
     {
         _hook.Dispose();
-        _openPipe?.Dispose();
         _tray.Visible = false;
         _tray.Dispose();
         _catcher.Dispose();
