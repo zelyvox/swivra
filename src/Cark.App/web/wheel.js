@@ -1,7 +1,9 @@
 'use strict';
 
 // Geometry (CSS px). Must match OverlayForm.CssSize / CssGlassInset.
-const RO = 150, RI = 62, C = 170, GAP = 2.4, DWELL_MS = 540;
+// DWELL_MS: how long to rest on a slice before it joins the chain. Kept long on purpose:
+// at 540 ms people chained slices just by pausing to read them.
+const RO = 150, RI = 62, C = 170, GAP = 2.4, DWELL_MS = 1000;
 
 const IC = {
   doc: 'M7 3h7l5 5v13H7z M14 3v5h5 M10 13h6 M10 17h4',
@@ -83,7 +85,13 @@ let dwellTimer = 0;
 
 const $ = id => document.getElementById(id);
 const wheel = $('wheel'), slicesEl = $('slices'), labelsEl = $('labels'), lightEl = $('light');
-const titleEl = $('center-title'), subEl = $('center-sub'), badgeEl = $('badge');
+const titleEl = $('center-title'), subEl = $('center-sub'), hintEl = $('center-hint'), badgeEl = $('badge');
+
+function setHint(text, cls) {
+  hintEl.className = 'center-hint';
+  hintEl.textContent = text;
+  if (cls) { void hintEl.offsetWidth; hintEl.classList.add(cls); }
+}
 
 function post(msg) { if (window.chrome && chrome.webview) chrome.webview.postMessage(msg); }
 
@@ -178,12 +186,18 @@ function paint() {
 function renderCenter() {
   const h = S.hover >= 0 ? S.acts[S.hover] : null;
   subEl.classList.remove('radar-text');
+  setHint('');
   if (h) {
     titleEl.textContent = h.label;
     subEl.textContent = h.ready ? h.prev : 'Yakında';
+    const pos = S.chain.findIndex(c => c.id === h.id);
+    if (pos >= 0) setHint(`Zincirde ${pos + 1}. adım · bırak`, 'done');
+    else if (S.chain.length) setHint(`Bırak: ${S.chain.length + 1} adım birden`);
+    else setHint('Beklersen zincire eklenir', 'waiting');
   } else if (S.chain.length) {
     titleEl.textContent = 'Zincir';
     subEl.textContent = S.chain.map(c => c.label).join(' → ');
+    setHint('Bir dilime bırak: hepsi sırayla');
   } else if (S.sens.length) {
     titleEl.textContent = 'Dikkat';
     subEl.textContent = S.sens.join(' · ');
@@ -286,6 +300,7 @@ const handlers = {
     if (steps[steps.length - 1] !== cur.id) steps.push(cur.id);
     S.busy = true;
     titleEl.textContent = 'Çalışıyor';
+    setHint('');
     subEl.textContent = steps.length > 1 ? `${steps.length} adım` : cur.label;
     post({ type: 'run', steps });
   },
@@ -300,6 +315,7 @@ const handlers = {
       badgeEl.style.display = 'none';
     }
     titleEl.textContent = m.title;
+    setHint('');
     subEl.textContent = m.detail || '';
     subEl.classList.remove('radar-text');
     if (m.ok) { sfx.flip(); setTimeout(sfx.done, 160); } else sfx.fail();
