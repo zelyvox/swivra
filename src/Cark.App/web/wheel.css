@@ -1,0 +1,115 @@
+:root {
+  --size: 340px;
+  --ink: #EEF2FF;
+  --ink-soft: rgba(238, 242, 255, .78);
+  --warn: #FFB27A;
+  --chain: #A9C4FF;
+  color-scheme: dark;
+}
+
+html, body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+  color: var(--ink);
+  user-select: none;
+}
+
+* { box-sizing: border-box; }
+
+.ico { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+/* The wheel is authored at 340 px and scaled to whatever the window really is (--fit, set from JS). */
+.wheel { position: absolute; left: 0; top: 0; width: var(--size); height: var(--size); transform: scale(var(--fit, 1)); transform-origin: 0 0; }
+.wheel.hidden { display: none; }
+.wheel.closing .glass, .wheel.closing .rim, .wheel.closing .ring, .wheel.closing .center,
+.wheel.closing #slices, .wheel.closing #labels, .wheel.closing .light { animation: wheelOut .17s ease-in both; }
+
+/* Snapshot of the desktop behind the window, blurred into glass. 24 px bleed on each side. */
+.glass {
+  position: absolute; left: -24px; top: -24px; width: 388px; height: 388px;
+  background-size: 100% 100%;
+  filter: blur(18px) saturate(175%) brightness(.78);
+}
+.glass::after { content: ''; position: absolute; inset: 0; background: rgba(14, 20, 44, .28); }
+.rim {
+  position: absolute; left: 18px; top: 18px; width: 304px; height: 304px; border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, .28), inset 0 1px 18px rgba(255, 255, 255, .08);
+}
+
+.ring {
+  position: absolute; left: 20px; top: 20px; width: 300px; height: 300px; border-radius: 50%;
+  background: rgba(255, 255, 255, .06);
+  -webkit-mask: radial-gradient(circle, transparent 61.5px, #000 62.5px);
+  mask: radial-gradient(circle, transparent 61.5px, #000 62.5px);
+}
+
+.radar { position: absolute; left: 19px; top: 19px; width: 302px; height: 302px; border-radius: 50%; display: none; }
+.wheel.sensitive .radar { display: block; animation: radar 1.6s ease-in-out infinite; }
+
+.slice { position: absolute; left: 0; top: 0; width: var(--size); height: var(--size); transform-origin: 170px 170px; }
+.slice svg { position: absolute; left: 0; top: 0; overflow: visible; }
+.slice .fill { fill: rgba(255, 255, 255, .045); stroke: rgba(255, 255, 255, .16); stroke-width: 1; transition: fill .15s, stroke .15s, transform .2s cubic-bezier(.3, 1.4, .6, 1); }
+.slice.chained .fill { fill: rgba(130, 170, 255, .20); stroke: rgba(160, 195, 255, .6); }
+.slice.hover .fill { fill: rgba(255, 255, 255, .22); stroke: rgba(255, 255, 255, .8); stroke-width: 1.4; }
+.slice .dwell { fill: none; stroke: #fff; stroke-width: 2.4; stroke-dasharray: 100; stroke-dashoffset: 100; stroke-linecap: round; opacity: 0; filter: drop-shadow(0 0 6px rgba(255, 255, 255, .9)); }
+.slice.hover .dwell { opacity: 1; animation: dwell .54s linear both; }
+
+.light {
+  position: absolute; left: 20px; top: 20px; width: 300px; height: 300px; border-radius: 50%; pointer-events: none;
+  -webkit-mask: radial-gradient(circle, transparent 147.5px, #000 148.5px);
+  mask: radial-gradient(circle, transparent 147.5px, #000 148.5px);
+  filter: blur(.4px);
+}
+
+.label {
+  position: absolute; width: 96px; height: 50px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  color: rgba(235, 240, 255, .82); text-shadow: 0 1px 2px rgba(0, 0, 0, .45);
+  transition: color .15s, transform .2s cubic-bezier(.3, 1.4, .6, 1);
+}
+.label span { font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.label.hover { color: #fff; }
+.label.soon { color: rgba(235, 240, 255, .45); }
+.label .warn { position: absolute; right: 18px; top: 4px; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 10px rgba(255, 150, 80, .9); display: none; animation: dotPulse 1.4s ease-in-out infinite; }
+.wheel.sensitive .label.radar-target .warn { display: block; }
+.label .no { position: absolute; left: 16px; top: 0; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px; background: var(--chain); color: #0B1020; font-size: 11px; font-weight: 700; display: none; align-items: center; justify-content: center; }
+.label.chained .no { display: flex; }
+
+.center {
+  position: absolute; left: 116px; top: 116px; width: 108px; height: 108px; border-radius: 50%;
+  background: rgba(255, 255, 255, .08); border: 1px solid rgba(255, 255, 255, .22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .25);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 10px; text-align: center;
+}
+.center-title { font-size: 13px; font-weight: 600; line-height: 1.2; }
+.center-sub { font-size: 10.5px; line-height: 1.3; color: var(--ink-soft); max-width: 92px; overflow-wrap: anywhere; }
+.wheel.sensitive .center-sub.radar-text { color: #FFD2B0; }
+
+.badge { display: none; padding: 3px 8px; border-radius: 6px; color: #0B1020; font-size: 12px; font-weight: 700; letter-spacing: .04em; box-shadow: 0 2px 6px rgba(0, 0, 0, .3); }
+.wheel.result .badge { display: block; animation: flip .42s cubic-bezier(.34, 1.56, .64, 1) both; }
+.wheel.result.ok .center { border-color: rgba(169, 240, 201, .7); box-shadow: 0 0 30px rgba(140, 230, 180, .35), inset 0 1px 0 rgba(255, 255, 255, .25); }
+
+.anim-a .slice { animation: sliceA .5s cubic-bezier(.34, 1.56, .64, 1) both; }
+.anim-b .slice { animation: sliceB .5s cubic-bezier(.34, 1.56, .64, 1) both; }
+.anim-a .label { animation: labelA .5s ease both; }
+.anim-b .label { animation: labelB .5s ease both; }
+.anim-a .ring, .anim-a .center { animation: ringA .45s cubic-bezier(.34, 1.56, .64, 1) both; }
+.anim-b .ring, .anim-b .center { animation: ringB .45s cubic-bezier(.34, 1.56, .64, 1) both; }
+
+@keyframes sliceA { from { opacity: 0; transform: scale(.55) rotate(-16deg); } }
+@keyframes sliceB { from { opacity: 0; transform: scale(.55) rotate(-16deg); } }
+@keyframes labelA { from { opacity: 0; transform: scale(.6); } }
+@keyframes labelB { from { opacity: 0; transform: scale(.6); } }
+@keyframes ringA { from { opacity: 0; transform: scale(.62); } }
+@keyframes ringB { from { opacity: 0; transform: scale(.62); } }
+@keyframes dwell { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+@keyframes flip { from { transform: rotateY(90deg); } to { transform: rotateY(0); } }
+@keyframes wheelOut { to { opacity: 0; transform: scale(.88); } }
+@keyframes radar {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(255, 170, 90, .75), 0 0 18px rgba(255, 140, 60, .35); }
+  50% { box-shadow: 0 0 0 1.5px rgba(255, 190, 120, .95), 0 0 30px rgba(255, 140, 60, .6); }
+}
+@keyframes dotPulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
