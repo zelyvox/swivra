@@ -17,6 +17,12 @@ Windows için dosya çarkı. Bir dosyayı sürüklerken **Shift**, **Ctrl** ya d
 - **Radar:** sürüklediğin dosyada konum bilgisi, cihaz modeli, TC kimlik no, IBAN, e-posta ya da telefon varsa çarkın kenarı turuncu yanar.
 - Orijinal dosyaya dokunulmaz. Sonuç yanına yeni adla kaydedilir (`Tatil-temiz.jpg`).
 
+## Sağ tık
+
+Bir ya da birkaç dosyaya sağ tıkla, **Çark ile aç**'ı seç: çark imlecin yanında, dosyalar yüklü açılır. Bu sefer bırakmak yerine dilime **tıklarsın**. Shift, Ctrl ve Alt çarkı aynı şekilde değiştirir; radar, canlı önizleme ve zincir de aynı. **Esc** ya da çarkın dışına tıklamak kapatır.
+
+Windows 11'de seçenek klasik menüde durur: **Diğer seçenekleri göster** altında ya da doğrudan **Shift+sağ tık** ile. Menü yönetici izni istemeden yalnız senin hesabına eklenir (`HKCU`). Tepsi menüsündeki **Sağ tık menüsü** ile kapatıp açabilirsin, seçim `%LOCALAPPDATA%\Cark\settings.json` dosyasında kalır.
+
 ## Çalıştırma
 
 Gereken: Windows 10/11, [.NET 10 SDK](https://dotnet.microsoft.com/download), WebView2 Runtime (Windows 11'de hazır gelir).
@@ -32,7 +38,7 @@ Görünümü test etmek için: `dotnet run -- --demo --shot cikti.png`
 
 ## Nasıl çalışıyor
 
-- `InputHook`: sistem geneli klavye ve fare dinleme. Hiçbir tuşu yutmaz, sadece izler.
+- `InputHook`: sistem geneli klavye ve fare dinleme. Sürüklerken hiçbir tuşu yutmaz, sadece izler. Sağ tıkla açılan çark ekrandayken yalnız Alt ve Esc'i yutar, Explorer menü çubuğunu açmasın diye.
 - `OverlayForm`: odak çalmayan, daire şeklinde, her şeyin üstünde duran pencere. Çarkı WebView2 çizer (`web/`). Cam görüntüsü, çark açılmadan hemen önce arkadaki alanın bulanıklaştırılmış görüntüsü.
 - `CatcherForm`: çarkın üstüne yerleşen neredeyse görünmez pencere. Asıl bırakma hedefi bu. Dosya yolunu sürükleme başlar başlamaz alır (radar için) ve bırakma etkisini her zaman **kopyala** yapar, yani Explorer orijinali asla taşımaz.
 - `FileActions`, `Radar`: işlemler ve hassas bilgi taraması. Tamamen çevrimdışı.

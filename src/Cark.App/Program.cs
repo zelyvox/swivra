@@ -17,7 +17,13 @@ static class Program
         }
 
         using var single = new Mutex(true, @"Local\Cark.SingleInstance", out bool first);
-        if (!first) return 0;
+        if (!first)
+        {
+            // "Çark ile aç" while the tray instance runs: hand the files over and leave.
+            string[] open = OpenPipe.PathsFromArgs(args);
+            if (open.Length > 0) OpenPipe.Send(open);
+            return 0;
+        }
 
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, e) => Log.Write($"ui exception: {e.Exception}");
