@@ -49,9 +49,9 @@ function actionsFor(file, mode) {
       { id: 'cmp', label: 'Sıkıştır', icon: IC.compress, prev: 'Boyutu küçült' },
       { id: 'hide', label: 'Gizle', icon: IC.hide, radar: true, prev: 'Hassas alanlar kapatılır' },
       { id: 'lock', label: 'Şifrele', icon: IC.lock, prev: 'Parola ile kilitle' },
-      { id: 'split', label: 'Böl', icon: IC.split, prev: 'Her sayfa ayrı dosya' },
-      { id: 'merge', label: 'Birleştir', icon: IC.merge, prev: 'Başka PDF ile tek dosya' },
-      { id: 'rot', label: 'Döndür', icon: IC.rotate, prev: 'Tüm sayfalar 90°' }
+      { id: 'split', label: 'Böl', icon: IC.split, ready: true, prev: 'Her sayfa ayrı dosya' },
+      { id: 'merge', label: 'Birleştir', icon: IC.merge, ready: true, prev: S.count > 1 ? `${S.count} PDF tek dosya` : "Başka PDF'lerle tek dosya" },
+      { id: 'rot', label: 'Döndür', icon: IC.rotate, ready: true, prev: 'Tüm sayfalar 90°' }
     ];
     return [
       { id: 'cmp', label: 'Sıkıştır', icon: IC.compress, prev: 'Boyutu küçült' },
@@ -61,9 +61,9 @@ function actionsFor(file, mode) {
   }
   if (kind === 'pdf') return [
     { id: 'docx', label: 'Word', icon: IC.doc, prev: 'Düzen korunur' },
-    { id: 'txt', label: 'Metin', icon: IC.text, prev: 'Yalnız metin, düz .txt' },
-    { id: 'png', label: 'PNG', icon: IC.image, prev: 'Her sayfa bir görsel' },
-    { id: 'jpg', label: 'JPG', icon: IC.image, prev: 'Her sayfa bir görsel' }
+    { id: 'txt', label: 'Metin', icon: IC.text, ready: true, prev: 'Yalnız metin, düz .txt' },
+    { id: 'png', label: 'PNG', icon: IC.image, ready: true, prev: 'Her sayfa bir görsel · 200 dpi' },
+    { id: 'jpg', label: 'JPG', icon: IC.image, ready: true, prev: 'Her sayfa bir görsel · 200 dpi' }
   ];
   if (kind === 'img') {
     const own = file.ext === 'jpeg' ? 'jpg' : file.ext;
@@ -79,7 +79,7 @@ function actionsFor(file, mode) {
 }
 
 // ---------- state ----------
-const S = { open: false, mode: 'convert', file: null, sens: [], acts: [], hover: -1, chain: [], seq: 0, busy: false };
+const S = { open: false, mode: 'convert', file: null, count: 0, sens: [], acts: [], hover: -1, chain: [], seq: 0, busy: false };
 let dwellTimer = 0;
 
 const $ = id => document.getElementById(id);
@@ -206,7 +206,7 @@ function renderCenter() {
     subEl.textContent = 'Bu dosya türü henüz yok';
   } else {
     titleEl.textContent = MODE_NAME[S.mode];
-    subEl.textContent = S.file ? `${S.file.name}.${S.file.ext}` : 'Dosyayı bekliyor';
+    subEl.textContent = S.file ? `${S.file.name}.${S.file.ext}${S.count > 1 ? ` +${S.count - 1}` : ''}` : 'Dosyayı bekliyor';
   }
 }
 
@@ -261,7 +261,7 @@ const handlers = {
     $('glass').style.backgroundImage = m.src ? `url("${m.src}")` : 'none';
   },
   open(m) {
-    Object.assign(S, { open: true, mode: m.mode || 'convert', file: null, sens: [], chain: [], busy: false });
+    Object.assign(S, { open: true, mode: m.mode || 'convert', file: null, count: 0, sens: [], chain: [], busy: false });
     wheel.className = 'wheel';
     badgeEl.textContent = '';
     build();
@@ -277,8 +277,10 @@ const handlers = {
   enter(m) {
     if (!S.open || S.busy) return;
     const f = (m.files || [])[0] || null;
-    const changed = !S.file || !f || S.file.name !== f.name || S.file.ext !== f.ext;
+    const count = m.count || (f ? 1 : 0);
+    const changed = !S.file || !f || S.file.name !== f.name || S.file.ext !== f.ext || S.count !== count;
     S.file = f;
+    S.count = count;
     if (changed) build(); else renderCenter();
   },
   radar(m) {

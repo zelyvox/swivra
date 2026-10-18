@@ -6,12 +6,13 @@ namespace Cark.App;
 
 /// <summary>
 /// Looks for sensitive data inside a file before it is shared. Runs fully offline.
-/// v0: image EXIF (GPS, camera model) and plain-text files (TC kimlik no, IBAN, e-mail, phone).
+/// v0: image EXIF (GPS, camera model), plain-text files and the text of the first PDF pages (TC kimlik no, IBAN, e-mail, phone).
 /// </summary>
 internal static partial class Radar
 {
     private static readonly HashSet<string> TextExts = new(StringComparer.OrdinalIgnoreCase) { ".txt", ".csv", ".md", ".json", ".xml", ".log" };
     private const long MaxTextBytes = 5 * 1024 * 1024;
+    private const int MaxPdfPages = 20;
 
     public static List<string> Scan(string path)
     {
@@ -20,6 +21,7 @@ internal static partial class Radar
         {
             string ext = Path.GetExtension(path);
             if (FileKinds.IsImage(ext)) ScanImage(path, found);
+            else if (ext.Equals(".pdf", StringComparison.OrdinalIgnoreCase)) ScanPdf(path, found);
             else if (TextExts.Contains(ext) && new FileInfo(path).Length <= MaxTextBytes) ScanText(File.ReadAllText(path, Encoding.UTF8), found);
         }
         catch (Exception ex)
@@ -39,6 +41,18 @@ internal static partial class Radar
         {
             string model = Encoding.ASCII.GetString(img.GetPropertyItem(0x0110)!.Value ?? []).Trim('\0', ' ');
             found.Add(model.Length > 0 ? $"Cihaz modeli: {model}" : "Cihaz modeli");
+        }
+    }
+
+    private static void ScanPdf(string path, List<string> found)
+    {
+        try
+        {
+            ScanText(string.Join("\n", PdfActions.ExtractPages(path, MaxPdfPages)), found);
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"radar pdf skipped {path}: {ex.Message}"); // password or corrupt: no findings
         }
     }
 

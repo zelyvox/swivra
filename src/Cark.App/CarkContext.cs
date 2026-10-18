@@ -220,9 +220,9 @@ internal sealed class CarkContext : ApplicationContext
             FinishSoon();
             return;
         }
-        string file = _files[0];
-        Log.Write($"run {string.Join(">", steps)} on {file}");
-        Task.Run(() => FileActions.Run(file, steps)).ContinueWith(t =>
+        string[] files = _files;
+        Log.Write($"run {string.Join(">", steps)} on {string.Join(" | ", files)}");
+        Task.Run(() => FileActions.Run(files, steps)).ContinueWith(t =>
         {
             _overlay.BeginInvoke(() =>
             {

@@ -27,9 +27,9 @@ internal static class FileKinds
 internal sealed record ActionResult(bool Ok, string Title, string Detail, string? OutputPath = null, string? OutputExt = null, string? ClipboardText = null);
 
 /// <summary>
-/// Runs a chain of wheel steps on one file. The original is never modified;
-/// output goes next to it under a new, non-colliding name.
-/// v0 implements image steps with GDI+; everything else reports "not yet".
+/// Runs a chain of wheel steps on one or more files. Originals are never modified;
+/// output goes next to them under a new, non-colliding name.
+/// Image steps use GDI+, PDF steps live in PdfActions; everything else reports "not yet".
 /// </summary>
 internal static class FileActions
 {
@@ -43,25 +43,63 @@ internal static class FileActions
 
     private static readonly HashSet<string> ImageSteps = new() { "png", "jpg", "bmp", "rot", "loc", "rs", "cmp" };
 
-    public static ActionResult Run(string path, IReadOnlyList<string> steps)
+    public static ActionResult Run(IReadOnlyList<string> files, IReadOnlyList<string> steps)
     {
-        string kind = FileKinds.KindOf(Path.GetExtension(path));
         var fileSteps = steps.Where(s => s != "path").ToList();
         bool copyPath = steps.Contains("path");
 
-        string? missing = fileSteps.FirstOrDefault(s => kind != "img" || !ImageSteps.Contains(s));
-        if (missing is not null)
+        if (fileSteps.Contains("merge"))
         {
-            string label = Labels.GetValueOrDefault(missing, missing);
-            return new ActionResult(false, "Yakında", $"{label} henüz bu sürümde yok");
+            if (fileSteps.Count > 1) return new ActionResult(false, "Birleştir", "Birleştir zincirde tek başına olmalı");
+            var pdfs = files.Where(f => FileKinds.KindOf(Path.GetExtension(f)) == "pdf").ToList();
+            if (pdfs.Count < 2) return new ActionResult(false, "Birleştir", "Birden fazla PDF'i birlikte sürükle");
+            var merged = PdfActions.Merge(pdfs);
+            if (!merged.Ok || !copyPath) return merged;
+            return merged with { Detail = $"{merged.Detail} · yolu panoda", ClipboardText = merged.OutputPath };
         }
 
+        var results = files.Select(f => RunOne(f, fileSteps, copyPath)).ToList();
+        if (results.Count == 1) return results[0];
+
+        var ok = results.Where(r => r.Ok).ToList();
+        if (ok.Count == 0) return results[0];
+        string? clip = copyPath ? string.Join(Environment.NewLine, ok.Select(r => r.ClipboardText)) : null;
+        string? ext = ok.Select(r => r.OutputExt).Distinct().Count() == 1 ? ok[0].OutputExt : null;
+        if (fileSteps.Count == 0 && ok.Count == results.Count)
+            return new ActionResult(true, "Kopyalandı", $"{ok.Count} yol panoda", ClipboardText: clip);
+        string detail = ok.Count == results.Count
+            ? $"{ok.Count} dosya hazır"
+            : $"{ok.Count}/{results.Count} dosya hazır, {results.Count - ok.Count} atlandı";
+        return new ActionResult(true, "Hazır", detail, ok[0].OutputPath, ext, clip);
+    }
+
+    private static ActionResult RunOne(string path, List<string> fileSteps, bool copyPath)
+    {
+        string kind = FileKinds.KindOf(Path.GetExtension(path));
+        var supported = kind == "pdf" ? PdfActions.Steps : ImageSteps;
+
+        string? missing = fileSteps.FirstOrDefault(s => (kind != "img" && kind != "pdf") || !supported.Contains(s));
+        if (missing is not null)
+            return new ActionResult(false, "Yakında", $"{Label(missing)} henüz bu sürümde yok");
+
         string finalPath = path;
+        string? finalExt = null;
         if (fileSteps.Count > 0)
         {
             try
             {
-                finalPath = RunImage(path, fileSteps);
+                if (kind == "pdf")
+                {
+                    var r = PdfActions.Run(path, fileSteps, Label);
+                    if (!r.Ok) return r;
+                    finalPath = r.OutputPath!;
+                    finalExt = r.OutputExt;
+                }
+                else
+                {
+                    finalPath = RunImage(path, fileSteps);
+                    finalExt = Path.GetExtension(finalPath).TrimStart('.').ToLowerInvariant();
+                }
             }
             catch (Exception ex)
             {
@@ -74,8 +112,10 @@ internal static class FileActions
         string name = Path.GetFileName(finalPath);
         if (fileSteps.Count == 0) return new ActionResult(true, "Kopyalandı", "Yol panoda", ClipboardText: clip);
         string detail = copyPath ? $"{name} · yolu panoda" : name;
-        return new ActionResult(true, "Hazır", detail, finalPath, Path.GetExtension(finalPath).TrimStart('.').ToLowerInvariant(), clip);
+        return new ActionResult(true, "Hazır", detail, finalPath, finalExt, clip);
     }
+
+    private static string Label(string step) => Labels.GetValueOrDefault(step, step);
 
     private static string RunImage(string path, List<string> steps)
     {
@@ -164,10 +204,17 @@ internal static class FileActions
         }
     }
 
-    private static string UniquePath(string dir, string baseName, string ext)
+    internal static string UniquePath(string dir, string baseName, string ext)
     {
         string candidate = Path.Combine(dir, $"{baseName}.{ext}");
         for (int i = 2; File.Exists(candidate); i++) candidate = Path.Combine(dir, $"{baseName} ({i}).{ext}");
+        return candidate;
+    }
+
+    internal static string UniqueDir(string parent, string name)
+    {
+        string candidate = Path.Combine(parent, name);
+        for (int i = 2; Directory.Exists(candidate) || File.Exists(candidate); i++) candidate = Path.Combine(parent, $"{name} ({i})");
         return candidate;
     }
 }
