@@ -143,7 +143,7 @@ function build() {
   S.acts.forEach((a, i) => {
     const mid = -90 + i * step;
     const g = document.createElement('div');
-    g.className = 'slice'; g.style.animationDelay = (i * 30) + 'ms';
+    g.className = 'slice' + (a.ready ? '' : ' soon'); g.style.animationDelay = (i * 30) + 'ms';
     const svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('width', '340'); svg.setAttribute('height', '340'); svg.setAttribute('viewBox', '0 0 340 340');
     const d = arc(mid - step / 2 + GAP / 2, mid + step / 2 - GAP / 2);
@@ -192,7 +192,7 @@ function renderCenter() {
     const pos = S.chain.findIndex(c => c.id === h.id);
     if (pos >= 0) setHint(`Zincirde ${pos + 1}. adım · bırak`, 'done');
     else if (S.chain.length) setHint(`Bırak: ${S.chain.length + 1} adım birden`);
-    else setHint('Beklersen zincire eklenir', 'waiting');
+    else if (h.ready) setHint('Beklersen zincire eklenir', 'waiting');
   } else if (S.chain.length) {
     titleEl.textContent = 'Zincir';
     subEl.textContent = S.chain.map(c => c.label).join(' → ');
@@ -225,7 +225,7 @@ function setHover(idx) {
     const dw = a._slice.querySelector('.dwell');
     dw.style.animation = 'none'; void dw.getBoundingClientRect(); dw.style.animation = '';
     sfx.tick();
-    dwellTimer = setTimeout(lockCurrent, DWELL_MS);
+    if (a.ready) dwellTimer = setTimeout(lockCurrent, DWELL_MS);
   }
   paint();
 }
@@ -233,6 +233,7 @@ function setHover(idx) {
 function lockCurrent() {
   if (S.hover < 0) return;
   const a = S.acts[S.hover];
+  if (!a.ready) return; // a step that does not exist yet must never sink a whole chain
   const last = S.chain[S.chain.length - 1];
   if (last && last.id === a.id) return;
   S.chain.push({ id: a.id, label: a.label, ready: !!a.ready });
@@ -295,6 +296,15 @@ const handlers = {
     clearTimeout(dwellTimer);
     if (S.hover < 0) { post({ type: 'cancel' }); return; }
     const cur = S.acts[S.hover];
+    if (!cur.ready) {
+      S.busy = true;
+      titleEl.textContent = cur.label;
+      subEl.textContent = 'Yakında geliyor';
+      setHint('');
+      sfx.fail();
+      setTimeout(() => post({ type: 'cancel' }), 900);
+      return;
+    }
     const steps = S.chain.map(c => c.id);
     if (steps[steps.length - 1] !== cur.id) steps.push(cur.id);
     S.busy = true;

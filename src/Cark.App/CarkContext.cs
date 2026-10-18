@@ -85,16 +85,35 @@ internal sealed class CarkContext : ApplicationContext
     private void OnModifier(WheelMode mode, Point pt)
     {
         if (!_overlay.Ready) return;
-        bool shellDrag = Native.IsWindowVisible(Native.FindWindow("SysDragImage", null));
-        if (!_visible)
-        {
-            Log.Write($"summon mode={mode} at={pt} shellDragImage={shellDrag}");
-            ShowWheel(mode, pt);
-        }
-        else
+        if (_visible)
         {
             _overlay.Post(new { type = "mode", mode = ModeName(mode) });
+            return;
         }
+        if (IsShellDrag())
+        {
+            Summon(mode);
+            return;
+        }
+        // Explorer can create its drag image a beat after the drag starts; look once more.
+        After(120, () =>
+        {
+            if (!_visible && _hook.IsDragging && IsShellDrag()) Summon(mode);
+            else Log.Write($"ignored mode={mode}: no file drag in progress");
+        });
+    }
+
+    /// <summary>
+    /// Explorer shows a "SysDragImage" window while files are dragged. Text selection, window
+    /// moves and other plain mouse drags have none, so Shift-selecting text no longer opens the wheel.
+    /// </summary>
+    private static bool IsShellDrag() => Native.IsWindowVisible(Native.FindWindow("SysDragImage", null));
+
+    private void Summon(WheelMode mode)
+    {
+        Point pt = Cursor.Position;
+        Log.Write($"summon mode={mode} at={pt}");
+        ShowWheel(mode, pt);
     }
 
     private void ShowWheel(WheelMode mode, Point pt)
