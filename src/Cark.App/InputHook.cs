@@ -29,6 +29,9 @@ internal sealed class InputHook : IDisposable
     /// <summary>The left button was released.</summary>
     public event Action? LeftButtonUp;
 
+    /// <summary>A key went down (first press only, no auto-repeat). Carries the virtual key code.</summary>
+    public event Action<uint>? KeyPressed;
+
     public bool IsDragging => _dragging;
 
     public InputHook()
@@ -84,11 +87,11 @@ internal sealed class InputHook : IDisposable
             bool down = msg == Native.WM_KEYDOWN || msg == Native.WM_SYSKEYDOWN;
             bool up = msg == Native.WM_KEYUP || msg == Native.WM_SYSKEYUP;
 
-            if (up)
-            {
-                _held.Remove(data.vkCode);
-            }
-            else if (down && _held.Add(data.vkCode) && _dragging)
+            bool firstPress = down && _held.Add(data.vkCode);
+            if (up) _held.Remove(data.vkCode);
+            if (firstPress) KeyPressed?.Invoke(data.vkCode);
+
+            if (firstPress && _dragging)
             {
                 WheelMode? mode = data.vkCode switch
                 {

@@ -21,6 +21,35 @@
     <span id="center-hint" class="center-hint"></span>
   </div>
 </div>
+<div id="panel" class="panel hidden" role="dialog" aria-label="Kırp">
+  <div class="pglass"></div>
+  <div id="panel-light" class="panel-light"></div>
+  <div class="panel-body">
+    <div class="panel-head">
+      <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path class="ico" d="M6 2v16h16 M2 6h16v16"></path></svg>
+      <span class="panel-title">Kırp</span>
+      <span id="crop-file" class="panel-file"></span>
+      <div id="crop-presets" class="presets"></div>
+    </div>
+    <div class="stage-row">
+      <div id="stage" class="stage">
+        <img id="crop-img" alt="">
+        <div id="crop-rect" class="crop-rect">
+          <i class="third v1"></i><i class="third v2"></i><i class="third h1"></i><i class="third h2"></i>
+          <b class="hd nw" data-h="nw"></b><b class="hd ne" data-h="ne"></b><b class="hd sw" data-h="sw"></b><b class="hd se" data-h="se"></b>
+          <b class="hd n edge" data-h="n"></b><b class="hd s edge" data-h="s"></b><b class="hd w edge" data-h="w"></b><b class="hd e edge" data-h="e"></b>
+        </div>
+      </div>
+    </div>
+    <div class="panel-foot">
+      <span id="crop-info" class="crop-info"></span>
+      <div class="buttons">
+        <button id="crop-cancel" class="btn">Vazgeç</button>
+        <button id="crop-apply" class="btn primary">Kırp ve kaydet</button>
+      </div>
+    </div>
+  </div>
+</div>
 <script src="wheel.js"></script>
 </body>
 </html>

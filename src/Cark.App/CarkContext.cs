@@ -18,6 +18,7 @@ internal sealed class CarkContext : ApplicationContext
 
     private bool _visible;
     private bool _dropping;
+    private bool _panel;
     private string[] _files = [];
 
     public CarkContext(string[] args)
@@ -44,6 +45,7 @@ internal sealed class CarkContext : ApplicationContext
 
         _hook.ModifierDuringDrag += (mode, pt) => _overlay.BeginInvoke(() => OnModifier(mode, pt));
         _hook.LeftButtonUp += () => _overlay.BeginInvoke(OnLeftUp);
+        _hook.KeyPressed += vk => _overlay.BeginInvoke(() => OnKey(vk));
 
         _catcher.DragEnter += OnDragEnter;
         _catcher.DragOver += OnDragOver;
@@ -65,6 +67,12 @@ internal sealed class CarkContext : ApplicationContext
             {
                 int shot = Array.IndexOf(_args, "--shot");
                 RunDemo(shot >= 0 && shot + 1 < _args.Length ? _args[shot + 1] : null);
+            }
+            int demoCrop = Array.IndexOf(_args, "--demo-crop");
+            if (demoCrop >= 0 && demoCrop + 1 < _args.Length)
+            {
+                int shot = Array.IndexOf(_args, "--shot");
+                RunCropDemo(_args[demoCrop + 1], shot >= 0 && shot + 1 < _args.Length ? _args[shot + 1] : null);
             }
         }
         catch (Exception ex)
@@ -130,13 +138,34 @@ internal sealed class CarkContext : ApplicationContext
 
     private void OnLeftUp()
     {
+        if (_panel)
+        {
+            // The panel is clicked like any window; a click outside it means "never mind".
+            if (!_overlay.Bounds.Contains(Cursor.Position)) CancelWheel();
+            return;
+        }
         if (_visible) _hideTimer.Start();
+    }
+
+    /// <summary>The panel never takes focus (it must not steal it from Explorer), so its keys come from the hook.</summary>
+    private void OnKey(uint vk)
+    {
+        if (!_panel) return;
+        if (vk == 0x1B) _overlay.Post(new { type = "key", key = "esc" });
+        else if (vk == 0x0D) _overlay.Post(new { type = "key", key = "enter" });
+    }
+
+    private void CancelWheel()
+    {
+        _dropping = false;
+        CloseWheel();
     }
 
     private void CloseWheel()
     {
         if (!_visible) return;
         _visible = false;
+        _panel = false;
         _overlay.Post(new { type = "close" });
         _catcher.Hide();
         var t = new System.Windows.Forms.Timer { Interval = 180 };
@@ -200,11 +229,18 @@ internal sealed class CarkContext : ApplicationContext
         {
             case "run":
                 var steps = msg.GetProperty("steps").EnumerateArray().Select(s => s.GetString() ?? "").ToList();
-                RunSteps(steps);
+                RunSteps(steps, ReadOptions(msg));
+                break;
+            case "tool":
+                if (msg.TryGetProperty("tool", out var tool) && tool.GetString() == "crop") StartCrop();
+                break;
+            case "panel-size":
+                _panel = true;
+                var origin = _overlay.ShowPanel(msg.GetProperty("w").GetInt32(), msg.GetProperty("h").GetInt32());
+                _overlay.Post(new { type = "panel-open", ox = origin.X, oy = origin.Y });
                 break;
             case "cancel":
-                _dropping = false;
-                CloseWheel();
+                CancelWheel();
                 break;
             case "log":
                 Log.Write("web: " + (msg.TryGetProperty("text", out var x) ? x.GetString() : ""));
@@ -212,7 +248,55 @@ internal sealed class CarkContext : ApplicationContext
         }
     }
 
-    private void RunSteps(List<string> steps)
+    private static StepOptions ReadOptions(JsonElement msg)
+    {
+        if (!msg.TryGetProperty("crop", out var c)) return StepOptions.None;
+        return new StepOptions(Crop: new Rectangle(c.GetProperty("x").GetInt32(), c.GetProperty("y").GetInt32(),
+            c.GetProperty("w").GetInt32(), c.GetProperty("h").GetInt32()));
+    }
+
+    /// <summary>
+    /// Sends the web UI an upright preview of the dragged image and its real size; the web
+    /// lays out the crop panel and answers with "panel-size", which grows the window.
+    /// </summary>
+    private void StartCrop()
+    {
+        if (_files.Length != 1 || !FileKinds.IsImage(Path.GetExtension(_files[0])))
+        {
+            _overlay.Post(new { type = "result", ok = false, title = "Kırp", detail = _files.Length > 1 ? "Tek resim kırpılır" : "Yalnız resimler kırpılır" });
+            FinishSoon();
+            return;
+        }
+        string file = _files[0];
+        Task.Run(() => CropPreview(file)).ContinueWith(t => _overlay.BeginInvoke(() =>
+        {
+            if (!t.IsCompletedSuccessfully)
+            {
+                Log.Write($"crop preview failed {file}: {t.Exception?.InnerException}");
+                _overlay.Post(new { type = "result", ok = false, title = "Olmadı", detail = "Resim açılamadı" });
+                FinishSoon();
+                return;
+            }
+            var (src, w, h) = t.Result;
+            _overlay.Post(new { type = "crop-src", name = Path.GetFileName(file), src, w, h });
+        }));
+    }
+
+    private static (string Src, int Width, int Height) CropPreview(string path)
+    {
+        const int MaxSide = 1400;
+        using var full = FileActions.LoadOriented(path, out _);
+        double k = Math.Min(1.0, MaxSide / (double)Math.Max(full.Width, full.Height));
+        using var small = new Bitmap(full, Math.Max(1, (int)(full.Width * k)), Math.Max(1, (int)(full.Height * k)));
+        using var ms = new MemoryStream();
+        var jpeg = ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
+        using var ps = new EncoderParameters(1);
+        ps.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 85L);
+        small.Save(ms, jpeg, ps);
+        return ("data:image/jpeg;base64," + Convert.ToBase64String(ms.ToArray()), full.Width, full.Height);
+    }
+
+    private void RunSteps(List<string> steps, StepOptions options)
     {
         if (_files.Length == 0)
         {
@@ -222,7 +306,7 @@ internal sealed class CarkContext : ApplicationContext
         }
         string[] files = _files;
         Log.Write($"run {string.Join(">", steps)} on {string.Join(" | ", files)}");
-        Task.Run(() => FileActions.Run(files, steps)).ContinueWith(t =>
+        Task.Run(() => FileActions.Run(files, steps, options)).ContinueWith(t =>
         {
             _overlay.BeginInvoke(() =>
             {
@@ -272,6 +356,31 @@ internal sealed class CarkContext : ApplicationContext
         {
             CloseWheel();
             if (shotPath is not null) After(400, ExitThread);
+        });
+    }
+
+    /// <summary>Opens the crop panel on a real image at screen center, for checking the panel without a drag.</summary>
+    private void RunCropDemo(string image, string? shotPath)
+    {
+        Rectangle area = Screen.PrimaryScreen!.WorkingArea;
+        var center = new Point(area.Left + area.Width / 2, area.Top + area.Height / 2);
+        Log.Write($"crop demo {image} shot={shotPath ?? "-"}");
+        ShowWheel(WheelMode.Tools, center);
+        _files = [Path.GetFullPath(image)];
+        _dropping = true;
+        After(500, StartCrop);
+        if (shotPath is null) return;
+        After(1800, () =>
+        {
+            var b = _overlay.Bounds;
+            b.Inflate(40, 40);
+            using var bmp = new Bitmap(b.Width, b.Height);
+            using (var g = Graphics.FromImage(bmp))
+                g.CopyFromScreen(b.Location, Point.Empty, b.Size, CopyPixelOperation.SourceCopy);
+            bmp.Save(shotPath, ImageFormat.Png);
+            Log.Write($"crop demo shot saved {shotPath}");
+            CancelWheel();
+            After(400, ExitThread);
         });
     }
 

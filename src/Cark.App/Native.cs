@@ -80,9 +80,21 @@ internal static class Native
     [DllImport("user32.dll")]
     public static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
 
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmFlush();
+
     public static void SetCircleRegion(IntPtr hwnd, int width, int height, int inset)
     {
         IntPtr rgn = CreateEllipticRgn(inset, inset, width - inset + 1, height - inset + 1);
         SetWindowRgn(hwnd, rgn, true); // the system owns rgn after this call
+    }
+
+    public static void SetRoundRectRegion(IntPtr hwnd, int width, int height, int radius)
+    {
+        IntPtr rgn = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
+        SetWindowRgn(hwnd, rgn, true);
     }
 }

@@ -28,6 +28,7 @@ const BADGE = { pdf: '#FF8A65', docx: '#7EA6FF', txt: '#C9D1E0', png: '#5FD0FF',
 const MODE_NAME = { convert: 'Dönüştür', tools: 'Araçlar', send: 'Gönder' };
 
 // `ready` marks what the host can really do in this build; the rest says "yakında".
+// `tool` opens a panel on drop instead of running at once, so it never joins a chain.
 function actionsFor(file, mode) {
   const kind = file ? file.kind : 'other';
   if (mode === 'send') return [
@@ -38,7 +39,7 @@ function actionsFor(file, mode) {
   ];
   if (mode === 'tools') {
     if (kind === 'img') return [
-      { id: 'crop', label: 'Kırp', icon: IC.crop, prev: 'Oran seç, kaydet' },
+      { id: 'crop', label: 'Kırp', icon: IC.crop, ready: true, tool: true, prev: S.count > 1 ? 'Tek resim kırpılır' : 'Bırak: kırpma paneli açılır' },
       { id: 'cmp', label: 'Sıkıştır', icon: IC.compress, ready: true, prev: 'JPG, kalite %70' },
       { id: 'bg', label: 'Arka planı sil', icon: IC.erase, prev: 'Şeffaf PNG' },
       { id: 'loc', label: 'Konumu sil', icon: IC.pinoff, radar: true, ready: true, prev: 'Konum ve cihaz bilgisi silinir' },
@@ -143,7 +144,7 @@ function build() {
   S.acts.forEach((a, i) => {
     const mid = -90 + i * step;
     const g = document.createElement('div');
-    g.className = 'slice' + (a.ready ? '' : ' soon'); g.style.animationDelay = (i * 30) + 'ms';
+    g.className = 'slice' + (a.ready ? '' : ' soon') + (a.tool ? ' tool' : ''); g.style.animationDelay = (i * 30) + 'ms';
     const svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('width', '340'); svg.setAttribute('height', '340'); svg.setAttribute('viewBox', '0 0 340 340');
     const d = arc(mid - step / 2 + GAP / 2, mid + step / 2 - GAP / 2);
@@ -192,7 +193,7 @@ function renderCenter() {
     const pos = S.chain.findIndex(c => c.id === h.id);
     if (pos >= 0) setHint(`Zincirde ${pos + 1}. adım · bırak`, 'done');
     else if (S.chain.length) setHint(`Bırak: ${S.chain.length + 1} adım birden`);
-    else if (h.ready) setHint('Beklersen zincire eklenir', 'waiting');
+    else if (h.ready && !h.tool) setHint('Beklersen zincire eklenir', 'waiting');
   } else if (S.chain.length) {
     titleEl.textContent = 'Zincir';
     subEl.textContent = S.chain.map(c => c.label).join(' → ');
@@ -225,7 +226,7 @@ function setHover(idx) {
     const dw = a._slice.querySelector('.dwell');
     dw.style.animation = 'none'; void dw.getBoundingClientRect(); dw.style.animation = '';
     sfx.tick();
-    if (a.ready) dwellTimer = setTimeout(lockCurrent, DWELL_MS);
+    if (a.ready && !a.tool) dwellTimer = setTimeout(lockCurrent, DWELL_MS);
   }
   paint();
 }
@@ -251,14 +252,17 @@ function hitTest(x, y) {
   return ((Math.round(ang / step) % n) + n) % n;
 }
 
-function fit() { document.documentElement.style.setProperty('--fit', String(innerWidth / 340)); }
+// The page is authored in CSS px for a base width (340 for the wheel, the panel width while a
+// panel is up) and scaled to the real window, whatever WebView2's own zoom says.
+let baseW = 340;
+function fit() { document.documentElement.style.setProperty('--fit', String(innerWidth / baseW)); }
 addEventListener('resize', fit);
 fit();
 
 // ---------- host messages ----------
 const handlers = {
   backdrop(m) {
-    $('glass').style.backgroundImage = m.src ? `url("${m.src}")` : 'none';
+    document.documentElement.style.setProperty('--backdrop', m.src ? `url("${m.src}")` : 'none');
   },
   open(m) {
     Object.assign(S, { open: true, mode: m.mode || 'convert', file: null, count: 0, sens: [], chain: [], busy: false });
@@ -308,6 +312,15 @@ const handlers = {
       return;
     }
     const steps = S.chain.map(c => c.id);
+    if (cur.tool) {
+      S.busy = true;
+      titleEl.textContent = cur.label;
+      subEl.textContent = 'Açılıyor';
+      setHint('');
+      Crop.steps = steps;
+      post({ type: 'tool', tool: cur.id });
+      return;
+    }
     if (steps[steps.length - 1] !== cur.id) steps.push(cur.id);
     S.busy = true;
     titleEl.textContent = 'Çalışıyor';
@@ -316,6 +329,7 @@ const handlers = {
     post({ type: 'run', steps });
   },
   result(m) {
+    if (Crop.open) { Crop.result(m); return; }
     wheel.classList.add('result');
     wheel.classList.toggle('ok', !!m.ok);
     if (m.ok && m.ext) {
@@ -331,13 +345,201 @@ const handlers = {
     subEl.classList.remove('radar-text');
     if (m.ok) { sfx.flip(); setTimeout(sfx.done, 160); } else sfx.fail();
   },
+  'crop-src'(m) { Crop.load(m); },
+  'panel-open'(m) { Crop.show(m); },
+  key(m) { if (Crop.open) Crop.key(m.key); },
   close() {
+    if (Crop.open) { Crop.close(); return; }
     S.open = false;
     clearTimeout(dwellTimer);
     wheel.classList.add('closing');
     setTimeout(() => { wheel.className = 'wheel hidden'; }, 170);
   }
 };
+
+// ---------- crop panel ----------
+// Layout in panel CSS px; the host sizes the window from the height load() reports.
+const PANEL = { w: 560, padTop: 18, padBottom: 20, head: 32, gap: 14, foot: 44, stageMaxW: 520, stageMaxH: 360 };
+const PRESETS = [['free', 'Serbest', 0], ['sq', '1:1', 1], ['vs', 'Vesikalık', 35 / 45], ['wide', '16:9', 16 / 9]];
+const MIN_CROP = 16; // image px
+const panelEl = $('panel'), stageEl = $('stage'), rectEl = $('crop-rect'), cropImg = $('crop-img');
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+const Crop = {
+  open: false, busy: false, steps: [], W: 0, H: 0, k: 1, ph: 0, R: null, preset: 'free', drag: null,
+
+  load(m) {
+    Object.assign(this, { W: m.w, H: m.h, busy: false, preset: 'free', drag: null });
+    this.k = Math.min(PANEL.stageMaxW / m.w, PANEL.stageMaxH / m.h);
+    const sw = Math.max(1, Math.round(m.w * this.k)), sh = Math.max(1, Math.round(m.h * this.k));
+    stageEl.style.width = sw + 'px'; stageEl.style.height = sh + 'px';
+    cropImg.src = m.src;
+    $('crop-file').textContent = m.name;
+    this.ph = PANEL.padTop + PANEL.head + PANEL.gap + sh + PANEL.gap + PANEL.foot + PANEL.padBottom;
+    panelEl.style.setProperty('--pw', PANEL.w + 'px');
+    panelEl.style.setProperty('--ph', this.ph + 'px');
+    const inset = 0.08;
+    this.R = { x: m.w * inset, y: m.h * inset, w: m.w * (1 - 2 * inset), h: m.h * (1 - 2 * inset) };
+    panelEl.classList.remove('done');
+    $('crop-apply').disabled = false; $('crop-cancel').disabled = false;
+    this.renderPresets(); this.render();
+    post({ type: 'panel-size', w: PANEL.w, h: this.ph });
+  },
+
+  show(m) {
+    this.open = true;
+    baseW = PANEL.w; fit();
+    wheel.className = 'wheel hidden';
+    panelEl.style.setProperty('--ox', m.ox + 'px');
+    panelEl.style.setProperty('--oy', m.oy + 'px');
+    panelEl.className = 'panel';
+    void panelEl.offsetWidth; // restart the opening animation
+    panelEl.classList.add('opening');
+    setRim(PANEL.w / 2, 0);
+    sfx.open();
+  },
+
+  close() {
+    this.open = false;
+    this.drag = null;
+    S.open = false;
+    clearTimeout(dwellTimer);
+    panelEl.classList.remove('opening');
+    panelEl.classList.add('closing');
+    setTimeout(() => { panelEl.className = 'panel hidden'; wheel.className = 'wheel hidden'; baseW = 340; fit(); }, 170);
+  },
+
+  ratio() { return PRESETS.find(p => p[0] === this.preset)[2]; },
+
+  renderPresets() {
+    const box = $('crop-presets');
+    box.textContent = '';
+    PRESETS.forEach(([id, label]) => {
+      const b = document.createElement('button');
+      b.className = 'chip' + (id === this.preset ? ' on' : '');
+      b.textContent = label;
+      b.addEventListener('click', () => this.pick(id));
+      box.appendChild(b);
+    });
+    stageEl.classList.toggle('locked', this.ratio() > 0);
+  },
+
+  pick(id) {
+    if (this.busy || id === this.preset) return;
+    this.preset = id;
+    const r = this.ratio();
+    if (r > 0) {
+      // the largest box of that shape that fits, kept around the current selection
+      const w = Math.min(this.W, this.H * r) * 0.92, h = w / r;
+      const cx = this.R.x + this.R.w / 2, cy = this.R.y + this.R.h / 2;
+      this.R = { x: clamp(cx - w / 2, 0, this.W - w), y: clamp(cy - h / 2, 0, this.H - h), w, h };
+    }
+    rectEl.classList.add('anim');
+    setTimeout(() => rectEl.classList.remove('anim'), 380);
+    this.renderPresets(); this.render();
+    sfx.tick();
+  },
+
+  render() {
+    const k = this.k, R = this.R;
+    rectEl.style.left = (R.x * k) + 'px'; rectEl.style.top = (R.y * k) + 'px';
+    rectEl.style.width = (R.w * k) + 'px'; rectEl.style.height = (R.h * k) + 'px';
+    if (!this.busy) $('crop-info').textContent = `${Math.round(R.w)} × ${Math.round(R.h)} px`;
+  },
+
+  // pointer position in image pixels (getBoundingClientRect already includes the --fit scale)
+  at(e) {
+    const b = stageEl.getBoundingClientRect();
+    return { x: (e.clientX - b.left) / b.width * this.W, y: (e.clientY - b.top) / b.height * this.H };
+  },
+
+  down(e) {
+    if (!this.open || this.busy || !rectEl.contains(e.target)) return;
+    e.preventDefault();
+    const p = this.at(e);
+    this.drag = { h: e.target.dataset.h || 'move', off: { x: p.x - this.R.x, y: p.y - this.R.y }, R0: { ...this.R } };
+    stageEl.setPointerCapture(e.pointerId);
+  },
+
+  move(e) {
+    if (!this.drag) return;
+    const p = this.at(e), d = this.drag, R0 = d.R0, W = this.W, H = this.H;
+    if (d.h === 'move') {
+      this.R = { ...this.R, x: clamp(p.x - d.off.x, 0, W - this.R.w), y: clamp(p.y - d.off.y, 0, H - this.R.h) };
+    } else {
+      const dx = d.h.includes('e') ? 1 : d.h.includes('w') ? -1 : 0;
+      const dy = d.h.includes('s') ? 1 : d.h.includes('n') ? -1 : 0;
+      const r = this.ratio();
+      if (r > 0) {
+        // fixed shape: corners only, the opposite corner stays put
+        const ax = dx > 0 ? R0.x : R0.x + R0.w, ay = dy > 0 ? R0.y : R0.y + R0.h;
+        const availW = dx > 0 ? W - ax : ax, availH = dy > 0 ? H - ay : ay;
+        let w = clamp(Math.max(Math.abs(p.x - ax), Math.abs(p.y - ay) * r), MIN_CROP, availW), h = w / r;
+        if (h > availH) { h = availH; w = h * r; }
+        this.R = { x: dx > 0 ? ax : ax - w, y: dy > 0 ? ay : ay - h, w, h };
+      } else {
+        let l = R0.x, t = R0.y, rt = R0.x + R0.w, b = R0.y + R0.h;
+        if (dx > 0) rt = clamp(p.x, l + MIN_CROP, W);
+        if (dx < 0) l = clamp(p.x, 0, rt - MIN_CROP);
+        if (dy > 0) b = clamp(p.y, t + MIN_CROP, H);
+        if (dy < 0) t = clamp(p.y, 0, b - MIN_CROP);
+        this.R = { x: l, y: t, w: rt - l, h: b - t };
+      }
+    }
+    this.render();
+  },
+
+  up(e) {
+    if (!this.drag) return;
+    this.drag = null;
+    if (stageEl.hasPointerCapture(e.pointerId)) stageEl.releasePointerCapture(e.pointerId);
+  },
+
+  apply() {
+    if (!this.open || this.busy) return;
+    this.busy = true;
+    $('crop-apply').disabled = true; $('crop-cancel').disabled = true;
+    $('crop-info').textContent = 'Kırpılıyor';
+    const R = this.R, x = Math.round(R.x), y = Math.round(R.y);
+    const crop = { x, y, w: Math.min(this.W - x, Math.round(R.w)), h: Math.min(this.H - y, Math.round(R.h)) };
+    post({ type: 'run', steps: [...this.steps, 'crop'], crop });
+  },
+
+  cancel() {
+    if (!this.open || this.busy) return;
+    post({ type: 'cancel' });
+  },
+
+  key(k) {
+    if (k === 'esc') this.cancel();
+    else if (k === 'enter') this.apply();
+  },
+
+  result(m) {
+    panelEl.classList.toggle('done', !!m.ok);
+    $('crop-info').textContent = m.ok ? `${m.title} · ${m.detail}` : `${m.title}: ${m.detail}`;
+    if (m.ok) { sfx.flip(); setTimeout(sfx.done, 160); } else sfx.fail();
+  }
+};
+
+// a light that follows the pointer around the panel rim, like the wheel's
+function setRim(x, y) {
+  const ang = Math.atan2(y - Crop.ph / 2, x - PANEL.w / 2) * 180 / Math.PI + 90 - 45;
+  $('panel-light').style.background = `conic-gradient(from ${ang.toFixed(1)}deg, rgba(255,255,255,.14) 0deg, rgba(255,255,255,.9) 45deg, rgba(255,255,255,.14) 90deg, rgba(255,255,255,.14) 360deg)`;
+}
+
+stageEl.addEventListener('pointerdown', e => Crop.down(e));
+stageEl.addEventListener('pointermove', e => Crop.move(e));
+stageEl.addEventListener('pointerup', e => Crop.up(e));
+stageEl.addEventListener('pointercancel', e => Crop.up(e));
+$('crop-apply').addEventListener('click', () => Crop.apply());
+$('crop-cancel').addEventListener('click', () => Crop.cancel());
+panelEl.addEventListener('pointermove', e => {
+  if (!Crop.open || panelEl.classList.contains('done')) return;
+  const b = panelEl.getBoundingClientRect(), f = b.width / PANEL.w;
+  setRim((e.clientX - b.left) / f, (e.clientY - b.top) / f);
+});
 
 if (window.chrome && chrome.webview) {
   chrome.webview.addEventListener('message', e => {
