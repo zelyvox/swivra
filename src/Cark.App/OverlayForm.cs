@@ -16,10 +16,14 @@ internal sealed class OverlayForm : Form
     public const int CssSize = 340;       // must match --size in web/wheel.css
     public const int CssGlassInset = 18;  // glass radius 152 => (340 - 304) / 2
     public const int CssBleed = 24;       // extra snapshot margin so the blur has no dark edge
+    public const int CssPanelRadius = 24; // must match .panel border-radius in web/wheel.css
 
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.Transparent };
 
     public bool Ready { get; private set; }
+
+    /// <summary>Where the wheel was last centered, in physical screen pixels.</summary>
+    public Point Center { get; private set; }
 
     public event Action<JsonElement>? Message;
 
@@ -90,6 +94,7 @@ internal sealed class OverlayForm : Form
     /// <summary>Centers the wheel on a physical screen point and shows it without stealing focus.</summary>
     public void ShowAt(Point center)
     {
+        Center = center;
         double scale = Native.ScaleAt(center);
         int size = (int)Math.Round(CssSize * scale);
         Rectangle area = Screen.FromPoint(center).WorkingArea;
@@ -101,6 +106,33 @@ internal sealed class OverlayForm : Form
         int bleed = (int)Math.Round(CssBleed * scale);
         Post(new { type = "backdrop", src = Snapshot(Rectangle.Inflate(Bounds, bleed, bleed)) });
         Show();
+    }
+
+    /// <summary>
+    /// Grows the window from the wheel into a tool panel of the given CSS size, centered on the
+    /// wheel as far as the screen allows. Returns the wheel center in panel CSS units, so the
+    /// panel can scale out of exactly where the wheel was.
+    /// </summary>
+    public PointF ShowPanel(int cssWidth, int cssHeight)
+    {
+        double scale = Native.ScaleAt(Center);
+        int w = (int)Math.Round(cssWidth * scale), h = (int)Math.Round(cssHeight * scale);
+        Rectangle area = Screen.FromPoint(Center).WorkingArea;
+        int x = Math.Clamp(Center.X - w / 2, area.Left, Math.Max(area.Left, area.Right - w));
+        int y = Math.Clamp(Center.Y - h / 2, area.Top, Math.Max(area.Top, area.Bottom - h));
+        var bounds = new Rectangle(x, y, w, h);
+
+        // The glass must show the desktop, not the wheel that is still on screen.
+        Hide();
+        Native.DwmFlush();
+        int bleed = (int)Math.Round(CssBleed * scale);
+        string backdrop = Snapshot(Rectangle.Inflate(bounds, bleed, bleed));
+
+        Bounds = bounds;
+        Native.SetRoundRectRegion(Handle, w, h, (int)Math.Round(CssPanelRadius * scale));
+        Post(new { type = "backdrop", src = backdrop });
+        Show();
+        return new PointF((float)((Center.X - x) / scale), (float)((Center.Y - y) / scale));
     }
 
     /// <summary>Maps a physical screen point into wheel CSS units, whatever the WebView's own zoom.</summary>

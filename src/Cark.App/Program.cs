@@ -17,7 +17,15 @@ static class Program
                 password = rest[pw + 1];
                 rest.RemoveRange(pw, 2);
             }
-            return HeadlessRun(args[run + 1], rest.ToArray(), new StepOptions(Password: password));
+            Rectangle? crop = null;
+            int cr = rest.IndexOf("--crop");
+            if (cr >= 0 && cr + 1 < rest.Count)
+            {
+                int[] v = rest[cr + 1].Split(',').Select(int.Parse).ToArray();
+                crop = new Rectangle(v[0], v[1], v[2], v[3]);
+                rest.RemoveRange(cr, 2);
+            }
+            return HeadlessRun(args[run + 1], rest.ToArray(), new StepOptions(crop, password));
         }
         int radar = Array.IndexOf(args, "--radar");
         if (radar >= 0 && radar + 1 < args.Length)
@@ -41,7 +49,7 @@ static class Program
         return 0;
     }
 
-    /// <summary>--run step,step,... [--password pw] file1 [file2 ...]: runs the steps and logs the result.</summary>
+    /// <summary>--run step,step,... [--password pw] [--crop x,y,w,h] file1 [file2 ...]: runs the steps and logs the result.</summary>
     private static int HeadlessRun(string stepList, string[] files, StepOptions options)
     {
         var steps = stepList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);

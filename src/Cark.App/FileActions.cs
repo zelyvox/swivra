@@ -50,7 +50,7 @@ internal static class FileActions
         ["path"] = "Yolu kopyala", ["wa"] = "WhatsApp", ["mail"] = "Mail", ["tel"] = "Telefona",
     };
 
-    private static readonly HashSet<string> ImageSteps = new() { "png", "jpg", "bmp", "rot", "loc", "rs", "cmp" };
+    private static readonly HashSet<string> ImageSteps = new() { "png", "jpg", "bmp", "rot", "loc", "rs", "cmp", "crop" };
 
     public static ActionResult Run(IReadOnlyList<string> files, IReadOnlyList<string> steps, StepOptions? options = null)
     {
@@ -142,6 +142,7 @@ internal static class FileActions
         {
             switch (s)
             {
+                case "crop": suffix += "-kirpik"; break;
                 case "png" or "jpg" or "bmp": ext = s; break;
                 case "rot": rotations++; suffix += "-dondu"; break;
                 case "loc": strip = true; suffix += "-temiz"; break;
@@ -150,10 +151,21 @@ internal static class FileActions
             }
         }
 
-        using var source = LoadDetached(path, out PropertyItem[] props);
-        Bitmap work = new(source);
+        if (steps.Contains("crop") && options.Crop is null) throw new InvalidOperationException("crop step without a crop rectangle");
+
+        Bitmap work = LoadOriented(path, out PropertyItem[] props);
         try
         {
+            // Crop first: the panel picked the rectangle on the upright original, before any rotate step.
+            if (options.Crop is Rectangle crop && steps.Contains("crop"))
+            {
+                crop.Intersect(new Rectangle(0, 0, work.Width, work.Height));
+                if (crop.Width < 1 || crop.Height < 1) throw new InvalidOperationException($"crop {options.Crop} outside {work.Size}");
+                var cropped = work.Clone(crop, work.PixelFormat);
+                work.Dispose();
+                work = cropped;
+            }
+
             for (int i = 0; i < rotations; i++) work.RotateFlip(RotateFlipType.Rotate90FlipNone);
 
             if (maxWidth is int mw && work.Width > mw)
@@ -191,14 +203,34 @@ internal static class FileActions
         }
     }
 
-    private static Image LoadDetached(string path, out PropertyItem[] props)
+    /// <summary>
+    /// Loads an image the way photo viewers show it: EXIF orientation applied to the pixels.
+    /// Phones store portrait shots sideways plus a tag; ignoring it turns them on their side.
+    /// The file is read into memory so it is not locked while we work.
+    /// </summary>
+    internal static Bitmap LoadOriented(string path, out PropertyItem[] props)
     {
-        // Read into memory so the source file is not locked while we work.
-        var bytes = File.ReadAllBytes(path);
-        var ms = new MemoryStream(bytes);
-        var img = Image.FromStream(ms);
+        using var ms = new MemoryStream(File.ReadAllBytes(path));
+        using var img = Image.FromStream(ms);
         props = img.PropertyItems;
-        return img;
+        var bmp = new Bitmap(img);
+        var orientation = props.FirstOrDefault(p => p.Id == 0x0112);
+        if (orientation?.Value is { Length: >= 2 } v)
+        {
+            RotateFlipType? flip = BitConverter.ToUInt16(v, 0) switch
+            {
+                2 => RotateFlipType.RotateNoneFlipX,
+                3 => RotateFlipType.Rotate180FlipNone,
+                4 => RotateFlipType.RotateNoneFlipY,
+                5 => RotateFlipType.Rotate90FlipX,
+                6 => RotateFlipType.Rotate90FlipNone,
+                7 => RotateFlipType.Rotate270FlipX,
+                8 => RotateFlipType.Rotate270FlipNone,
+                _ => null,
+            };
+            if (flip is not null) bmp.RotateFlip(flip.Value);
+        }
+        return bmp;
     }
 
     private static void Save(Bitmap bmp, string target, string ext, long jpegQuality)
