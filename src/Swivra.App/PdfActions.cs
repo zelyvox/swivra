@@ -14,7 +14,7 @@ namespace Swivra.App;
 /// </summary>
 internal static class PdfActions
 {
-    public static readonly HashSet<string> Steps = new() { "png", "jpg", "txt", "rot", "split", "merge", "cmp", "lock" };
+    public static readonly HashSet<string> Steps = new() { "png", "jpg", "txt", "rot", "split", "merge", "cmp", "lock", "hide", "docx" };
 
     private const int RenderDpi = 200;
     private const int JpgQuality = 90;
@@ -23,8 +23,8 @@ internal static class PdfActions
     private const long CompressMinStream = 10 * 1024;   // smaller images are not worth a lossy pass
     private const double CompressMinGain = 0.05;
 
-    /// <summary>Steps nothing can follow: the output is not a single PDF, or (lock) later steps would need the password.</summary>
-    private static readonly HashSet<string> Terminal = new() { "png", "jpg", "txt", "split", "lock" };
+    /// <summary>Steps nothing can follow: the output is not a single PDF (docx included), or (lock) later steps would need the password.</summary>
+    private static readonly HashSet<string> Terminal = new() { "png", "jpg", "txt", "docx", "split", "lock" };
 
     private sealed class PdfFailure(ActionResult result) : Exception
     {
@@ -55,6 +55,7 @@ internal static class PdfActions
             string suffix = "";
             string output = path;
             bool isFolder = false;
+            var notes = new List<string>();   // honest remarks from earlier steps (e.g. redaction count), shown with the result
 
             // The last step writes next to the original; earlier ones go to a temp folder.
             string StepTarget(int index, bool isLast, string stepSuffix)
@@ -102,7 +103,7 @@ internal static class PdfActions
                         }
                         suffix += Lang.T("-kucuk", "-small");
                         input = output = cmpTarget;
-                        if (last) return new ActionResult(true, Lang.T("Hazır", "Ready"), $"{Path.GetFileName(cmpTarget)} · {FileKinds.HumanSize(before)} → {FileKinds.HumanSize(after)}", cmpTarget, "pdf");
+                        if (last) return new ActionResult(true, Lang.T("Hazır", "Ready"), JoinNotes($"{Path.GetFileName(cmpTarget)} · {FileKinds.HumanSize(before)} → {FileKinds.HumanSize(after)}", notes), cmpTarget, "pdf");
                         break;
                     case "lock":
                         suffix += Lang.T("-sifreli", "-locked");
@@ -110,6 +111,26 @@ internal static class PdfActions
                         Lock(input, lockTarget, options.Password!);
                         input = output = lockTarget;
                         break;
+                    case "hide":
+                        string hideTarget = StepTarget(i, last, suffix + Lang.T("-gizli", "-redacted"));
+                        var hidden = PdfRedact.Hide(input, hideTarget);
+                        if (hidden.Items == 0)
+                        {
+                            // Nothing to hide: no file, and the rest of the chain has nothing to work on.
+                            Cleanup([hideTarget]);
+                            created.Remove(hideTarget);
+                            string scanNote = hidden.ScanPages > 0 ? " " + Lang.T("Taranmış sayfalar (görsel) okunamadı: OCR yok.", "Scanned pages (images) could not be read: no OCR.") : "";
+                            return new ActionResult(true, Lang.T("Gizle", "Hide"), Lang.T("Gizlenecek bir şey yok.", "Nothing to hide.") + scanNote);
+                        }
+                        suffix += Lang.T("-gizli", "-redacted");
+                        input = output = hideTarget;
+                        notes.Add(Lang.T($"{hidden.Items} öğe gizlendi · metin artık seçilemez", $"{hidden.Items} item(s) hidden · text is no longer selectable")
+                            + (hidden.ScanPages > 0 ? " · " + Lang.T($"{hidden.ScanPages} taranmış sayfa okunamadı (OCR yok)", $"{hidden.ScanPages} scanned page(s) not checked (no OCR)") : ""));
+                        break;
+                    case "docx":
+                        var word = PdfWord.Convert(input, origDir, baseName, created);
+                        if (!word.Ok) throw new PdfFailure(word);
+                        return word with { Detail = JoinNotes(word.Detail, notes) };
                     case "split":
                         output = Split(input, origDir, baseName, created);
                         isFolder = true;
@@ -126,7 +147,7 @@ internal static class PdfActions
             }
 
             string? ext = isFolder ? null : Path.GetExtension(output).TrimStart('.').ToLowerInvariant();
-            return new ActionResult(true, Lang.T("Hazır", "Ready"), Path.GetFileName(output), output, ext);
+            return new ActionResult(true, Lang.T("Hazır", "Ready"), JoinNotes(Path.GetFileName(output), notes), output, ext);
         }
         catch (PdfFailure f)
         {
@@ -153,6 +174,8 @@ internal static class PdfActions
             }
         }
     }
+
+    private static string JoinNotes(string detail, List<string> notes) => notes.Count == 0 ? detail : $"{detail} · {string.Join(" · ", notes)}";
 
     /// <summary>Merges the PDFs in the given order into one file next to the first.</summary>
     public static ActionResult Merge(IReadOnlyList<string> files)

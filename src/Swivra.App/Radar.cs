@@ -56,12 +56,29 @@ internal static partial class Radar
         }
     }
 
+    public enum HitKind { Tc, Iban, Email, Phone }
+
+    /// <summary>One sensitive match inside a text: where it starts and how long it is.</summary>
+    public readonly record struct Hit(HitKind Kind, int Index, int Length);
+
+    /// <summary>All validated matches (TC checksum, IBAN mod-97, e-mail, phone) with positions; shared by the radar and PDF redaction.</summary>
+    public static List<Hit> FindAll(string text)
+    {
+        var hits = new List<Hit>();
+        foreach (Match m in TcCandidate().Matches(text)) if (IsValidTc(m.Value)) hits.Add(new Hit(HitKind.Tc, m.Index, m.Length));
+        foreach (Match m in IbanCandidate().Matches(text)) if (IsValidIban(m.Value)) hits.Add(new Hit(HitKind.Iban, m.Index, m.Length));
+        foreach (Match m in Email().Matches(text)) hits.Add(new Hit(HitKind.Email, m.Index, m.Length));
+        foreach (Match m in Phone().Matches(text)) hits.Add(new Hit(HitKind.Phone, m.Index, m.Length));
+        return hits;
+    }
+
     public static void ScanText(string text, List<string> found)
     {
-        if (TcCandidate().Matches(text).Any(m => IsValidTc(m.Value))) found.Add(Lang.T("TC kimlik no", "Turkish ID number"));
-        if (IbanCandidate().Matches(text).Any(m => IsValidIban(m.Value))) found.Add("IBAN");
-        if (Email().IsMatch(text)) found.Add(Lang.T("E-posta", "Email"));
-        if (Phone().IsMatch(text)) found.Add(Lang.T("Telefon", "Phone"));
+        var kinds = FindAll(text).Select(h => h.Kind).ToHashSet();
+        if (kinds.Contains(HitKind.Tc)) found.Add(Lang.T("TC kimlik no", "Turkish ID number"));
+        if (kinds.Contains(HitKind.Iban)) found.Add("IBAN");
+        if (kinds.Contains(HitKind.Email)) found.Add(Lang.T("E-posta", "Email"));
+        if (kinds.Contains(HitKind.Phone)) found.Add(Lang.T("Telefon", "Phone"));
     }
 
     /// <summary>

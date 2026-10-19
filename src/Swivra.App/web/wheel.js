@@ -52,7 +52,7 @@ function actionsFor(file, mode) {
     ];
     if (kind === 'pdf') return [
       { id: 'cmp', label: t('Sıkıştır', 'Compress'), icon: IC.compress, ready: true, prev: t('Görseller küçültülür', 'Images are downscaled') },
-      { id: 'hide', label: t('Gizle', 'Hide'), icon: IC.hide, radar: true, prev: t('Hassas alanlar kapatılır', 'Sensitive areas are covered') },
+      { id: 'hide', label: t('Gizle', 'Hide'), icon: IC.hide, radar: true, ready: true, prev: t('Hassas veri silinir · metin seçilemez olur', 'Sensitive data removed · text not selectable') },
       { id: 'lock', label: t('Şifrele', 'Lock'), icon: IC.lock, ready: true, tool: true, prev: t('Bırak: parola sorulur', 'Drop: asks for a password') },
       { id: 'split', label: t('Böl', 'Split'), icon: IC.split, ready: true, prev: t('Her sayfa ayrı dosya', 'One file per page') },
       { id: 'merge', label: t('Birleştir', 'Merge'), icon: IC.merge, ready: true, prev: S.count > 1 ? t(`${S.count} PDF tek dosya`, `${S.count} PDFs into one file`) : t("Başka PDF'lerle tek dosya", 'One file with other PDFs') },
@@ -65,7 +65,7 @@ function actionsFor(file, mode) {
     ];
   }
   if (kind === 'pdf') return [
-    { id: 'docx', label: 'Word', icon: IC.doc, prev: t('Düzen korunur', 'Layout is kept') },
+    { id: 'docx', label: 'Word', icon: IC.doc, ready: true, prev: t("Metin Word'e · LibreOffice varsa düzen de", 'Text to Word · layout too with LibreOffice') },
     { id: 'txt', label: t('Metin', 'Text'), icon: IC.text, ready: true, prev: t('Yalnız metin, düz .txt', 'Text only, plain .txt') },
     { id: 'png', label: 'PNG', icon: IC.image, ready: true, prev: t('Her sayfa bir görsel · 200 dpi', 'One image per page · 200 dpi') },
     { id: 'jpg', label: 'JPG', icon: IC.image, ready: true, prev: t('Her sayfa bir görsel · 200 dpi', 'One image per page · 200 dpi') }

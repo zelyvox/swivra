@@ -72,7 +72,8 @@ internal static class FileActions
         var results = files.Select(f => RunOne(f, fileSteps, copyPath, options)).ToList();
         if (results.Count == 1) return results[0];
 
-        var ok = results.Where(r => r.Ok).ToList();
+        // A step that succeeded but made no file (e.g. Hide with nothing to hide) counts as skipped.
+        var ok = results.Where(r => r.Ok && (r.OutputPath is not null || fileSteps.Count == 0)).ToList();
         if (ok.Count == 0) return results[0];
         string? clip = copyPath ? string.Join(Environment.NewLine, ok.Select(r => r.ClipboardText)) : null;
         string? ext = ok.Select(r => r.OutputExt).Distinct().Count() == 1 ? ok[0].OutputExt : null;
