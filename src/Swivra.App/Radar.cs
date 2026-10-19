@@ -58,24 +58,34 @@ internal static partial class Radar
         }
     }
 
-    public static void ScanText(string text, List<string> found)
+    public enum HitKind { Tc, Iban, Email, Phone }
+
+    /// <summary>One sensitive match inside a text: where it starts and how long it is.</summary>
+    public readonly record struct Hit(HitKind Kind, int Index, int Length);
+
+    /// <summary>All validated matches (TC checksum, IBAN mod-97, e-mail, phone) with positions; shared by the radar and PDF redaction.</summary>
+    public static List<Hit> FindAll(string text)
     {
-        if (TcCandidate().Matches(text).Any(m => IsValidTc(m.Value))) found.Add(Lang.T("TC kimlik no", "Turkish ID number"));
-        if (IbanCandidate().Matches(text).Any(m => IsValidIban(m.Value))) found.Add("IBAN");
-        if (Email().IsMatch(text)) found.Add(Lang.T("E-posta", "Email"));
-        if (Phone().IsMatch(text)) found.Add(Lang.T("Telefon", "Phone"));
+        var hits = new List<Hit>();
+        foreach (Match m in TcCandidate().Matches(text)) if (IsValidTc(m.Value)) hits.Add(new Hit(HitKind.Tc, m.Index, m.Length));
+        foreach (Match m in IbanCandidate().Matches(text)) if (IsValidIban(m.Value)) hits.Add(new Hit(HitKind.Iban, m.Index, m.Length));
+        foreach (Match m in Email().Matches(text)) hits.Add(new Hit(HitKind.Email, m.Index, m.Length));
+        foreach (Match m in Phone().Matches(text)) hits.Add(new Hit(HitKind.Phone, m.Index, m.Length));
+        return hits;
     }
 
-    /// <summary>Spans (start, length) of every valid TC id, IBAN, e-mail and phone number in the text, for masking.</summary>
-    public static List<(int Start, int Length)> FindSensitiveSpans(string text)
+    public static void ScanText(string text, List<string> found)
     {
-        var spans = new List<(int Start, int Length)>();
-        spans.AddRange(TcCandidate().Matches(text).Where(m => IsValidTc(m.Value)).Select(m => (m.Index, m.Length)));
-        spans.AddRange(IbanCandidate().Matches(text).Where(m => IsValidIban(m.Value)).Select(m => (m.Index, m.Length)));
-        spans.AddRange(Email().Matches(text).Select(m => (m.Index, m.Length)));
-        spans.AddRange(Phone().Matches(text).Select(m => (m.Index, m.Length)));
-        return spans;
+        var kinds = FindAll(text).Select(h => h.Kind).ToHashSet();
+        if (kinds.Contains(HitKind.Tc)) found.Add(Lang.T("TC kimlik no", "Turkish ID number"));
+        if (kinds.Contains(HitKind.Iban)) found.Add("IBAN");
+        if (kinds.Contains(HitKind.Email)) found.Add(Lang.T("E-posta", "Email"));
+        if (kinds.Contains(HitKind.Phone)) found.Add(Lang.T("Telefon", "Phone"));
     }
+
+    /// <summary>Spans (start, length) of every sensitive item in the text, for masking.</summary>
+    public static List<(int Start, int Length)> FindSensitiveSpans(string text) =>
+        FindAll(text).Select(h => (h.Index, h.Length)).ToList();
 
     /// <summary>
     /// TC kimlik no: 11 digits, first non-zero.
