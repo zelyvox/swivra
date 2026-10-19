@@ -37,7 +37,7 @@ function actionsFor(file, mode) {
   const kind = file ? file.kind : 'other';
   if (mode === 'send') return [
     { id: 'wa', label: 'WhatsApp', icon: IC.chat, send: true, ready: true, prev: t('Panoya, sonra Ctrl+V', 'To clipboard, then Ctrl+V') },
-    { id: 'mail', label: 'Mail', icon: IC.mail, send: true, ready: true, prev: t('Yeni ileti, dosya ekli', 'New message with the file attached') },
+    { id: 'mail', label: 'Mail', icon: IC.mail, send: true, ready: true, prev: t('Yeni ileti, dosya ekli · program yoksa Gmail', 'New message with the file · Gmail if no mail app') },
     { id: 'tel', label: t('Telefona', 'To phone'), icon: IC.phone, send: true, ready: true, tool: true, prev: t('Bırak: QR kod açılır', 'Drop: opens a QR code') },
     { id: 'path', label: t('Yolu kopyala', 'Copy path'), icon: IC.link, send: true, ready: true, prev: t('Panoya kopyalanır', 'Copied to the clipboard') }
   ];

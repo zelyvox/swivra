@@ -121,10 +121,25 @@ internal static class SendActions
             why = $"MAPISendMail returned {rc}";
         }
 
-        // No usable mail client (typical with web mail): same route as WhatsApp.
-        Log.Write($"mail fallback to clipboard: {why}");
-        string detail = Lang.T("Mail istemcisi yok · dosyalar panoda, ileti ekine Ctrl+V", "No mail client · files on clipboard, Ctrl+V in your message") + note;
-        return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, OnUi: () => SetClipboardFiles(attach));
+        // No usable mail client (typical with web mail): files go on the clipboard like for WhatsApp,
+        // and a new Gmail message opens in the browser. No web mail lets a link attach files, so the
+        // user pastes or drags them in.
+        Log.Write($"mail fallback to clipboard + Gmail: {why}");
+        string detail = Lang.T("Gmail açıldı · dosyalar panoda, iletiye Ctrl+V ya da sürükle", "Gmail opened · files on clipboard, Ctrl+V or drag them into the message") + note;
+        return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, OnUi: () =>
+        {
+            if (!SetClipboardFiles(attach)) return false;
+            OpenGmailCompose();
+            return true;
+        });
+    }
+
+    private const string GmailCompose = "https://mail.google.com/mail/?view=cm&fs=1";
+
+    private static void OpenGmailCompose()
+    {
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(GmailCompose) { UseShellExecute = true }); }
+        catch (Exception ex) { Log.Write($"gmail launch failed: {ex.Message}"); }
     }
 
     private static bool MapiClientConfigured()
