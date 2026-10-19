@@ -68,11 +68,11 @@ internal sealed class CarkContext : ApplicationContext
                 int shot = Array.IndexOf(_args, "--shot");
                 RunDemo(shot >= 0 && shot + 1 < _args.Length ? _args[shot + 1] : null);
             }
-            int demoCrop = Array.IndexOf(_args, "--demo-crop");
-            if (demoCrop >= 0 && demoCrop + 1 < _args.Length)
+            int demoTool = Array.IndexOf(_args, "--demo-tool");
+            if (demoTool >= 0 && demoTool + 2 < _args.Length)
             {
                 int shot = Array.IndexOf(_args, "--shot");
-                RunCropDemo(_args[demoCrop + 1], shot >= 0 && shot + 1 < _args.Length ? _args[shot + 1] : null);
+                RunToolDemo(_args[demoTool + 1], _args[demoTool + 2], shot >= 0 && shot + 1 < _args.Length ? _args[shot + 1] : null);
             }
         }
         catch (Exception ex)
@@ -166,6 +166,7 @@ internal sealed class CarkContext : ApplicationContext
         if (!_visible) return;
         _visible = false;
         _panel = false;
+        _overlay.DropFocus();
         _overlay.Post(new { type = "close" });
         _catcher.Hide();
         var t = new System.Windows.Forms.Timer { Interval = 180 };
@@ -232,12 +233,15 @@ internal sealed class CarkContext : ApplicationContext
                 RunSteps(steps, ReadOptions(msg));
                 break;
             case "tool":
-                if (msg.TryGetProperty("tool", out var tool) && tool.GetString() == "crop") StartCrop();
+                string? tool = msg.TryGetProperty("tool", out var tl) ? tl.GetString() : null;
+                if (tool == "crop") StartCrop();
+                else if (tool == "lock") StartLock();
                 break;
             case "panel-size":
                 _panel = true;
                 var origin = _overlay.ShowPanel(msg.GetProperty("w").GetInt32(), msg.GetProperty("h").GetInt32());
-                _overlay.Post(new { type = "panel-open", ox = origin.X, oy = origin.Y });
+                bool focused = msg.TryGetProperty("focus", out var fc) && fc.GetBoolean() && _overlay.TakeFocus();
+                _overlay.Post(new { type = "panel-open", ox = origin.X, oy = origin.Y, focused });
                 break;
             case "cancel":
                 CancelWheel();
@@ -250,9 +254,23 @@ internal sealed class CarkContext : ApplicationContext
 
     private static StepOptions ReadOptions(JsonElement msg)
     {
-        if (!msg.TryGetProperty("crop", out var c)) return StepOptions.None;
-        return new StepOptions(Crop: new Rectangle(c.GetProperty("x").GetInt32(), c.GetProperty("y").GetInt32(),
-            c.GetProperty("w").GetInt32(), c.GetProperty("h").GetInt32()));
+        Rectangle? crop = msg.TryGetProperty("crop", out var c)
+            ? new Rectangle(c.GetProperty("x").GetInt32(), c.GetProperty("y").GetInt32(), c.GetProperty("w").GetInt32(), c.GetProperty("h").GetInt32())
+            : null;
+        string? password = msg.TryGetProperty("password", out var pw) ? pw.GetString() : null; // never logged
+        return new StepOptions(crop, password);
+    }
+
+    /// <summary>Asks the web UI for the password panel; the PDFs are locked when it answers with "run".</summary>
+    private void StartLock()
+    {
+        if (_files.Length == 0 || _files.Any(f => FileKinds.KindOf(Path.GetExtension(f)) != "pdf"))
+        {
+            _overlay.Post(new { type = "result", ok = false, title = "Şifrele", detail = "Yalnız PDF şifrelenir" });
+            FinishSoon();
+            return;
+        }
+        _overlay.Post(new { type = "lock-form", name = Path.GetFileName(_files[0]), count = _files.Length });
     }
 
     /// <summary>
@@ -359,16 +377,16 @@ internal sealed class CarkContext : ApplicationContext
         });
     }
 
-    /// <summary>Opens the crop panel on a real image at screen center, for checking the panel without a drag.</summary>
-    private void RunCropDemo(string image, string? shotPath)
+    /// <summary>Opens a tool panel (crop or lock) on a real file at screen center, for checking it without a drag.</summary>
+    private void RunToolDemo(string tool, string file, string? shotPath)
     {
         Rectangle area = Screen.PrimaryScreen!.WorkingArea;
         var center = new Point(area.Left + area.Width / 2, area.Top + area.Height / 2);
-        Log.Write($"crop demo {image} shot={shotPath ?? "-"}");
+        Log.Write($"tool demo {tool} {file} shot={shotPath ?? "-"}");
         ShowWheel(WheelMode.Tools, center);
-        _files = [Path.GetFullPath(image)];
+        _files = [Path.GetFullPath(file)];
         _dropping = true;
-        After(500, StartCrop);
+        After(500, tool == "lock" ? StartLock : StartCrop);
         if (shotPath is null) return;
         After(1800, () =>
         {
@@ -378,7 +396,7 @@ internal sealed class CarkContext : ApplicationContext
             using (var g = Graphics.FromImage(bmp))
                 g.CopyFromScreen(b.Location, Point.Empty, b.Size, CopyPixelOperation.SourceCopy);
             bmp.Save(shotPath, ImageFormat.Png);
-            Log.Write($"crop demo shot saved {shotPath}");
+            Log.Write($"tool demo shot saved {shotPath}");
             CancelWheel();
             After(400, ExitThread);
         });

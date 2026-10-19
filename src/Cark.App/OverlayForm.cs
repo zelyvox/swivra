@@ -135,6 +135,25 @@ internal sealed class OverlayForm : Form
         return new PointF((float)((Center.X - x) / scale), (float)((Center.Y - y) / scale));
     }
 
+    /// <summary>
+    /// Lets the panel take keyboard focus, for panels that need typing. Windows may refuse to
+    /// bring it to the front (foreground lock); then the first click into it activates it.
+    /// Returns whether it really is the foreground window now.
+    /// </summary>
+    public bool TakeFocus()
+    {
+        Native.SetWindowLong(Handle, Native.GWL_EXSTYLE, Native.GetWindowLong(Handle, Native.GWL_EXSTYLE) & ~Native.WS_EX_NOACTIVATE);
+        Activate();
+        _web.Focus();
+        return Native.GetForegroundWindow() == Handle;
+    }
+
+    /// <summary>Back to a window that never takes focus, as the wheel must be.</summary>
+    public void DropFocus()
+    {
+        Native.SetWindowLong(Handle, Native.GWL_EXSTYLE, Native.GetWindowLong(Handle, Native.GWL_EXSTYLE) | Native.WS_EX_NOACTIVATE);
+    }
+
     /// <summary>Maps a physical screen point into wheel CSS units, whatever the WebView's own zoom.</summary>
     public PointF ToCss(Point screen) =>
         new((float)((screen.X - Left) * (double)CssSize / Width), (float)((screen.Y - Top) * (double)CssSize / Height));

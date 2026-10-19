@@ -49,7 +49,7 @@ function actionsFor(file, mode) {
     if (kind === 'pdf') return [
       { id: 'cmp', label: 'Sıkıştır', icon: IC.compress, ready: true, prev: 'Görseller küçültülür' },
       { id: 'hide', label: 'Gizle', icon: IC.hide, radar: true, prev: 'Hassas alanlar kapatılır' },
-      { id: 'lock', label: 'Şifrele', icon: IC.lock, prev: 'Parola ile kilitle' },
+      { id: 'lock', label: 'Şifrele', icon: IC.lock, ready: true, tool: true, prev: 'Bırak: parola sorulur' },
       { id: 'split', label: 'Böl', icon: IC.split, ready: true, prev: 'Her sayfa ayrı dosya' },
       { id: 'merge', label: 'Birleştir', icon: IC.merge, ready: true, prev: S.count > 1 ? `${S.count} PDF tek dosya` : "Başka PDF'lerle tek dosya" },
       { id: 'rot', label: 'Döndür', icon: IC.rotate, ready: true, prev: 'Tüm sayfalar 90°' }
@@ -317,7 +317,7 @@ const handlers = {
       titleEl.textContent = cur.label;
       subEl.textContent = 'Açılıyor';
       setHint('');
-      Crop.steps = steps;
+      Panel.steps = steps;
       post({ type: 'tool', tool: cur.id });
       return;
     }
@@ -329,7 +329,7 @@ const handlers = {
     post({ type: 'run', steps });
   },
   result(m) {
-    if (Crop.open) { Crop.result(m); return; }
+    if (Panel.open) { Panel.result(m); return; }
     wheel.classList.add('result');
     wheel.classList.toggle('ok', !!m.ok);
     if (m.ok && m.ext) {
@@ -346,10 +346,11 @@ const handlers = {
     if (m.ok) { sfx.flip(); setTimeout(sfx.done, 160); } else sfx.fail();
   },
   'crop-src'(m) { Crop.load(m); },
-  'panel-open'(m) { Crop.show(m); },
-  key(m) { if (Crop.open) Crop.key(m.key); },
+  'lock-form'(m) { Lock.load(m); },
+  'panel-open'(m) { Panel.show(m); },
+  key(m) { if (Panel.open) Panel.tool.key(m.key); },
   close() {
-    if (Crop.open) { Crop.close(); return; }
+    if (Panel.open) { Panel.close(); return; }
     S.open = false;
     clearTimeout(dwellTimer);
     wheel.classList.add('closing');
@@ -357,58 +358,101 @@ const handlers = {
   }
 };
 
-// ---------- crop panel ----------
-// Layout in panel CSS px; the host sizes the window from the height load() reports.
-const PANEL = { w: 560, padTop: 18, padBottom: 20, head: 32, gap: 14, foot: 44, stageMaxW: 520, stageMaxH: 360 };
-const PRESETS = [['free', 'Serbest', 0], ['sq', '1:1', 1], ['vs', 'Vesikalık', 35 / 45], ['wide', '16:9', 16 / 9]];
-const MIN_CROP = 16; // image px
-const panelEl = $('panel'), stageEl = $('stage'), rectEl = $('crop-rect'), cropImg = $('crop-img');
+// ---------- tool panels ----------
+// A `tool` slice that gets the drop grows the wheel into a panel. Each tool lays out its own
+// body in panel CSS px and reports the size; the host then reshapes the window ("panel-size")
+// and answers "panel-open" with where the wheel was, so the panel scales out of it.
+const PANEL_PAD = { top: 18, bottom: 20, head: 32, gap: 14, foot: 44 };
+const panelEl = $('panel');
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-const Crop = {
-  open: false, busy: false, steps: [], W: 0, H: 0, k: 1, ph: 0, R: null, preset: 'free', drag: null,
+const Panel = {
+  open: false, tool: null, steps: [], w: 0, h: 0,
 
-  load(m) {
-    Object.assign(this, { W: m.w, H: m.h, busy: false, preset: 'free', drag: null });
-    this.k = Math.min(PANEL.stageMaxW / m.w, PANEL.stageMaxH / m.h);
-    const sw = Math.max(1, Math.round(m.w * this.k)), sh = Math.max(1, Math.round(m.h * this.k));
-    stageEl.style.width = sw + 'px'; stageEl.style.height = sh + 'px';
-    cropImg.src = m.src;
-    $('crop-file').textContent = m.name;
-    this.ph = PANEL.padTop + PANEL.head + PANEL.gap + sh + PANEL.gap + PANEL.foot + PANEL.padBottom;
-    panelEl.style.setProperty('--pw', PANEL.w + 'px');
-    panelEl.style.setProperty('--ph', this.ph + 'px');
-    const inset = 0.08;
-    this.R = { x: m.w * inset, y: m.h * inset, w: m.w * (1 - 2 * inset), h: m.h * (1 - 2 * inset) };
+  size(tool, w, contentH, focus) {
+    this.tool = tool;
+    this.w = w;
+    this.h = PANEL_PAD.top + PANEL_PAD.head + PANEL_PAD.gap + contentH + PANEL_PAD.gap + PANEL_PAD.foot + PANEL_PAD.bottom;
+    panelEl.style.setProperty('--pw', w + 'px');
+    panelEl.style.setProperty('--ph', this.h + 'px');
     panelEl.classList.remove('done');
-    $('crop-apply').disabled = false; $('crop-cancel').disabled = false;
-    this.renderPresets(); this.render();
-    post({ type: 'panel-size', w: PANEL.w, h: this.ph });
+    document.querySelectorAll('.panel-body').forEach(b => { b.hidden = b.id !== tool.bodyId; });
+    post({ type: 'panel-size', w, h: this.h, focus: !!focus });
   },
 
   show(m) {
     this.open = true;
-    baseW = PANEL.w; fit();
+    baseW = this.w; fit();
     wheel.className = 'wheel hidden';
     panelEl.style.setProperty('--ox', m.ox + 'px');
     panelEl.style.setProperty('--oy', m.oy + 'px');
     panelEl.className = 'panel';
     void panelEl.offsetWidth; // restart the opening animation
     panelEl.classList.add('opening');
-    setRim(PANEL.w / 2, 0);
+    setRim(this.w / 2, 0);
     sfx.open();
+    if (this.tool.shown) this.tool.shown(m);
   },
 
   close() {
     this.open = false;
-    this.drag = null;
     S.open = false;
     clearTimeout(dwellTimer);
+    if (this.tool.closed) this.tool.closed();
     panelEl.classList.remove('opening');
     panelEl.classList.add('closing');
     setTimeout(() => { panelEl.className = 'panel hidden'; wheel.className = 'wheel hidden'; baseW = 340; fit(); }, 170);
   },
+
+  run(extra) {
+    post({ type: 'run', steps: [...this.steps, this.tool.id], ...extra });
+  },
+
+  result(m) {
+    panelEl.classList.toggle('done', !!m.ok);
+    this.tool.info.textContent = m.ok ? `${m.title} · ${m.detail}` : `${m.title}: ${m.detail}`;
+    if (m.ok) { sfx.flip(); setTimeout(sfx.done, 160); } else sfx.fail();
+  }
+};
+
+// a light that follows the pointer around the panel rim, like the wheel's
+function setRim(x, y) {
+  const ang = Math.atan2(y - Panel.h / 2, x - Panel.w / 2) * 180 / Math.PI + 90 - 45;
+  $('panel-light').style.background = `conic-gradient(from ${ang.toFixed(1)}deg, rgba(255,255,255,.14) 0deg, rgba(255,255,255,.9) 45deg, rgba(255,255,255,.14) 90deg, rgba(255,255,255,.14) 360deg)`;
+}
+
+panelEl.addEventListener('pointermove', e => {
+  if (!Panel.open || panelEl.classList.contains('done')) return;
+  const b = panelEl.getBoundingClientRect(), f = b.width / Panel.w;
+  setRim((e.clientX - b.left) / f, (e.clientY - b.top) / f);
+});
+
+// ---------- crop ----------
+const CROP = { w: 560, stageMaxW: 520, stageMaxH: 360 };
+const PRESETS = [['free', 'Serbest', 0], ['sq', '1:1', 1], ['vs', 'Vesikalık', 35 / 45], ['wide', '16:9', 16 / 9]];
+const MIN_CROP = 16; // image px
+const stageEl = $('stage'), rectEl = $('crop-rect'), cropImg = $('crop-img');
+
+const Crop = {
+  id: 'crop', bodyId: 'crop-body', info: $('crop-info'),
+  busy: false, W: 0, H: 0, k: 1, R: null, preset: 'free', drag: null,
+
+  load(m) {
+    Object.assign(this, { W: m.w, H: m.h, busy: false, preset: 'free', drag: null });
+    this.k = Math.min(CROP.stageMaxW / m.w, CROP.stageMaxH / m.h);
+    const sw = Math.max(1, Math.round(m.w * this.k)), sh = Math.max(1, Math.round(m.h * this.k));
+    stageEl.style.width = sw + 'px'; stageEl.style.height = sh + 'px';
+    cropImg.src = m.src;
+    $('crop-file').textContent = m.name;
+    const inset = 0.08;
+    this.R = { x: m.w * inset, y: m.h * inset, w: m.w * (1 - 2 * inset), h: m.h * (1 - 2 * inset) };
+    $('crop-apply').disabled = false; $('crop-cancel').disabled = false;
+    this.renderPresets(); this.render();
+    Panel.size(this, CROP.w, sh, false);
+  },
+
+  closed() { this.drag = null; },
 
   ratio() { return PRESETS.find(p => p[0] === this.preset)[2]; },
 
@@ -445,7 +489,7 @@ const Crop = {
     const k = this.k, R = this.R;
     rectEl.style.left = (R.x * k) + 'px'; rectEl.style.top = (R.y * k) + 'px';
     rectEl.style.width = (R.w * k) + 'px'; rectEl.style.height = (R.h * k) + 'px';
-    if (!this.busy) $('crop-info').textContent = `${Math.round(R.w)} × ${Math.round(R.h)} px`;
+    if (!this.busy) this.info.textContent = `${Math.round(R.w)} × ${Math.round(R.h)} px`;
   },
 
   // pointer position in image pixels (getBoundingClientRect already includes the --fit scale)
@@ -455,7 +499,7 @@ const Crop = {
   },
 
   down(e) {
-    if (!this.open || this.busy || !rectEl.contains(e.target)) return;
+    if (!Panel.open || this.busy || !rectEl.contains(e.target)) return;
     e.preventDefault();
     const p = this.at(e);
     this.drag = { h: e.target.dataset.h || 'move', off: { x: p.x - this.R.x, y: p.y - this.R.y }, R0: { ...this.R } };
@@ -497,37 +541,25 @@ const Crop = {
   },
 
   apply() {
-    if (!this.open || this.busy) return;
+    if (!Panel.open || this.busy) return;
     this.busy = true;
     $('crop-apply').disabled = true; $('crop-cancel').disabled = true;
-    $('crop-info').textContent = 'Kırpılıyor';
+    this.info.textContent = 'Kırpılıyor';
     const R = this.R, x = Math.round(R.x), y = Math.round(R.y);
-    const crop = { x, y, w: Math.min(this.W - x, Math.round(R.w)), h: Math.min(this.H - y, Math.round(R.h)) };
-    post({ type: 'run', steps: [...this.steps, 'crop'], crop });
+    Panel.run({ crop: { x, y, w: Math.min(this.W - x, Math.round(R.w)), h: Math.min(this.H - y, Math.round(R.h)) } });
   },
 
   cancel() {
-    if (!this.open || this.busy) return;
+    if (!Panel.open || this.busy) return;
     post({ type: 'cancel' });
   },
 
+  // keys come from the host hook: the crop panel never has focus
   key(k) {
     if (k === 'esc') this.cancel();
     else if (k === 'enter') this.apply();
-  },
-
-  result(m) {
-    panelEl.classList.toggle('done', !!m.ok);
-    $('crop-info').textContent = m.ok ? `${m.title} · ${m.detail}` : `${m.title}: ${m.detail}`;
-    if (m.ok) { sfx.flip(); setTimeout(sfx.done, 160); } else sfx.fail();
   }
 };
-
-// a light that follows the pointer around the panel rim, like the wheel's
-function setRim(x, y) {
-  const ang = Math.atan2(y - Crop.ph / 2, x - PANEL.w / 2) * 180 / Math.PI + 90 - 45;
-  $('panel-light').style.background = `conic-gradient(from ${ang.toFixed(1)}deg, rgba(255,255,255,.14) 0deg, rgba(255,255,255,.9) 45deg, rgba(255,255,255,.14) 90deg, rgba(255,255,255,.14) 360deg)`;
-}
 
 stageEl.addEventListener('pointerdown', e => Crop.down(e));
 stageEl.addEventListener('pointermove', e => Crop.move(e));
@@ -535,11 +567,77 @@ stageEl.addEventListener('pointerup', e => Crop.up(e));
 stageEl.addEventListener('pointercancel', e => Crop.up(e));
 $('crop-apply').addEventListener('click', () => Crop.apply());
 $('crop-cancel').addEventListener('click', () => Crop.cancel());
-panelEl.addEventListener('pointermove', e => {
-  if (!Crop.open || panelEl.classList.contains('done')) return;
-  const b = panelEl.getBoundingClientRect(), f = b.width / PANEL.w;
-  setRim((e.clientX - b.left) / f, (e.clientY - b.top) / f);
+
+// ---------- lock (PDF password) ----------
+const LOCK = { w: 440, content: 74, minLength: 4 };
+const EYE_OPEN = 'M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z M12 9.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5';
+const pwEl = $('lock-pw'), lockHint = $('lock-hint');
+
+const Lock = {
+  id: 'lock', bodyId: 'lock-body', info: $('lock-info'), busy: false,
+
+  load(m) {
+    this.busy = false;
+    $('lock-file').textContent = m.count > 1 ? `${m.count} PDF` : m.name;
+    pwEl.value = '';
+    pwEl.disabled = false;
+    this.reveal(false);
+    this.info.textContent = m.count > 1 ? 'Hepsine aynı parola · orijinaller şifresiz kalır' : 'Orijinal dosya şifresiz kalır';
+    $('lock-cancel').disabled = false;
+    this.check();
+    Panel.size(this, LOCK.w, LOCK.content, true);
+  },
+
+  // Windows can refuse to hand over focus; then typing would land in Explorer, so ask for a click.
+  shown(m) {
+    if (m.focused) pwEl.focus();
+    else { lockHint.textContent = 'Yazmak için kutuya tıkla'; pwEl.parentElement.classList.add('nudge'); }
+  },
+
+  closed() { pwEl.value = ''; pwEl.blur(); },
+
+  reveal(on) {
+    pwEl.type = on ? 'text' : 'password';
+    $('lock-eye-path').setAttribute('d', on ? IC.hide : EYE_OPEN);
+    $('lock-eye').setAttribute('aria-label', on ? 'Parolayı gizle' : 'Parolayı göster');
+  },
+
+  check() {
+    const n = pwEl.value.length;
+    lockHint.textContent = n === 0 ? 'Bu parola olmadan dosya açılmaz, unutma'
+      : n < LOCK.minLength ? `En az ${LOCK.minLength} karakter` : 'AES-256 ile kilitlenecek';
+    $('lock-apply').disabled = this.busy || n < LOCK.minLength;
+  },
+
+  apply() {
+    if (!Panel.open || this.busy || pwEl.value.length < LOCK.minLength) return;
+    this.busy = true;
+    pwEl.disabled = true;
+    $('lock-apply').disabled = true; $('lock-cancel').disabled = true;
+    this.info.textContent = 'Şifreleniyor';
+    Panel.run({ password: pwEl.value });
+    pwEl.value = '';
+  },
+
+  cancel() {
+    if (!Panel.open || this.busy) return;
+    post({ type: 'cancel' });
+  },
+
+  // Enter is taken only from the field itself: when the panel has no focus the same key also
+  // reached Explorer, and acting on it here would lock with whatever the field held.
+  key(k) { if (k === 'esc') this.cancel(); }
+};
+
+pwEl.addEventListener('input', () => Lock.check());
+pwEl.addEventListener('focus', () => { pwEl.parentElement.classList.remove('nudge'); Lock.check(); });
+pwEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); Lock.apply(); }
+  else if (e.key === 'Escape') { e.preventDefault(); Lock.cancel(); }
 });
+$('lock-eye').addEventListener('click', () => { Lock.reveal(pwEl.type === 'password'); pwEl.focus(); });
+$('lock-apply').addEventListener('click', () => Lock.apply());
+$('lock-cancel').addEventListener('click', () => Lock.cancel());
 
 if (window.chrome && chrome.webview) {
   chrome.webview.addEventListener('message', e => {
