@@ -24,7 +24,8 @@ internal static class FileKinds
         : $"{bytes} B";
 }
 
-internal sealed record ActionResult(bool Ok, string Title, string Detail, string? OutputPath = null, string? OutputExt = null, string? ClipboardText = null);
+internal sealed record ActionResult(bool Ok, string Title, string Detail, string? OutputPath = null, string? OutputExt = null, string? ClipboardText = null, Func<bool>? OnUi = null);
+// OnUi: work that needs the STA UI thread (clipboard file list, launching an app); false turns the result into a failure.
 
 /// <summary>
 /// Input that some steps need beyond the step id, filled in by a tool panel.
@@ -56,6 +57,7 @@ internal static class FileActions
     public static ActionResult Run(IReadOnlyList<string> files, IReadOnlyList<string> steps, StepOptions? options = null)
     {
         options ??= StepOptions.None;
+        if (steps.Any(SendActions.IsSendStep)) return SendActions.Run(files, steps);
         var fileSteps = steps.Where(s => s != "path").ToList();
         bool copyPath = steps.Contains("path");
 

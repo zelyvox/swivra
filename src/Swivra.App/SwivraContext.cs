@@ -1,4 +1,5 @@
 using System.Drawing.Imaging;
+using System.Net;
 using System.Text.Json;
 
 namespace Swivra.App;
@@ -20,10 +21,12 @@ internal sealed class SwivraContext : ApplicationContext
     private bool _dropping;
     private bool _panel;
     private string[] _files = [];
+    private PhoneShare? _share;
 
     public SwivraContext(string[] args)
     {
         _args = args;
+        SendActions.CleanTemp(all: false);
 
         _tray = new NotifyIcon
         {
@@ -188,6 +191,7 @@ internal sealed class SwivraContext : ApplicationContext
         _panel = false;
         _overlay.DropFocus();
         _overlay.Post(new { type = "close" });
+        StopShare();
         _catcher.Hide();
         var t = new System.Windows.Forms.Timer { Interval = 180 };
         t.Tick += (_, _) =>
@@ -256,6 +260,7 @@ internal sealed class SwivraContext : ApplicationContext
                 string? tool = msg.TryGetProperty("tool", out var tl) ? tl.GetString() : null;
                 if (tool == "crop") StartCrop();
                 else if (tool == "lock") StartLock();
+                else if (tool == "tel") StartTel();
                 break;
             case "panel-size":
                 _panel = true;
@@ -291,6 +296,56 @@ internal sealed class SwivraContext : ApplicationContext
             return;
         }
         _overlay.Post(new { type = "lock-form", name = Path.GetFileName(_files[0]), count = _files.Length });
+    }
+
+    /// <summary>
+    /// "To phone": starts the LAN server for the dragged files and hands the web UI the URL and QR code.
+    /// The server lives until the panel closes (CloseWheel) or its 10 minutes run out.
+    /// </summary>
+    private void StartTel()
+    {
+        string title = Lang.T("Telefona", "To phone");
+        var files = _files.Where(File.Exists).ToArray();
+        if (files.Length == 0)
+        {
+            _overlay.Post(new { type = "result", ok = false, title, detail = Lang.T("Klasör gönderilmez, dosya sürükle", "Folders cannot be sent, drag files") });
+            FinishSoon();
+            return;
+        }
+        PhoneShare share;
+        try
+        {
+            StopShare();
+            // --share-bind <ip> is a dev switch (e.g. 127.0.0.1: no firewall prompt while testing).
+            int sb = Array.IndexOf(_args, "--share-bind");
+            share = _share = PhoneShare.Start(files, sb >= 0 && sb + 1 < _args.Length ? IPAddress.Parse(_args[sb + 1]) : null);
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"phone share failed to start: {ex.Message}");
+            _overlay.Post(new { type = "result", ok = false, title, detail = Lang.T("Wi-Fi ya da kablolu ağ bağlantısı yok", "No Wi-Fi or wired network connection") });
+            FinishSoon();
+            return;
+        }
+        // The link carries a one-off token, so it is only logged for dev demo runs.
+        Log.Write($"phone share started: {files.Length} file(s){(_args.Contains("--demo-tool") ? " url=" + share.Url : "")}");
+        share.Downloaded += n => _overlay.BeginInvoke(() => { if (_share == share) _overlay.Post(new { type = "tel-count", n }); });
+        share.Expired += () => _overlay.BeginInvoke(() => { if (_share == share) CancelWheel(); });
+        _overlay.Post(new
+        {
+            type = "tel-form",
+            name = Path.GetFileName(files[0]),
+            count = files.Length,
+            url = share.Url,
+            qr = PhoneShare.QrDataUrl(share.Url),
+            minutes = (int)PhoneShare.Lifetime.TotalMinutes,
+        });
+    }
+
+    private void StopShare()
+    {
+        _share?.Dispose();
+        _share = null;
     }
 
     /// <summary>
@@ -350,6 +405,8 @@ internal sealed class SwivraContext : ApplicationContext
             {
                 var r = t.IsCompletedSuccessfully ? t.Result : new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Beklenmeyen hata", "Unexpected error"));
                 if (r.ClipboardText is not null) Clipboard.SetText(r.ClipboardText);
+                if (r.Ok && r.OnUi is not null && !r.OnUi())
+                    r = new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Pano kullanılamadı", "Could not use the clipboard"));
                 _overlay.Post(new { type = "result", ok = r.Ok, title = r.Title, detail = r.Detail, ext = r.OutputExt });
                 FinishSoon();
             });
@@ -406,9 +463,9 @@ internal sealed class SwivraContext : ApplicationContext
         ShowWheel(WheelMode.Tools, center);
         _files = [Path.GetFullPath(file)];
         _dropping = true;
-        After(500, tool == "lock" ? StartLock : StartCrop);
+        After(500, tool == "lock" ? StartLock : tool == "tel" ? StartTel : StartCrop);
         if (shotPath is null) return;
-        After(1800, () =>
+        After(tool == "tel" ? 6000 : 1800, () =>
         {
             var b = _overlay.Bounds;
             b.Inflate(40, 40);
@@ -437,6 +494,8 @@ internal sealed class SwivraContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        StopShare();
+        SendActions.CleanTemp(all: true);
         _hook.Dispose();
         _tray.Visible = false;
         _tray.Dispose();

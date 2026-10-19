@@ -36,9 +36,9 @@ const modeName = m => ({ convert: t('Dönüştür', 'Convert'), tools: t('Araçl
 function actionsFor(file, mode) {
   const kind = file ? file.kind : 'other';
   if (mode === 'send') return [
-    { id: 'wa', label: 'WhatsApp', icon: IC.chat, send: true, prev: t('Sohbete göre boyutlanır', 'Sized for the chat') },
-    { id: 'mail', label: 'Mail', icon: IC.mail, send: true, prev: t('Ek sınırına göre sıkışır', 'Fits the attachment limit') },
-    { id: 'tel', label: t('Telefona', 'To phone'), icon: IC.phone, send: true, prev: t('Aynı ağdaki telefona', 'To a phone on the same network') },
+    { id: 'wa', label: 'WhatsApp', icon: IC.chat, send: true, ready: true, prev: t('Panoya, sonra Ctrl+V', 'To clipboard, then Ctrl+V') },
+    { id: 'mail', label: 'Mail', icon: IC.mail, send: true, ready: true, prev: t('Yeni ileti, dosya ekli', 'New message with the file attached') },
+    { id: 'tel', label: t('Telefona', 'To phone'), icon: IC.phone, send: true, ready: true, tool: true, prev: t('Bırak: QR kod açılır', 'Drop: opens a QR code') },
     { id: 'path', label: t('Yolu kopyala', 'Copy path'), icon: IC.link, send: true, ready: true, prev: t('Panoya kopyalanır', 'Copied to the clipboard') }
   ];
   if (mode === 'tools') {
@@ -357,6 +357,8 @@ const handlers = {
   },
   'crop-src'(m) { Crop.load(m); },
   'lock-form'(m) { Lock.load(m); },
+  'tel-form'(m) { Tel.load(m); },
+  'tel-count'(m) { Tel.count(m.n); },
   'panel-open'(m) { Panel.show(m); },
   key(m) { if (Panel.open) Panel.tool.key(m.key); },
   close() {
@@ -648,6 +650,38 @@ pwEl.addEventListener('keydown', e => {
 $('lock-eye').addEventListener('click', () => { Lock.reveal(pwEl.type === 'password'); pwEl.focus(); });
 $('lock-apply').addEventListener('click', () => Lock.apply());
 $('lock-cancel').addEventListener('click', () => Lock.cancel());
+
+// ---------- to phone (QR + local link) ----------
+const TEL = { w: 520, content: 220 };
+
+const Tel = {
+  id: 'tel', bodyId: 'tel-body', info: $('tel-info'), downloads: 0,
+
+  load(m) {
+    this.downloads = 0;
+    $('tel-file').textContent = m.count > 1 ? t(`${m.count} dosya`, `${m.count} files`) : m.name;
+    $('tel-qr').src = m.qr;
+    $('tel-url').textContent = m.url;
+    $('tel-minutes').textContent = t(`${m.minutes} dakika sonra kapanır`, `Closes in ${m.minutes} minutes`);
+    $('tel-count').textContent = t('Henüz indirilmedi', 'Nothing downloaded yet');
+    $('tel-count').classList.remove('got');
+    this.info.textContent = t('Yalnız bu bağlantıyı bilen indirebilir', 'Only someone with this link can download');
+    $('tel-close').disabled = false;
+    Panel.size(this, TEL.w, TEL.content, false); // no keyboard focus: Esc arrives through the hook
+  },
+
+  count(n) {
+    this.downloads = n;
+    $('tel-count').textContent = t(`${n} kez indirildi`, `Downloaded ${n} time${n === 1 ? '' : 's'}`);
+    $('tel-count').classList.add('got');
+    panelEl.classList.add('done');
+    sfx.done();
+  },
+
+  close() { if (Panel.open) post({ type: 'cancel' }); },
+  key(k) { if (k === 'esc') this.close(); }
+};
+$('tel-close').addEventListener('click', () => Tel.close());
 
 // Fixed text in index.html carries both languages: data-tr / data-en (and data-tr-label / data-en-label for aria-label).
 function applyStaticText() {

@@ -20,6 +20,7 @@ static class Program
                 password = rest[pw + 1];
                 rest.RemoveRange(pw, 2);
             }
+            bool withUi = rest.Remove("--with-ui"); // also run the UI-thread part (clipboard file list)
             Rectangle? crop = null;
             int cr = rest.IndexOf("--crop");
             if (cr >= 0 && cr + 1 < rest.Count)
@@ -28,7 +29,7 @@ static class Program
                 crop = new Rectangle(v[0], v[1], v[2], v[3]);
                 rest.RemoveRange(cr, 2);
             }
-            return HeadlessRun(args[run + 1], rest.ToArray(), new StepOptions(crop, password));
+            return HeadlessRun(args[run + 1], rest.ToArray(), new StepOptions(crop, password), withUi);
         }
         int radar = Array.IndexOf(args, "--radar");
         if (radar >= 0 && radar + 1 < args.Length)
@@ -55,12 +56,13 @@ static class Program
     }
 
     /// <summary>--run step,step,... [--password pw] [--crop x,y,w,h] file1 [file2 ...]: runs the steps and logs the result.</summary>
-    private static int HeadlessRun(string stepList, string[] files, StepOptions options)
+    private static int HeadlessRun(string stepList, string[] files, StepOptions options, bool withUi)
     {
         var steps = stepList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         try
         {
             var r = FileActions.Run(files, steps, options);
+            if (withUi && r.OnUi is not null) Log.Write($"ui-part ok={r.OnUi()}");
             Log.Write($"run-result ok={r.Ok} title={r.Title} detail={r.Detail} output={r.OutputPath ?? "-"} ext={r.OutputExt ?? "-"} clip={(r.ClipboardText is null ? "-" : r.ClipboardText.Replace("\n", "|"))}");
             return r.Ok ? 0 : 1;
         }
