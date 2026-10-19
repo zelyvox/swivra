@@ -38,7 +38,9 @@ static class Program
             return 0;
         }
 
-        using var single = new Mutex(true, @"Local\Swivra.SingleInstance", out bool first);
+        // Demo runs are dev tools too: they may start next to the tray instance.
+        bool demo = args.Contains("--demo") || args.Contains("--demo-tool");
+        using var single = new Mutex(true, demo ? @"Local\Swivra.Demo" : @"Local\Swivra.SingleInstance", out bool first);
         if (!first) return 0;
 
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);

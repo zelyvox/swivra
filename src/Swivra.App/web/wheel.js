@@ -45,7 +45,7 @@ function actionsFor(file, mode) {
     if (kind === 'img') return [
       { id: 'crop', label: t('Kırp', 'Crop'), icon: IC.crop, ready: true, tool: true, prev: S.count > 1 ? t('Tek resim kırpılır', 'Crop one image at a time') : t('Bırak: kırpma paneli açılır', 'Drop: opens the crop panel') },
       { id: 'cmp', label: t('Sıkıştır', 'Compress'), icon: IC.compress, ready: true, prev: t('JPG, kalite %70', 'JPG, quality 70%') },
-      { id: 'bg', label: t('Arka planı sil', 'Remove bg'), icon: IC.erase, prev: t('Şeffaf PNG', 'Transparent PNG') },
+      { id: 'bg', label: t('Arka planı sil', 'Cut out'), icon: IC.erase, prev: t('Şeffaf PNG', 'Transparent PNG') },
       { id: 'loc', label: t('Konumu sil', 'Remove location'), icon: IC.pinoff, radar: true, ready: true, prev: t('Konum ve cihaz bilgisi silinir', 'Removes location and device info') },
       { id: 'rs', label: t('Boyutlandır', 'Resize'), icon: IC.resize, ready: true, prev: t('1080 px genişlik', '1080 px wide') },
       { id: 'rot', label: t('Döndür', 'Rotate'), icon: IC.rotate, ready: true, prev: t('90° sağa', '90° clockwise') }
@@ -203,7 +203,7 @@ function renderCenter() {
     subEl.textContent = S.chain.map(c => c.label).join(' → ');
     setHint(t('Bir dilime bırak: hepsi sırayla', 'Drop on a slice: all run in order'));
   } else if (S.sens.length) {
-    titleEl.textContent = t('Dikkat', 'Careful');
+    titleEl.textContent = t('Dikkat', 'Heads up');
     subEl.textContent = S.sens.join(' · ');
     subEl.classList.add('radar-text');
   } else if (S.file && !S.acts.length) {
