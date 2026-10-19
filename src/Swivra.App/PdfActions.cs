@@ -6,7 +6,7 @@ using SkiaSharp;
 using System.Text;
 using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
 
-namespace Cark.App;
+namespace Swivra.App;
 
 /// <summary>
 /// PDF steps: render to images (PDFium), extract text (PdfPig), rotate, split, merge, compress and encrypt (PDFsharp 6.2.x, MIT).
@@ -61,7 +61,7 @@ internal static class PdfActions
             {
                 if (!isLast)
                 {
-                    temp ??= Directory.CreateTempSubdirectory("cark-").FullName;
+                    temp ??= Directory.CreateTempSubdirectory("swivra-").FullName;
                     return Path.Combine(temp, $"{index}.pdf");
                 }
                 string target = FileActions.UniquePath(origDir, name + stepSuffix, "pdf");

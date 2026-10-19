@@ -1,4 +1,4 @@
-namespace Cark.App;
+namespace Swivra.App;
 
 static class Program
 {
@@ -35,7 +35,7 @@ static class Program
             return 0;
         }
 
-        using var single = new Mutex(true, @"Local\Cark.SingleInstance", out bool first);
+        using var single = new Mutex(true, @"Local\Swivra.SingleInstance", out bool first);
         if (!first) return 0;
 
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -44,7 +44,7 @@ static class Program
 
         ApplicationConfiguration.Initialize();
         Log.Write($"start args=[{string.Join(" ", args)}]");
-        Application.Run(new CarkContext(args));
+        Application.Run(new SwivraContext(args));
         Log.Write("exit");
         return 0;
     }

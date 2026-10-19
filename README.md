@@ -1,4 +1,4 @@
-# Çark (kod adı)
+# Swivra
 
 Windows için dosya çarkı. Bir dosyayı sürüklerken **Shift**, **Ctrl** ya da **Alt**'a bas: imlecin etrafında bir çark açılır, dosyayı bir dilime bırakırsın, iş biter. Hiçbir dosya internete çıkmaz.
 
@@ -23,15 +23,15 @@ Windows için dosya çarkı. Bir dosyayı sürüklerken **Shift**, **Ctrl** ya d
 Gereken: Windows 10/11, [.NET 10 SDK](https://dotnet.microsoft.com/download), WebView2 Runtime (Windows 11'de hazır gelir).
 
 ```powershell
-cd src/Cark.App
+cd src/Swivra.App
 dotnet run
 ```
 
-Uygulama sistem tepsisine yerleşir. Tepsi menüsünde **Çarkı göster (demo)**, **Kayıtları aç** ve **Çıkış** var. Kayıtlar `%LOCALAPPDATA%\Cark\cark.log` dosyasına yazılır.
+Uygulama sistem tepsisine yerleşir. Tepsi menüsünde **Çarkı göster (demo)**, **Kayıtları aç** ve **Çıkış** var. Kayıtlar `%LOCALAPPDATA%\Swivra\swivra.log` dosyasına yazılır.
 
 Görünümü test etmek için: `dotnet run -- --demo --shot cikti.png`
 
-Arayüzsüz deneme: `Cark.exe --run png,rot dosya.pdf` (adımlar virgülle) ya da `Cark.exe --radar dosya.pdf`. Sonuç kayıt dosyasına yazılır.
+Arayüzsüz deneme: `Swivra.exe --run png,rot dosya.pdf` (adımlar virgülle) ya da `Swivra.exe --radar dosya.pdf`. Sonuç kayıt dosyasına yazılır.
 
 ## Nasıl çalışıyor
 

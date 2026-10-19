@@ -2,7 +2,7 @@ using System.Drawing.Imaging;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace Cark.App;
+namespace Swivra.App;
 
 /// <summary>
 /// Looks for sensitive data inside a file before it is shared. Runs fully offline.

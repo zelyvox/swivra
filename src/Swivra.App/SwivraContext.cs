@@ -1,13 +1,13 @@
 using System.Drawing.Imaging;
 using System.Text.Json;
 
-namespace Cark.App;
+namespace Swivra.App;
 
 /// <summary>
 /// Wires the pieces together: hook summons the wheel, the catcher feeds drag events to the
 /// web UI, the web UI picks steps, FileActions runs them.
 /// </summary>
-internal sealed class CarkContext : ApplicationContext
+internal sealed class SwivraContext : ApplicationContext
 {
     private readonly OverlayForm _overlay = new();
     private readonly CatcherForm _catcher = new();
@@ -21,7 +21,7 @@ internal sealed class CarkContext : ApplicationContext
     private bool _panel;
     private string[] _files = [];
 
-    public CarkContext(string[] args)
+    public SwivraContext(string[] args)
     {
         _args = args;
 
@@ -32,7 +32,7 @@ internal sealed class CarkContext : ApplicationContext
         _tray = new NotifyIcon
         {
             Icon = SystemIcons.Application,
-            Text = "Çark: dosyayı sürüklerken Shift, Ctrl ya da Alt'a bas",
+            Text = "Swivra: dosyayı sürüklerken Shift, Ctrl ya da Alt'a bas",
             ContextMenuStrip = menu,
             Visible = true,
         };
@@ -78,7 +78,7 @@ internal sealed class CarkContext : ApplicationContext
         catch (Exception ex)
         {
             Log.Write($"startup failed: {ex}");
-            MessageBox.Show("Çark başlatılamadı. Ayrıntı kayıt dosyasında.", "Çark");
+            MessageBox.Show("Swivra başlatılamadı. Ayrıntı kayıt dosyasında.", "Swivra");
             ExitThread();
         }
     }

@@ -1,4 +1,4 @@
-namespace Cark.App;
+namespace Swivra.App;
 
 /// <summary>
 /// A nearly invisible window laid exactly over the wheel. It is the real OLE drop target,

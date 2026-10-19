@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace Cark.App;
+namespace Swivra.App;
 
 internal static class Native
 {

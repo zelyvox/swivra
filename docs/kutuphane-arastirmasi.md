@@ -1,4 +1,4 @@
-# Çark: Kütüphane ve Araç Araştırması
+# Swivra: Kütüphane ve Araç Araştırması
 
 Araştırma tarihi: 2026-10-19. Hedef: C# / .NET 10, WinForms + WebView2, Windows 10/11, tamamen çevrimdışı, MIT lisanslı açık kaynak (ileride ücretli katman ihtimali).
 

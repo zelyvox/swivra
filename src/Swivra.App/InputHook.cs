@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace Cark.App;
+namespace Swivra.App;
 
 public enum WheelMode { Convert, Tools, Send }
 

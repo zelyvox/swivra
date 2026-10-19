@@ -3,7 +3,7 @@ using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-namespace Cark.App;
+namespace Swivra.App;
 
 /// <summary>
 /// The wheel itself: a borderless, never-activated, topmost window cut to a circle,
@@ -67,7 +67,7 @@ internal sealed class OverlayForm : Form
         _web.AllowExternalDrop = false;
 
         string webDir = Path.Combine(AppContext.BaseDirectory, "web");
-        core.SetVirtualHostNameToFolderMapping("cark.local", webDir, CoreWebView2HostResourceAccessKind.Allow);
+        core.SetVirtualHostNameToFolderMapping("swivra.local", webDir, CoreWebView2HostResourceAccessKind.Allow);
         core.WebMessageReceived += (_, args) =>
         {
             try
@@ -83,7 +83,7 @@ internal sealed class OverlayForm : Form
 
         var loaded = new TaskCompletionSource<bool>();
         core.NavigationCompleted += (_, args) => loaded.TrySetResult(args.IsSuccess);
-        core.Navigate("https://cark.local/index.html");
+        core.Navigate("https://swivra.local/index.html");
         bool ok = await loaded.Task;
         Log.Write($"webview ready ok={ok} version={core.Environment.BrowserVersionString}");
 

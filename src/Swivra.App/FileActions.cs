@@ -1,7 +1,7 @@
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 
-namespace Cark.App;
+namespace Swivra.App;
 
 internal static class FileKinds
 {

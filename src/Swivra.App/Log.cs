@@ -1,11 +1,11 @@
-namespace Cark.App;
+namespace Swivra.App;
 
 internal static class Log
 {
     public static readonly string Dir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Cark");
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Swivra");
 
-    private static readonly string FilePath = Path.Combine(Dir, "cark.log");
+    private static readonly string FilePath = Path.Combine(Dir, "swivra.log");
     private static readonly object Gate = new();
 
     public static void Write(string message)
