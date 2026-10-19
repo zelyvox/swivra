@@ -220,3 +220,14 @@ html, body {
 @keyframes nudge { 0%, 100% { border-color: rgba(255, 255, 255, .22); } 50% { border-color: rgba(190, 210, 255, .85); } }
 @keyframes panelIn { from { opacity: 0; transform: scale(.3); } }
 @keyframes glassIn { from { opacity: 0; } }
+
+/* ---------- to phone (layout numbers must match TEL in wheel.js) ---------- */
+.tel-content { height: 220px; display: flex; gap: 18px; align-items: stretch; }
+.qr { width: 220px; height: 220px; flex: none; border-radius: 14px; background: #fff; padding: 6px; box-sizing: border-box; }
+.qr img { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
+.tel-side { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.tel-step { font-size: 14px; font-weight: 600; line-height: 1.3; }
+.tel-note { font-size: 12.5px; color: rgba(238, 242, 255, .7); }
+.tel-url { font: 11px/1.35 ui-monospace, Consolas, monospace; color: rgba(238, 242, 255, .6); word-break: break-all; user-select: text; max-height: 62px; overflow: hidden; }
+.tel-count { margin-top: auto; font-size: 13px; color: rgba(238, 242, 255, .7); font-variant-numeric: tabular-nums; }
+.tel-count.got { color: #BFF3D6; font-weight: 600; }
