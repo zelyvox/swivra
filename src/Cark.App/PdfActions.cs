@@ -237,9 +237,10 @@ internal static class PdfActions
 
         double scale = Math.Min(1.0, CompressMaxSide / (double)Math.Max(width, height));
         int nw = Math.Max(1, (int)Math.Round(width * scale)), nh = Math.Max(1, (int)Math.Round(height * scale));
+        // Always written as RGB: whether Skia emits a one-channel JPEG for gray input is not
+        // guaranteed, and a JPEG whose channel count disagrees with /ColorSpace breaks the page.
         using SKBitmap rgba = Resized(source, nw, nh);
-        using SKBitmap toEncode = comps == 1 ? ToGray(rgba) : rgba;
-        using var image = SKImage.FromBitmap(toEncode);
+        using var image = SKImage.FromBitmap(rgba);
         using var data = image.Encode(SKEncodedImageFormat.Jpeg, CompressQuality);
         if (data is null || data.Size >= img.Stream.Length) return;
 
@@ -247,6 +248,7 @@ internal static class PdfActions
         el.SetInteger("/Width", nw);
         el.SetInteger("/Height", nh);
         el.SetName("/Filter", "/DCTDecode");
+        if (comps == 1) el.SetName("/ColorSpace", "/DeviceRGB");
         el.Remove("/DecodeParms");
     }
 
@@ -298,18 +300,6 @@ internal static class PdfActions
         using var canvas = new SKCanvas(dst);
         canvas.DrawImage(image, new SKRect(0, 0, w, h), new SKSamplingOptions(SKCubicResampler.Mitchell));
         return dst;
-    }
-
-    private static SKBitmap ToGray(SKBitmap rgba)
-    {
-        var gray = new SKBitmap(new SKImageInfo(rgba.Width, rgba.Height, SKColorType.Gray8, SKAlphaType.Opaque));
-        var line = new byte[rgba.Width];
-        for (int y = 0; y < rgba.Height; y++)
-        {
-            for (int x = 0; x < rgba.Width; x++) line[x] = rgba.GetPixel(x, y).Red;
-            System.Runtime.InteropServices.Marshal.Copy(line, 0, gray.GetPixels() + y * gray.RowBytes, line.Length);
-        }
-        return gray;
     }
 
     /// <summary>AES-256 (V5), same password for opening and for owner rights.</summary>
