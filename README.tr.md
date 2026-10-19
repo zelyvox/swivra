@@ -2,100 +2,112 @@
 
 [English](README.md)
 
-Windows için çevrimdışı dosya çarkı. Bir dosyayı sürükle, **Shift**, **Ctrl** ya da **Alt**'a bas, bir dilime bırak. Hiçbir dosya bilgisayarından çıkmaz.
+Windows için çevrimdışı çalışan bir dosya çarkı. Bir dosyayı sürüklerken **Shift**, **Ctrl** ya da **Alt** tuşuna basarsın, imlecin etrafında bir çark açılır. Dosyayı istediğin dilime bırakırsın, iş biter. Dosyaların hiçbir siteye yüklenmez, her şey kendi bilgisayarında olur.
 
 ![Swivra çarkı](docs/images/wheel-tr.png)
 
-> Durum: erken sürüm (0.2.0). Bütün dilimler çalışıyor. Bazı sonuçlar isteğe bağlı programlara bağlı, aşağıdaki notlara bak.
+## Neler yapabilir
 
-## Özellikler
+Üç çark var. Hangisinin açılacağını bastığın tuş belirler.
 
-| Tuş | Çark | Bugün ne yapar |
-| --- | --- | --- |
-| Shift | Dönüştür | Resim: PNG, JPG, BMP, WebP, PDF. PDF: PNG, JPG (sayfa başına bir resim, 200 dpi), düz metin ya da Word. Belgeler (Word, metin, Markdown): PDF, metin ya da Word |
-| Ctrl | Araçlar | Resim: kırp, sıkıştır, arka planı sil, döndür, 1080 px genişliğe boyutlandır, konum ve cihaz bilgisini sil. PDF: sıkıştır, hassas bilgileri gizle, böl, birleştir, döndür, parolayla kilitle. Diğer dosyalar: zip'le, şifreli zip'e koy, metin ve Word dosyalarında hassas bilgileri gizle |
-| Alt | Gönder | WhatsApp, Mail, QR kodla Wi-Fi üzerinden telefona, dosya yolunu kopyala |
+### Dönüştür (Shift)
 
-- **Zincir.** Bir dilimin üstünde yarım saniye kadar bekle, dilim zincire eklenir. Bıraktığında adımların hepsi sırayla uygulanır (örnek: Döndür, Konumu sil, JPG).
-- **Hassas bilgi radarı.** Sürüklerken dosya taranır. Konum bilgisi, cihaz modeli, TC kimlik no, IBAN, e-posta ya da telefon bulunursa çarkın kenarı turuncu yanar. PDF'te ilk 20 sayfa taranır.
-- **Kırpma paneli.** Bir resmi Kırp dilimine bırakınca kırpma alanını ayarladığın bir panel açılır.
-- **PDF araçları.** Sıkıştır, sayfalara böl, birkaç PDF'i seçim sırasıyla birleştir, döndür, resme ya da metne çevir.
-- **PDF kilidi.** PDF'i parolayla korur, AES-256 kullanır. Diğer dosyalar AES-256 şifreli bir zip'e konur (7-Zip ile açılır, Windows Gezgini AES zip açamaz).
-- **Hassas bilgileri gizle.** PDF'te TC kimlik no, IBAN, e-posta ve telefon gerçekten karartılır: sayfalar resme çevrildiği için gizlenen metin geri kopyalanamaz. Çıktıdaki metin artık seçilemez. Taranmış resimlerin içindeki yazılar henüz algılanmıyor (OCR yok). Metin ve Word dosyalarında bu bilgiler ████ ile değiştirilir.
-- **Arka planı sil.** Küçük bir yapay zekâ modeliyle (U-2-Net, u2netp) arka planı çevrimdışı siler. Basit nesnelerde iyi sonuç verir, saç ve ince kenarlar stüdyo kalitesinde değildir.
-- **Gönder.** WhatsApp: dosya (resimler küçültülür, konum bilgisi silinir) panoya konur ve WhatsApp açılır, bir sohbette Ctrl+V yap. Mail: varsayılan e-posta programında dosya ekli yeni bir ileti açar, program yoksa dosya panoya konur ve tarayıcıda yeni bir Gmail iletisi açılır, dosyayı iletiye yapıştır ya da sürükle. Telefona: bir QR kod gösterir, aynı Wi-Fi'daki telefonla okutunca dosya doğrudan bilgisayarından iner. Bağlantıda rastgele bir anahtar vardır, panel kapanınca ya da 10 dakika sonra çalışmaz.
-- **Çoklu dosya.** Birden fazla dosyayı birlikte sürükle. PDF'leri Birleştir dilimine bırakırsan tek dosya olur.
-- **Orijinale dokunulmaz.** Sonuç, orijinalin yanına yeni adla kaydedilir (`Tatil-temiz.jpg`).
-- **Çevrimdışı.** Hesap yok, yükleme yok, internete hiçbir şey gitmez. Her şey senin makinende çalışır. Yalnız Telefona dilimi yerel ağını kullanır, o da yalnız paneli açıkken.
+- **Resim:** PNG, JPG, BMP, WebP ya da PDF'e çevirme.
+- **PDF:** her sayfayı ayrı bir PNG ya da JPG'ye çevirme (200 dpi), metni çıkarma, Word'e çevirme.
+- **Belge** (Word, metin, Markdown): PDF, metin ya da Word'e çevirme.
 
-Notlar:
-- **Word çıktısı ve belgeden PDF'e dönüşüm** düzeni yalnız [LibreOffice](https://tr.libreoffice.org/) kuruluysa korur (Swivra onu kendisi bulur). Kurulu değilse yalnız metin çıkar, sonuç da bunu söyler. Eski `.doc`, `.rtf` ve `.odt` dosyaları için LibreOffice gerekir.
-- **Telefona**: ilk seferde Windows Güvenlik Duvarı, Swivra'nın ağı kullanıp kullanamayacağını sorar. İzin ver, yoksa telefonlar bağlanamaz.
+### Araçlar (Ctrl)
+
+- **Resim:** kırpma, sıkıştırma, arka planı silme, döndürme, 1080 piksel genişliğe küçültme, konum ve cihaz bilgisini silme.
+- **PDF:** sıkıştırma, hassas bilgileri gizleme, sayfalara bölme, birleştirme, döndürme, parolayla kilitleme.
+- **Diğer dosyalar:** zip'e sıkıştırma, parolalı zip'e koyma. Metin ve Word dosyalarında hassas bilgileri gizleme.
+
+### Gönder (Alt)
+
+- **WhatsApp:** Dosya panoya kopyalanır ve WhatsApp açılır. Bir sohbete girip Ctrl+V yapman yeterli. Resimler gönderilmeden önce küçültülür, konum bilgisi silinir.
+- **Mail:** Varsayılan e-posta programında, dosya ekli yeni bir ileti açılır. Bilgisayarında e-posta programı yoksa dosya panoya kopyalanır ve tarayıcıda yeni bir Gmail iletisi açılır. Dosyayı iletiye yapıştırman ya da sürüklemen yeterli.
+- **Telefona:** Ekranda bir QR kod çıkar. Aynı Wi-Fi ağındaki telefonunla okutunca dosya doğrudan bilgisayarından iner. Bağlantı adresi her seferinde rastgele oluşturulur. Panel kapanınca ya da 10 dakika sonra adres geçersiz olur.
+- **Yolu kopyala:** Dosyanın tam yolunu panoya kopyalar.
+
+## Öne çıkanlar
+
+- **Zincir:** Bir dilimin üstünde yarım saniye kadar beklersen o adım zincire eklenir. Dosyayı bıraktığında zincirdeki bütün adımlar sırayla uygulanır. Örnek: önce döndür, sonra konumu sil, en son JPG'ye çevir.
+- **Hassas bilgi radarı:** Dosyayı sürüklerken Swivra içine bakar. Konum bilgisi, cihaz modeli, TC kimlik numarası, IBAN, e-posta ya da telefon numarası bulursa çarkın kenarı turuncu yanar. PDF'lerde ilk 20 sayfa taranır.
+- **Gerçek gizleme:** PDF'te gizlenen bilgiler siyah kutuyla kapatılır ve sayfalar resme çevrilir. Böylece kapatılan yazı sonradan kopyalanıp geri alınamaz. Metin ve Word dosyalarında bu bilgiler blok karakterlerle değiştirilir.
+- **Orijinal dosyaya dokunulmaz:** Sonuç her zaman orijinalin yanına yeni bir adla kaydedilir, örneğin `Tatil-temiz.jpg`.
+- **Birden fazla dosya:** Birkaç dosyayı birlikte sürükleyebilirsin. Birden fazla PDF'i **Birleştir** dilimine bırakırsan tek bir PDF olur.
+- **Türkçe ve İngilizce:** Arayüz iki dilde. Dili tepsi menüsünden değiştirebilirsin.
 
 ![Kırpma paneli](docs/images/crop-tr.png)
 
-## İndirme
+## Kurulum
 
-1. [GitHub Releases](../../releases) sayfasından `Swivra-<sürüm>-win-x64.zip` dosyasını indir.
-2. Zip'i istediğin yere aç.
-3. `Swivra.exe` dosyasını çalıştır. Sistem tepsisine yerleşir.
+1. [Releases](../../releases) sayfasından en son `Swivra-<sürüm>-win-x64.zip` dosyasını indir.
+2. Zip'i istediğin bir klasöre çıkar.
+3. `Swivra.exe` dosyasını çalıştır. Uygulama, saatin yanındaki sistem tepsisine yerleşir.
 
-Gereken: Windows 10 ya da 11 (64 bit) ve WebView2 Runtime. Windows 11'de hazır gelir. .NET kurman gerekmez.
+Windows 10 ya da 11 (64 bit) ve WebView2 Runtime gerekir. WebView2, Windows 11'de zaten yüklü gelir. Ayrıca .NET kurman gerekmez.
 
-Uygulama imzalı değil, bu yüzden Windows SmartScreen uyarı verebilir. "Daha fazla bilgi", sonra "Yine de çalıştır" de.
+Uygulama dijital olarak imzalı olmadığı için Windows SmartScreen ilk açılışta uyarı verebilir. "Ek bilgi"ye, sonra "Yine de çalıştır"a tıklaman yeterli.
 
 ## Kullanım
 
-1. Explorer'da ya da masaüstünde bir dosyayı sürüklemeye başla.
-2. **Shift** (dönüştür), **Ctrl** (araçlar) ya da **Alt**'a (gönder) bas. Çark imlecin etrafında açılır.
-3. Bir dilimin üstüne gel. Ortada ne olacağı yazar.
+1. Gezgin'de ya da masaüstünde bir dosyayı sürüklemeye başla.
+2. Sürüklerken **Shift** (Dönüştür), **Ctrl** (Araçlar) ya da **Alt** (Gönder) tuşuna bas. Çark imlecin etrafında açılır.
+3. Bir dilimin üstüne gel. Çarkın ortasında ne olacağı yazar.
 4. Dosyayı dilime bırak.
 
-- Adımları zincirlemek için bir dilimin üstünde numara alana kadar bekle, sonra sıradakine geç.
-- İptal etmek için dosyayı çarkın ortasına bırak.
-- Kırpma ve kilit panellerinde **Enter** uygular, **Esc** iptal eder.
-- Dil: tepsi simgesine sağ tıkla, **Dil / Language** menüsünü kullan. İlk açılışta Windows'un görüntü dili izlenir (Türkçe ya da İngilizce).
+- Vazgeçmek için dosyayı çarkın ortasına bırak.
+- Kırpma ve parola panellerinde **Enter** onaylar, **Esc** vazgeçer.
+- Dili değiştirmek için tepsi simgesine sağ tıkla ve **Dil / Language** menüsünü kullan. İlk açılışta Windows hangi dildeyse o seçilir.
+- Tepsi menüsünde ayrıca **Çarkı göster (demo)**, **Kayıtları aç** ve **Çıkış** seçenekleri var.
 
-Tepsi menüsünde ayrıca "Çarkı göster (demo)", "Kayıtları aç" ve "Çıkış" var. Kayıtlar `%LOCALAPPDATA%\Swivra\swivra.log` dosyasına yazılır.
+## Bilinmesi gerekenler
+
+- **Word'e dönüşüm ve belgeden PDF'e dönüşüm:** Sayfa düzeninin korunması için bilgisayarında [LibreOffice](https://tr.libreoffice.org/) kurulu olmalı. Swivra onu kendisi bulur. LibreOffice yoksa yalnız metin aktarılır ve sonuç ekranında bu belirtilir. Eski `.doc`, `.rtf` ve `.odt` dosyaları için LibreOffice şarttır.
+- **Telefona gönderme:** İlk kullanımda Windows Güvenlik Duvarı, Swivra'nın ağa erişip erişemeyeceğini sorar. İzin vermezsen telefon bağlanamaz.
+- **Parolalı zip:** AES-256 ile şifrelenir. Windows'un kendi zip açıcısı bu şifrelemeyi desteklemez, dosyayı [7-Zip](https://www.7-zip.org/) ile açabilirsin.
+- **Taranmış belgeler:** Resim olarak taranmış sayfalardaki yazılar henüz okunamıyor. Radar ve gizleme bu yazıları görmez.
+- **Arka plan silme:** Küçük bir yapay zekâ modeliyle (U-2-Net) tamamen bilgisayarında çalışır. Belirgin nesnelerde iyi sonuç verir. Saç ve ince kenarlarda kusursuz değildir.
+- **İnternet:** Swivra internete hiçbir şey göndermez. Yalnız "Telefona" dilimi, paneli açık olduğu sürece yerel ağını kullanır.
+- **Kayıtlar:** `%LOCALAPPDATA%\Swivra\swivra.log` dosyasına yazılır. Parolalar ve paylaşım adresleri kayda yazılmaz.
 
 ## Kaynaktan derleme
 
-Gereken: Windows 10/11, [.NET 10 SDK](https://dotnet.microsoft.com/download) ve WebView2 Runtime.
+Windows 10 ya da 11, [.NET 10 SDK](https://dotnet.microsoft.com/download) ve WebView2 Runtime gerekir.
 
 ```powershell
 cd src/Swivra.App
 dotnet run
 ```
 
-Yayın paketini (kendi içinde .NET'li, win-x64) üretmek için:
+Dağıtım paketini (.NET gerektirmeyen win-x64 sürümü) oluşturmak için:
 
 ```powershell
 pwsh scripts/publish.ps1
 ```
 
-Bu komut `publish/Swivra-<sürüm>-win-x64.zip` dosyasını yazar. Uygulama tek dosya değil klasör olarak gelir: `web/` ve yerel PDFium ile SkiaSharp kütüphaneleri `Swivra.exe`'nin yanındadır.
+Paket `publish/Swivra-<sürüm>-win-x64.zip` olarak oluşur. Uygulama tek bir exe değil, bir klasör olarak dağıtılır. `web/`, `models/` ve gerekli kütüphaneler `Swivra.exe` ile aynı klasördedir.
 
-### Geliştirici bayrakları
+### Geliştirici seçenekleri
 
-| Bayrak | Ne işe yarar |
+| Seçenek | Ne işe yarar |
 | --- | --- |
-| `--demo --shot cikti.png` | Çarkı sahte bir dosyayla göster, ekran görüntüsü kaydet |
-| `--demo-tool crop\|lock\|tel <dosya>` | Sürüklemeden, gerçek bir dosyada araç panelini aç |
-| `--run adım,adım <dosya> [...]` | Arayüzsüz çalıştır, örnek: `--run png,rot dosya.pdf`. İsteğe bağlı `--password parola` ve `--crop x,y,w,h` |
-| `--radar <dosya>` | Dosyayı tara, radarın bulduğunu kayda yaz |
-| `--lang tr\|en` | Yalnız bu çalıştırma için dil seç |
+| `--demo --shot cikti.png` | Çarkı örnek bir dosyayla açar ve ekran görüntüsünü kaydeder. |
+| `--demo-tool crop\|lock\|tel <dosya>` | Sürüklemeden, gerçek bir dosya için kırpma, parola ya da telefon panelini açar. |
+| `--run adım,adım <dosya> ...` | Adımları arayüz olmadan çalıştırır, örneğin `--run png,rot dosya.pdf`. İsteğe bağlı olarak `--password parola` ve `--crop x,y,genişlik,yükseklik` eklenebilir. |
+| `--radar <dosya>` | Dosyayı tarar ve bulunanları kayda yazar. |
+| `--lang tr\|en` | Yalnız o çalıştırma için dili seçer. |
 
 `--run` ve `--radar` sonuçları kayıt dosyasına yazılır.
 
-## Nasıl çalışıyor
+## Nasıl çalışır
 
-- `InputHook`: sistem geneli klavye ve fare dinleme. Hiçbir tuşu yutmaz, sadece izler.
-- `OverlayForm`: odak çalmayan, daire şeklinde, her şeyin üstünde duran pencere. Çarkı WebView2 çizer (`web/`). Cam görüntüsü, çark açılmadan hemen önce arkadaki alanın bulanıklaştırılmış görüntüsüdür.
-- `CatcherForm`: çarkın üstüne yerleşen neredeyse görünmez pencere. Asıl bırakma hedefi bu. Dosya yolunu sürükleme başlar başlamaz alır (radar için) ve bırakma etkisini her zaman **kopyala** yapar, yani Explorer orijinali asla taşımaz.
-- `FileActions`, `ImageActions`, `PdfActions`, `PdfRedact`, `PdfWord`, `DocActions`, `SendActions`, `PhoneShare`, `Radar`: işlemler ve hassas bilgi taraması. Resimlerde GDI+ ve SkiaSharp (WebP), PDF'lerde görüntüye çevirme için PDFium (PDFtoImage ile), metin için PdfPig, döndürme/bölme/birleştirme/sıkıştırma/kilitleme ve gizleme çıktısı için PDFsharp kullanılır. Word dosyalarında Open XML SDK, şifreli zip'te SharpZipLib, arka plan silmede ONNX Runtime, QR kodda QRCoder kullanılır.
-
-Kütüphane ve lisans araştırması: [docs/kutuphane-arastirmasi.md](docs/kutuphane-arastirmasi.md).
+- **Klavye ve fare dinleme** (`InputHook`): Sürükleme sırasında Shift, Ctrl ya da Alt'a basıldığını yakalar. Hiçbir tuşu engellemez.
+- **Çark penceresi** (`OverlayForm`): Odak çalmayan, her şeyin üstünde duran yuvarlak bir pencere. Çarkı WebView2 çizer (`web/`). Arkadaki cam görüntüsü, çark açılmadan hemen önce alınan ve bulanıklaştırılan ekran görüntüsüdür.
+- **Bırakma hedefi** (`CatcherForm`): Çarkın üstünde duran, neredeyse görünmez bir pencere. Dosyayı asıl o karşılar ve bırakma işlemini her zaman kopyalama olarak bildirir. Böylece Gezgin orijinal dosyayı asla taşımaz.
+- **İşlemler:** Resimler GDI+ ve SkiaSharp, PDF'ler PDFium, PdfPig ve PDFsharp, Word dosyaları Open XML SDK, parolalı zip'ler SharpZipLib, arka plan silme ONNX Runtime, QR kodlar QRCoder ile işlenir.
 
 ## Lisans
 
-[MIT](LICENSE). Üçüncü taraf bileşenler ve lisansları [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) dosyasında.
+[MIT](LICENSE). Kullanılan açık kaynak bileşenler ve lisansları [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) dosyasında listelenmiştir.
