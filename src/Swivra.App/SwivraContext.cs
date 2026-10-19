@@ -281,16 +281,20 @@ internal sealed class SwivraContext : ApplicationContext
         return new StepOptions(crop, password);
     }
 
-    /// <summary>Asks the web UI for the password panel; the PDFs are locked when it answers with "run".</summary>
+    /// <summary>
+    /// Asks the web UI for the password panel; the files are locked when it answers with "run".
+    /// All-PDF drops get password-protected PDFs, anything else becomes one AES-256 zip.
+    /// </summary>
     private void StartLock()
     {
-        if (_files.Length == 0 || _files.Any(f => FileKinds.KindOf(Path.GetExtension(f)) != "pdf"))
+        if (_files.Length == 0)
         {
-            _overlay.Post(new { type = "result", ok = false, title = Lang.T("Şifrele", "Lock"), detail = Lang.T("Yalnız PDF şifrelenir", "Only PDFs can be locked") });
+            _overlay.Post(new { type = "result", ok = false, title = Lang.T("Şifrele", "Lock"), detail = Lang.T("Dosya yok", "No file") });
             FinishSoon();
             return;
         }
-        _overlay.Post(new { type = "lock-form", name = Path.GetFileName(_files[0]), count = _files.Length });
+        bool zip = _files.Any(f => FileKinds.KindOf(Path.GetExtension(f)) != "pdf");
+        _overlay.Post(new { type = "lock-form", name = Path.GetFileName(_files[0]), count = _files.Length, zip });
     }
 
     /// <summary>

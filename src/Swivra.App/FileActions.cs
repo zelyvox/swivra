@@ -69,7 +69,23 @@ internal static class FileActions
             return merged with { Detail = $"{merged.Detail} · {Lang.T("yolu panoda", "path copied")}", ClipboardText = merged.OutputPath };
         }
 
-        var results = files.Select(f => RunOne(f, fileSteps, copyPath, options)).ToList();
+        // Compress and lock on documents/other files make one zip of all of them (PDFs and images keep their own steps).
+        var results = new List<ActionResult>();
+        if (fileSteps is ["cmp"] or ["lock"])
+        {
+            bool lockStep = fileSteps[0] == "lock";
+            bool allPdf = files.All(f => FileKinds.KindOf(Path.GetExtension(f)) == "pdf");
+            var zipFiles = lockStep
+                ? (allPdf ? [] : files.ToList())
+                : files.Where(f => FileKinds.KindOf(Path.GetExtension(f)) is not ("pdf" or "img")).ToList();
+            if (zipFiles.Count > 0)
+            {
+                var zr = lockStep ? DocActions.LockZip(zipFiles, options.Password ?? "") : DocActions.Compress(zipFiles);
+                results.Add(copyPath && zr.Ok ? zr with { ClipboardText = zr.OutputPath } : zr);
+            }
+            results.AddRange(files.Except(zipFiles).Select(f => RunOne(f, fileSteps, copyPath, options)));
+        }
+        else results.AddRange(files.Select(f => RunOne(f, fileSteps, copyPath, options)));
         if (results.Count == 1) return results[0];
 
         var ok = results.Where(r => r.Ok).ToList();
@@ -87,9 +103,9 @@ internal static class FileActions
     private static ActionResult RunOne(string path, List<string> fileSteps, bool copyPath, StepOptions options)
     {
         string kind = FileKinds.KindOf(Path.GetExtension(path));
-        var supported = kind == "pdf" ? PdfActions.Steps : ImageSteps;
+        var supported = kind == "pdf" ? PdfActions.Steps : kind == "doc" ? DocActions.Steps : ImageSteps;
 
-        string? missing = fileSteps.FirstOrDefault(s => (kind != "img" && kind != "pdf") || !supported.Contains(s));
+        string? missing = fileSteps.FirstOrDefault(s => kind == "other" || !supported.Contains(s));
         if (missing is not null)
             return new ActionResult(false, Lang.T("Yakında", "Coming soon"), Lang.T($"{Label(missing)} henüz bu sürümde yok", $"{Label(missing)} is not in this version yet"));
 
@@ -105,6 +121,14 @@ internal static class FileActions
                     var r = PdfActions.Run(path, fileSteps, Label, options);
                     if (!r.Ok || r.OutputPath is null) return r;
                     finalPath = r.OutputPath!;
+                    finalExt = r.OutputExt;
+                    finalName = r.Detail;
+                }
+                else if (kind == "doc")
+                {
+                    var r = DocActions.Run(path, fileSteps, Label);
+                    if (!r.Ok || r.OutputPath is null) return r;
+                    finalPath = r.OutputPath;
                     finalExt = r.OutputExt;
                     finalName = r.Detail;
                 }
