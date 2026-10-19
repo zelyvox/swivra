@@ -31,7 +31,8 @@ dotnet publish $project -c Release -r win-x64 --self-contained true `
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }
 
 # The native SkiaSharp package ships its 89 MB debug symbols, and WebView2 ships XML docs. Neither is needed at run time.
-Get-ChildItem $app -Recurse -Include *.pdb, *.xml | Remove-Item -Force
+# ONNX Runtime also drops its import libraries (.lib); they are only for native linking.
+Get-ChildItem $app -Recurse -Include *.pdb, *.xml, *.lib | Remove-Item -Force
 
 # License texts that must travel with the binaries (see THIRD-PARTY-NOTICES.md).
 $nuget = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path $HOME '.nuget/packages' }
@@ -45,7 +46,10 @@ $licenseFiles = @(
     @{ From = 'microsoft.web.webview2/1.0.4258.31/NOTICE.txt'; To = 'WebView2-NOTICE.txt' },
     @{ From = 'skiasharp/4.150.1/LICENSE.txt'; To = 'SkiaSharp-LICENSE.txt' },
     @{ From = 'skiasharp.nativeassets.win32/4.150.1/THIRD-PARTY-NOTICES.txt'; To = 'SkiaSharp-native-THIRD-PARTY-NOTICES.txt' },
-    @{ From = 'microsoft.extensions.logging.abstractions/8.0.3/LICENSE.TXT'; To = 'Microsoft.Extensions-LICENSE.txt' }
+    @{ From = 'microsoft.extensions.logging.abstractions/8.0.3/LICENSE.TXT'; To = 'Microsoft.Extensions-LICENSE.txt' },
+    @{ From = 'microsoft.ml.onnxruntime/1.31.0/LICENSE'; To = 'OnnxRuntime-LICENSE.txt' },
+    @{ From = 'microsoft.ml.onnxruntime/1.31.0/ThirdPartyNotices.txt'; To = 'OnnxRuntime-ThirdPartyNotices.txt' },
+    @{ From = 'qrcoder/1.8.1/LICENSE.txt'; To = 'QRCoder-LICENSE.txt' }
 )
 foreach ($f in $licenseFiles) {
     $src = Join-Path $nuget $f.From

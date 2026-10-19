@@ -18,6 +18,11 @@ Copies of the license texts that ship with these packages are placed in the `lic
 | Microsoft.Extensions.Logging.Abstractions | 8.0.3 | MIT | https://dot.net/ |
 | Microsoft.Extensions.DependencyInjection.Abstractions | 8.0.2 | MIT | https://dot.net/ |
 | .NET 10 runtime and Windows Forms (self-contained, all `System.*.dll`, `coreclr.dll`, `msquic.dll` and similar) | 10.0.8 | MIT | https://github.com/dotnet/runtime |
+| Microsoft.ML.OnnxRuntime (`Microsoft.ML.OnnxRuntime.dll`, native `onnxruntime.dll`) | 1.31.0 | MIT | https://github.com/microsoft/onnxruntime |
+| U-2-Net model weights, u2netp (`models/u2netp.onnx`, ONNX export from rembg) | rembg release v0.0.0, SHA-256 `309C8469258DDA742793DCE0EBEA8E6DD393174F89934733ECC8B14C76F4DDD8` | Apache-2.0 (weights, U-2-Net); MIT (rembg export) | https://github.com/xuebinqin/U-2-Net, https://github.com/danielgatis/rembg |
+| DocumentFormat.OpenXml and DocumentFormat.OpenXml.Framework | 3.5.1 | MIT | https://github.com/dotnet/Open-XML-SDK |
+| SharpZipLib (`ICSharpCode.SharpZipLib.dll`) | 1.4.2 | MIT | https://github.com/icsharpcode/SharpZipLib |
+| QRCoder (`QRCoder.dll`) | 1.8.1 | MIT | https://github.com/Shane32/QRCoder |
 
 The WebView2 **Runtime** (the Edge-based browser engine) is not part of the package. It is installed separately by Windows or by the user and is covered by its own Microsoft license.
 
