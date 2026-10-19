@@ -4,7 +4,7 @@
 
 Windows için çevrimdışı dosya çarkı. Bir dosyayı sürükle, **Shift**, **Ctrl** ya da **Alt**'a bas, bir dilime bırak. Hiçbir dosya bilgisayarından çıkmaz.
 
-![Swivra çarkı](docs/images/wheel.png)
+![Swivra çarkı](docs/images/wheel-tr.png)
 
 > Durum: erken sürüm (0.1.0). Bazı dilimlerde "Yakında" yazar ve henüz bir şey yapmaz. Aşağıdaki listeye bak.
 
@@ -27,7 +27,7 @@ Windows için çevrimdışı dosya çarkı. Bir dosyayı sürükle, **Shift**, *
 
 Henüz yok: WhatsApp, Mail ve Telefona gönderme dilimleri, arka plan silme, PDF'te hassas alanları gizleme, WebP, PDF ve Word çıktısı.
 
-![Kırpma paneli](docs/images/crop.png)
+![Kırpma paneli](docs/images/crop-tr.png)
 
 ## İndirme
 
