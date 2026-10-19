@@ -117,7 +117,8 @@ internal static class ImageActions
             var inputs = new Dictionary<string, OrtValue> { [session.InputNames[0]] = tensorValue };
             lock (RunLock)
             {
-                using var outputs = session.Run(new RunOptions(), inputs, new[] { session.OutputNames[0] });
+                using var runOptions = new RunOptions();
+                using var outputs = session.Run(runOptions, inputs, new[] { session.OutputNames[0] });
                 outputs[0].GetTensorDataAsSpan<float>().Slice(0, mask.Length).CopyTo(mask);
             }
         }
