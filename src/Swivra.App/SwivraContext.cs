@@ -25,17 +25,13 @@ internal sealed class SwivraContext : ApplicationContext
     {
         _args = args;
 
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("Çarkı göster (demo)", null, (_, _) => RunDemo(null));
-        menu.Items.Add("Kayıtları aç", null, (_, _) => OpenLogFolder());
-        menu.Items.Add("Çıkış", null, (_, _) => ExitThread());
         _tray = new NotifyIcon
         {
             Icon = SystemIcons.Application,
-            Text = "Swivra: dosyayı sürüklerken Shift, Ctrl ya da Alt'a bas",
-            ContextMenuStrip = menu,
+            ContextMenuStrip = new ContextMenuStrip(),
             Visible = true,
         };
+        BuildTrayMenu();
 
         _hideTimer.Tick += (_, _) =>
         {
@@ -61,6 +57,7 @@ internal sealed class SwivraContext : ApplicationContext
         try
         {
             await _overlay.InitAsync();
+            _overlay.Post(new { type = "lang", lang = Lang.Current });
             _hook.Install();
             int demo = Array.IndexOf(_args, "--demo");
             if (demo >= 0)
@@ -81,6 +78,29 @@ internal sealed class SwivraContext : ApplicationContext
             MessageBox.Show("Swivra başlatılamadı. Ayrıntı kayıt dosyasında.", "Swivra");
             ExitThread();
         }
+    }
+
+    /// <summary>Tray menu and tooltip in the current language; rebuilt when the language changes.</summary>
+    private void BuildTrayMenu()
+    {
+        _tray.Text = Lang.T("Swivra: dosyayı sürüklerken Shift, Ctrl ya da Alt'a bas", "Swivra: press Shift, Ctrl or Alt while dragging a file");
+        var menu = _tray.ContextMenuStrip!;
+        menu.Items.Clear();
+        menu.Items.Add(Lang.T("Çarkı göster (demo)", "Show the wheel (demo)"), null, (_, _) => RunDemo(null));
+        var lang = new ToolStripMenuItem("Dil / Language");
+        lang.DropDownItems.Add(new ToolStripMenuItem("Türkçe", null, (_, _) => SetLanguage("tr")) { Checked = Lang.IsTurkish });
+        lang.DropDownItems.Add(new ToolStripMenuItem("English", null, (_, _) => SetLanguage("en")) { Checked = !Lang.IsTurkish });
+        menu.Items.Add(lang);
+        menu.Items.Add(Lang.T("Kayıtları aç", "Open logs"), null, (_, _) => OpenLogFolder());
+        menu.Items.Add(Lang.T("Çıkış", "Exit"), null, (_, _) => ExitThread());
+    }
+
+    private void SetLanguage(string lang)
+    {
+        Lang.Set(lang);
+        Log.Write($"language {Lang.Current}");
+        BuildTrayMenu();
+        _overlay.Post(new { type = "lang", lang = Lang.Current });
     }
 
     private static string ModeName(WheelMode m) => m switch

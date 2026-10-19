@@ -24,6 +24,10 @@ const IC = {
   phone: 'M8 3h8v18H8z M11 18h2',
   link: 'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1 M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1'
 };
+// UI language, set by the host ("lang" message). Strings sit side by side where they are used.
+let LANG = 'tr';
+const t = (tr, en) => LANG === 'tr' ? tr : en;
+
 const BADGE = { pdf: '#FF8A65', docx: '#7EA6FF', txt: '#C9D1E0', png: '#5FD0FF', jpg: '#FFC861', jpeg: '#FFC861', bmp: '#9FB4D8', webp: '#9BE8B0' };
 const MODE_NAME = { convert: 'Dönüştür', tools: 'Araçlar', send: 'Gönder' };
 
@@ -261,6 +265,12 @@ fit();
 
 // ---------- host messages ----------
 const handlers = {
+  lang(m) {
+    LANG = m.lang === 'en' ? 'en' : 'tr';
+    document.documentElement.lang = LANG;
+    applyStaticText();
+    if (S.open && !S.busy) build();
+  },
   backdrop(m) {
     document.documentElement.style.setProperty('--backdrop', m.src ? `url("${m.src}")` : 'none');
   },
@@ -638,6 +648,13 @@ pwEl.addEventListener('keydown', e => {
 $('lock-eye').addEventListener('click', () => { Lock.reveal(pwEl.type === 'password'); pwEl.focus(); });
 $('lock-apply').addEventListener('click', () => Lock.apply());
 $('lock-cancel').addEventListener('click', () => Lock.cancel());
+
+// Fixed text in index.html carries both languages: data-tr / data-en (and data-tr-label / data-en-label for aria-label).
+function applyStaticText() {
+  document.querySelectorAll('[data-tr]').forEach(el => { el.textContent = el.dataset[LANG]; });
+  document.querySelectorAll('[data-tr-label]').forEach(el => { el.setAttribute('aria-label', LANG === 'tr' ? el.dataset.trLabel : el.dataset.enLabel); });
+  document.querySelectorAll('[data-tr-placeholder]').forEach(el => { el.placeholder = LANG === 'tr' ? el.dataset.trPlaceholder : el.dataset.enPlaceholder; });
+}
 
 if (window.chrome && chrome.webview) {
   chrome.webview.addEventListener('message', e => {

@@ -5,6 +5,9 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        int lang = Array.IndexOf(args, "--lang");
+        if (lang >= 0 && lang + 1 < args.Length) Lang.Override(args[lang + 1]);
+
         // Dev tools: run headless, no UI, no hook, no clipboard, allowed next to the tray instance.
         int run = Array.IndexOf(args, "--run");
         if (run >= 0 && run + 2 < args.Length)
