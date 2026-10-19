@@ -143,6 +143,7 @@ html, body {
   position: absolute; inset: 0; padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 14px;
   box-shadow: inset 0 1px 18px rgba(255, 255, 255, .06);
 }
+.panel-body[hidden] { display: none; }
 .panel.opening .panel-body, .panel.opening .panel-light { animation: panelIn .48s cubic-bezier(.34, 1.4, .64, 1) both; transform-origin: var(--ox, 50%) var(--oy, 50%); }
 .panel.opening .pglass { animation: glassIn .3s ease both; }
 .panel.closing .panel-body, .panel.closing .panel-light, .panel.closing .pglass { animation: wheelOut .17s ease-in both; }
@@ -186,8 +187,8 @@ html, body {
 .locked .hd.edge { display: none; }
 
 .panel-foot { height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.crop-info { font-size: 12.5px; color: rgba(238, 242, 255, .7); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.panel.done .crop-info { color: #BFF3D6; font-weight: 600; }
+.panel-info { font-size: 12.5px; color: rgba(238, 242, 255, .7); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel.done .panel-info { color: #BFF3D6; font-weight: 600; }
 .buttons { display: flex; gap: 8px; }
 .btn {
   height: 44px; padding: 0 18px; border-radius: 12px; font: inherit; font-size: 13.5px; color: var(--ink); cursor: pointer;
@@ -198,5 +199,24 @@ html, body {
 .btn.primary:hover { background: rgba(150, 185, 255, .4); }
 .btn:disabled { opacity: .45; cursor: default; }
 
+.lock-content { height: 74px; display: flex; flex-direction: column; gap: 8px; }
+.field { position: relative; height: 48px; }
+.field input {
+  width: 100%; height: 48px; padding: 0 48px 0 16px; border-radius: 12px; outline: none;
+  font: inherit; font-size: 15px; letter-spacing: .02em; color: var(--ink); user-select: text;
+  border: 1px solid rgba(255, 255, 255, .22); background: rgba(8, 12, 28, .45);
+  transition: border-color .15s, box-shadow .15s;
+}
+.field input::placeholder { color: rgba(238, 242, 255, .4); }
+.field input:focus { border-color: rgba(190, 210, 255, .75); box-shadow: 0 0 0 3px rgba(150, 185, 255, .18); }
+.field.nudge input { animation: nudge 1.4s ease-in-out infinite; }
+.eye {
+  position: absolute; right: 6px; top: 6px; width: 36px; height: 36px; border-radius: 9px; border: 0;
+  background: transparent; color: rgba(238, 242, 255, .7); cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.eye:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+.lock-hint { height: 18px; font-size: 12px; line-height: 18px; color: rgba(238, 242, 255, .6); }
+
+@keyframes nudge { 0%, 100% { border-color: rgba(255, 255, 255, .22); } 50% { border-color: rgba(190, 210, 255, .85); } }
 @keyframes panelIn { from { opacity: 0; transform: scale(.3); } }
 @keyframes glassIn { from { opacity: 0; } }
