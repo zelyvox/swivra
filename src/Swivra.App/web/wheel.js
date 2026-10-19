@@ -58,11 +58,18 @@ function actionsFor(file, mode) {
       { id: 'merge', label: t('Birleştir', 'Merge'), icon: IC.merge, ready: true, prev: S.count > 1 ? t(`${S.count} PDF tek dosya`, `${S.count} PDFs into one file`) : t("Başka PDF'lerle tek dosya", 'One file with other PDFs') },
       { id: 'rot', label: t('Döndür', 'Rotate'), icon: IC.rotate, ready: true, prev: t('Tüm sayfalar 90°', 'All pages 90°') }
     ];
-    return [
-      { id: 'cmp', label: t('Sıkıştır', 'Compress'), icon: IC.compress, prev: t('Boyutu küçült', 'Reduce size') },
-      { id: 'hide', label: t('Gizle', 'Hide'), icon: IC.hide, radar: true, prev: t('Hassas alanlar kapatılır', 'Sensitive areas are covered') },
-      { id: 'lock', label: t('Şifrele', 'Lock'), icon: IC.lock, prev: t('Parola ile kilitle', 'Lock with a password') }
+    // Documents and other files: compress and lock both produce a .zip (lock: AES-256, with a password panel).
+    const zipTools = [
+      { id: 'cmp', label: t('Sıkıştır', 'Compress'), icon: IC.compress, ready: true, prev: S.count > 1 ? t(`${S.count} dosya tek .zip`, `${S.count} files into one .zip`) : t('.zip içine sıkıştırılır', 'Compressed into a .zip') },
+      { id: 'lock', label: t('Şifrele', 'Lock'), icon: IC.lock, ready: true, tool: true, prev: t('Bırak: parola sorulur, şifreli .zip', 'Drop: asks for a password, encrypted .zip') }
     ];
+    if (kind === 'doc') {
+      const hideOk = ['txt', 'md', 'docx'].includes(file.ext);
+      return [zipTools[0],
+        { id: 'hide', label: t('Gizle', 'Hide'), icon: IC.hide, radar: true, ready: hideOk, prev: hideOk ? t('TC, IBAN, e-posta, telefon ████ olur', 'ID, IBAN, email, phone become ████') : t('Yalnız .txt, .md, .docx', 'Only .txt, .md, .docx') },
+        zipTools[1]];
+    }
+    return zipTools;
   }
   if (kind === 'pdf') return [
     { id: 'docx', label: 'Word', icon: IC.doc, prev: t('Düzen korunur', 'Layout is kept') },
@@ -77,9 +84,18 @@ function actionsFor(file, mode) {
       id: e, label: e === 'pdf' ? 'PDF' : (e === 'webp' ? 'WebP' : e.toUpperCase()), icon: e === 'pdf' ? IC.pdf : IC.image, prev: P[e][0], ready: P[e][1]
     }));
   }
-  if (kind === 'doc') return ['pdf', 'txt', 'docx'].filter(e => e !== file.ext).map(e => ({
-    id: e, label: e === 'docx' ? 'Word' : (e === 'txt' ? t('Metin', 'Text') : 'PDF'), icon: e === 'pdf' ? IC.pdf : (e === 'txt' ? IC.text : IC.doc), prev: t('Biçim korunur', 'Format is kept')
-  }));
+  if (kind === 'doc') {
+    // Native: txt/md -> docx, docx -> txt, txt/md/docx -> text-only PDF. LibreOffice (if installed) does everything else and keeps the layout in PDFs.
+    const native = ['txt', 'md', 'docx'].includes(file.ext), plain = file.ext === 'txt' || file.ext === 'md';
+    const P = {
+      pdf: native ? t('LibreOffice varsa biçim korunur, yoksa yalnız metin', 'Layout kept with LibreOffice, else text only') : t('LibreOffice gerekli', 'Needs LibreOffice'),
+      txt: file.ext === 'docx' ? t('Yalnız metin', 'Text only') : t('LibreOffice gerekli', 'Needs LibreOffice'),
+      docx: plain ? t('Düz metin, biçimsiz', 'Plain text, no formatting') : t('LibreOffice gerekli', 'Needs LibreOffice')
+    };
+    return ['pdf', 'txt', 'docx'].filter(e => e !== file.ext && !(e === 'txt' && file.ext === 'md')).map(e => ({
+      id: e, label: e === 'docx' ? 'Word' : (e === 'txt' ? t('Metin', 'Text') : 'PDF'), icon: e === 'pdf' ? IC.pdf : (e === 'txt' ? IC.text : IC.doc), prev: P[e], ready: true
+    }));
+  }
   return [];
 }
 
@@ -578,21 +594,23 @@ stageEl.addEventListener('pointercancel', e => Crop.up(e));
 $('crop-apply').addEventListener('click', () => Crop.apply());
 $('crop-cancel').addEventListener('click', () => Crop.cancel());
 
-// ---------- lock (PDF password) ----------
+// ---------- lock (password for PDFs, encrypted zip for everything else) ----------
 const LOCK = { w: 440, content: 74, minLength: 4 };
 const EYE_OPEN = 'M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z M12 9.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5';
 const pwEl = $('lock-pw'), lockHint = $('lock-hint');
 
 const Lock = {
-  id: 'lock', bodyId: 'lock-body', info: $('lock-info'), busy: false,
+  id: 'lock', bodyId: 'lock-body', info: $('lock-info'), busy: false, zip: false,
 
   load(m) {
     this.busy = false;
-    $('lock-file').textContent = m.count > 1 ? t(`${m.count} PDF`, `${m.count} PDFs`) : m.name;
+    this.zip = !!m.zip;
+    $('lock-file').textContent = m.count > 1 ? (this.zip ? t(`${m.count} dosya`, `${m.count} files`) : t(`${m.count} PDF`, `${m.count} PDFs`)) : m.name;
     pwEl.value = '';
     pwEl.disabled = false;
     this.reveal(false);
-    this.info.textContent = m.count > 1 ? t('Hepsine aynı parola · orijinaller şifresiz kalır', 'Same password for all · originals stay unlocked') : t('Orijinal dosya şifresiz kalır', 'The original file stays unlocked');
+    this.info.textContent = this.zip ? t('Şifreli .zip · 7-Zip ile açılır', 'Encrypted .zip · opens in 7-Zip')
+      : m.count > 1 ? t('Hepsine aynı parola · orijinaller şifresiz kalır', 'Same password for all · originals stay unlocked') : t('Orijinal dosya şifresiz kalır', 'The original file stays unlocked');
     $('lock-cancel').disabled = false;
     this.check();
     Panel.size(this, LOCK.w, LOCK.content, true);
@@ -615,7 +633,7 @@ const Lock = {
   check() {
     const n = pwEl.value.length;
     lockHint.textContent = n === 0 ? t('Bu parola olmadan dosya açılmaz, unutma', "The file can't be opened without this password, so don't forget it")
-      : n < LOCK.minLength ? t(`En az ${LOCK.minLength} karakter`, `At least ${LOCK.minLength} characters`) : t('AES-256 ile kilitlenecek', 'Will be locked with AES-256');
+      : n < LOCK.minLength ? t(`En az ${LOCK.minLength} karakter`, `At least ${LOCK.minLength} characters`) : this.zip ? t('AES-256 şifreli .zip olacak', 'Will be an AES-256 encrypted .zip') : t('AES-256 ile kilitlenecek', 'Will be locked with AES-256');
     $('lock-apply').disabled = this.busy || n < LOCK.minLength;
   },
 

@@ -13,6 +13,7 @@ internal static partial class Radar
     private static readonly HashSet<string> TextExts = new(StringComparer.OrdinalIgnoreCase) { ".txt", ".csv", ".md", ".json", ".xml", ".log" };
     private const long MaxTextBytes = 5 * 1024 * 1024;
     private const int MaxPdfPages = 20;
+    private const long MaxDocxBytes = 25 * 1024 * 1024;
 
     public static List<string> Scan(string path)
     {
@@ -22,6 +23,7 @@ internal static partial class Radar
             string ext = Path.GetExtension(path);
             if (FileKinds.IsImage(ext)) ScanImage(path, found);
             else if (ext.Equals(".pdf", StringComparison.OrdinalIgnoreCase)) ScanPdf(path, found);
+            else if (ext.Equals(".docx", StringComparison.OrdinalIgnoreCase) && new FileInfo(path).Length <= MaxDocxBytes) ScanText(DocActions.DocxText(path), found);
             else if (TextExts.Contains(ext) && new FileInfo(path).Length <= MaxTextBytes) ScanText(File.ReadAllText(path, Encoding.UTF8), found);
         }
         catch (Exception ex)
@@ -62,6 +64,17 @@ internal static partial class Radar
         if (IbanCandidate().Matches(text).Any(m => IsValidIban(m.Value))) found.Add("IBAN");
         if (Email().IsMatch(text)) found.Add(Lang.T("E-posta", "Email"));
         if (Phone().IsMatch(text)) found.Add(Lang.T("Telefon", "Phone"));
+    }
+
+    /// <summary>Spans (start, length) of every valid TC id, IBAN, e-mail and phone number in the text, for masking.</summary>
+    public static List<(int Start, int Length)> FindSensitiveSpans(string text)
+    {
+        var spans = new List<(int Start, int Length)>();
+        spans.AddRange(TcCandidate().Matches(text).Where(m => IsValidTc(m.Value)).Select(m => (m.Index, m.Length)));
+        spans.AddRange(IbanCandidate().Matches(text).Where(m => IsValidIban(m.Value)).Select(m => (m.Index, m.Length)));
+        spans.AddRange(Email().Matches(text).Select(m => (m.Index, m.Length)));
+        spans.AddRange(Phone().Matches(text).Select(m => (m.Index, m.Length)));
+        return spans;
     }
 
     /// <summary>
