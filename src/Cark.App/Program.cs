@@ -7,7 +7,18 @@ static class Program
     {
         // Dev tools: run headless, no UI, no hook, no clipboard, allowed next to the tray instance.
         int run = Array.IndexOf(args, "--run");
-        if (run >= 0 && run + 2 < args.Length) return HeadlessRun(args[(run + 1)], args[(run + 2)..]);
+        if (run >= 0 && run + 2 < args.Length)
+        {
+            var rest = args[(run + 2)..].ToList();
+            string? password = null;
+            int pw = rest.IndexOf("--password");
+            if (pw >= 0 && pw + 1 < rest.Count)
+            {
+                password = rest[pw + 1];
+                rest.RemoveRange(pw, 2);
+            }
+            return HeadlessRun(args[run + 1], rest.ToArray(), new StepOptions(Password: password));
+        }
         int radar = Array.IndexOf(args, "--radar");
         if (radar >= 0 && radar + 1 < args.Length)
         {
@@ -30,13 +41,13 @@ static class Program
         return 0;
     }
 
-    /// <summary>--run step,step,... file1 [file2 ...]: runs the steps and logs the result.</summary>
-    private static int HeadlessRun(string stepList, string[] files)
+    /// <summary>--run step,step,... [--password pw] file1 [file2 ...]: runs the steps and logs the result.</summary>
+    private static int HeadlessRun(string stepList, string[] files, StepOptions options)
     {
         var steps = stepList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         try
         {
-            var r = FileActions.Run(files, steps);
+            var r = FileActions.Run(files, steps, options);
             Log.Write($"run-result ok={r.Ok} title={r.Title} detail={r.Detail} output={r.OutputPath ?? "-"} ext={r.OutputExt ?? "-"} clip={(r.ClipboardText is null ? "-" : r.ClipboardText.Replace("\n", "|"))}");
             return r.Ok ? 0 : 1;
         }

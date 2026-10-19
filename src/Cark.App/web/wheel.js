@@ -46,7 +46,7 @@ function actionsFor(file, mode) {
       { id: 'rot', label: 'Döndür', icon: IC.rotate, ready: true, prev: '90° sağa' }
     ];
     if (kind === 'pdf') return [
-      { id: 'cmp', label: 'Sıkıştır', icon: IC.compress, prev: 'Boyutu küçült' },
+      { id: 'cmp', label: 'Sıkıştır', icon: IC.compress, ready: true, prev: 'Görseller küçültülür' },
       { id: 'hide', label: 'Gizle', icon: IC.hide, radar: true, prev: 'Hassas alanlar kapatılır' },
       { id: 'lock', label: 'Şifrele', icon: IC.lock, prev: 'Parola ile kilitle' },
       { id: 'split', label: 'Böl', icon: IC.split, ready: true, prev: 'Her sayfa ayrı dosya' },

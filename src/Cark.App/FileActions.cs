@@ -94,16 +94,18 @@ internal static class FileActions
 
         string finalPath = path;
         string? finalExt = null;
+        string? finalName = null;
         if (fileSteps.Count > 0)
         {
             try
             {
                 if (kind == "pdf")
                 {
-                    var r = PdfActions.Run(path, fileSteps, Label);
-                    if (!r.Ok) return r;
+                    var r = PdfActions.Run(path, fileSteps, Label, options);
+                    if (!r.Ok || r.OutputPath is null) return r;
                     finalPath = r.OutputPath!;
                     finalExt = r.OutputExt;
+                    finalName = r.Detail;
                 }
                 else
                 {
@@ -119,7 +121,7 @@ internal static class FileActions
         }
 
         string? clip = copyPath ? finalPath : null;
-        string name = Path.GetFileName(finalPath);
+        string name = finalName ?? Path.GetFileName(finalPath);
         if (fileSteps.Count == 0) return new ActionResult(true, "Kopyalandı", "Yol panoda", ClipboardText: clip);
         string detail = copyPath ? $"{name} · yolu panoda" : name;
         return new ActionResult(true, "Hazır", detail, finalPath, finalExt, clip);
