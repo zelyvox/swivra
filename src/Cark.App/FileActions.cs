@@ -27,6 +27,15 @@ internal static class FileKinds
 internal sealed record ActionResult(bool Ok, string Title, string Detail, string? OutputPath = null, string? OutputExt = null, string? ClipboardText = null);
 
 /// <summary>
+/// Input that some steps need beyond the step id, filled in by a tool panel.
+/// Crop is in pixels of the image as the user sees it (EXIF orientation applied, before any rotate step).
+/// </summary>
+internal sealed record StepOptions(Rectangle? Crop = null, string? Password = null)
+{
+    public static readonly StepOptions None = new();
+}
+
+/// <summary>
 /// Runs a chain of wheel steps on one or more files. Originals are never modified;
 /// output goes next to them under a new, non-colliding name.
 /// Image steps use GDI+, PDF steps live in PdfActions; everything else reports "not yet".
@@ -43,8 +52,9 @@ internal static class FileActions
 
     private static readonly HashSet<string> ImageSteps = new() { "png", "jpg", "bmp", "rot", "loc", "rs", "cmp" };
 
-    public static ActionResult Run(IReadOnlyList<string> files, IReadOnlyList<string> steps)
+    public static ActionResult Run(IReadOnlyList<string> files, IReadOnlyList<string> steps, StepOptions? options = null)
     {
+        options ??= StepOptions.None;
         var fileSteps = steps.Where(s => s != "path").ToList();
         bool copyPath = steps.Contains("path");
 
@@ -58,7 +68,7 @@ internal static class FileActions
             return merged with { Detail = $"{merged.Detail} · yolu panoda", ClipboardText = merged.OutputPath };
         }
 
-        var results = files.Select(f => RunOne(f, fileSteps, copyPath)).ToList();
+        var results = files.Select(f => RunOne(f, fileSteps, copyPath, options)).ToList();
         if (results.Count == 1) return results[0];
 
         var ok = results.Where(r => r.Ok).ToList();
@@ -73,7 +83,7 @@ internal static class FileActions
         return new ActionResult(true, "Hazır", detail, ok[0].OutputPath, ext, clip);
     }
 
-    private static ActionResult RunOne(string path, List<string> fileSteps, bool copyPath)
+    private static ActionResult RunOne(string path, List<string> fileSteps, bool copyPath, StepOptions options)
     {
         string kind = FileKinds.KindOf(Path.GetExtension(path));
         var supported = kind == "pdf" ? PdfActions.Steps : ImageSteps;
@@ -97,7 +107,7 @@ internal static class FileActions
                 }
                 else
                 {
-                    finalPath = RunImage(path, fileSteps);
+                    finalPath = RunImage(path, fileSteps, options);
                     finalExt = Path.GetExtension(finalPath).TrimStart('.').ToLowerInvariant();
                 }
             }
@@ -117,7 +127,7 @@ internal static class FileActions
 
     private static string Label(string step) => Labels.GetValueOrDefault(step, step);
 
-    private static string RunImage(string path, List<string> steps)
+    private static string RunImage(string path, List<string> steps, StepOptions options)
     {
         string ext = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
         if (ext == "jpeg") ext = "jpg";
