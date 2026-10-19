@@ -24,7 +24,6 @@ internal static class DocActions
 
     private const string Mask = "████";
     private static readonly HashSet<string> PlainExts = new(StringComparer.OrdinalIgnoreCase) { ".txt", ".md" };
-    private const int LibreOfficeTimeoutMs = 120_000;
 
     private sealed class DocFailure(string title, string detail) : Exception(detail)
     {
@@ -74,16 +73,9 @@ internal static class DocActions
     private static ActionResult ToPdf(string path)
     {
         string ext = Ext(path);
-        string? soffice = FindLibreOffice();
-        if (soffice is not null)
-        {
-            string pdf = LibreOfficeConvert(soffice, path, "pdf", "pdf");
-            return Done(pdf, "LibreOffice");
-        }
+        if (ViaOffice(path, "pdf") is ActionResult office) return office;
 
-        if (!PlainExts.Contains(ext) && ext != ".docx")
-            throw new DocFailure(Lang.T("LibreOffice gerekli", "LibreOffice required"),
-                Lang.T($"{ext} dosyasını PDF'e çevirmek için LibreOffice kurulu olmalı", $"Converting {ext} to PDF needs LibreOffice installed"));
+        if (!PlainExts.Contains(ext) && ext != ".docx") throw NeedOffice(ext, "PDF");
 
         string text = ext == ".docx" ? DocxText(path) : ReadText(path, out _);
         string output = OutPath(path, "", "pdf");
@@ -110,10 +102,7 @@ internal static class DocActions
             File.WriteAllText(output, DocxText(path), new UTF8Encoding(false));
             return Done(output, Lang.T("yalnız metin", "text only"));
         }
-        string? soffice = FindLibreOffice();
-        if (soffice is null)
-            throw NeedLibreOffice(ext, "txt");
-        return Done(LibreOfficeConvert(soffice, path, "txt:Text (encoded):UTF8", "txt"), "LibreOffice");
+        return ViaOffice(path, "txt") ?? throw NeedOffice(ext, "txt");
     }
 
     private static ActionResult ToDocx(string path)
@@ -134,15 +123,20 @@ internal static class DocActions
             }
             return Done(output, Lang.T("düz metin", "plain text"));
         }
-        string? soffice = FindLibreOffice();
-        if (soffice is null)
-            throw NeedLibreOffice(ext, "docx");
-        return Done(LibreOfficeConvert(soffice, path, "docx", "docx"), "LibreOffice");
+        return ViaOffice(path, "docx") ?? throw NeedOffice(ext, "docx");
     }
 
-    private static DocFailure NeedLibreOffice(string ext, string target) =>
-        new(Lang.T("LibreOffice gerekli", "LibreOffice required"),
-            Lang.T($"{ext} dosyasını {target} yapmak için LibreOffice kurulu olmalı", $"Converting {ext} to {target} needs LibreOffice installed"));
+    /// <summary>Word first, then LibreOffice (OfficeConvert); null when neither is there or both failed.</summary>
+    private static ActionResult? ViaOffice(string path, string ext)
+    {
+        string target = OutPath(path, "", ext);
+        var r = OfficeConvert.Convert(path, target);
+        return r is null ? null : Done(r.Path, r.Engine);
+    }
+
+    private static DocFailure NeedOffice(string ext, string target) =>
+        new(Lang.T("Word ya da LibreOffice gerekli", "Word or LibreOffice required"),
+            Lang.T($"{ext} dosyasını {target} yapmak için Word ya da LibreOffice kurulu olmalı", $"Converting {ext} to {target} needs Word or LibreOffice installed"));
 
     // ---------- text helpers ----------
 
@@ -320,65 +314,6 @@ internal static class DocActions
             while (j < line.Length && line[j] == ' ') j++;
             yield return line[i..j];
             i = j;
-        }
-    }
-
-    // ---------- LibreOffice ----------
-
-    internal static string? FindLibreOffice()
-    {
-        var candidates = new List<string>();
-        foreach (var root in new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) })
-        {
-            if (!string.IsNullOrEmpty(root)) candidates.Add(Path.Combine(root, "LibreOffice", "program", "soffice.exe"));
-        }
-        foreach (var hive in new[] { Registry.LocalMachine, Registry.CurrentUser })
-        {
-            try
-            {
-                using var key = hive.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\soffice.exe");
-                if (key?.GetValue(null) is string p) candidates.Add(p.Trim('"'));
-            }
-            catch { /* registry unreadable: fall back to the folders above */ }
-        }
-        return candidates.FirstOrDefault(File.Exists);
-    }
-
-    /// <summary>Headless LibreOffice conversion in a throwaway profile; the result is moved next to the original.</summary>
-    private static string LibreOfficeConvert(string soffice, string path, string filter, string ext)
-    {
-        string work = Path.Combine(Path.GetTempPath(), "swivra-lo-" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(work);
-        try
-        {
-            var psi = new ProcessStartInfo(soffice) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
-            psi.ArgumentList.Add("--headless");
-            psi.ArgumentList.Add("--norestore");
-            psi.ArgumentList.Add("-env:UserInstallation=" + new Uri(Path.Combine(work, "profile")).AbsoluteUri);
-            psi.ArgumentList.Add("--convert-to");
-            psi.ArgumentList.Add(filter);
-            psi.ArgumentList.Add("--outdir");
-            psi.ArgumentList.Add(work);
-            psi.ArgumentList.Add(path);
-            using var proc = Process.Start(psi) ?? throw new DocFailure(Lang.T("Olmadı", "Failed"), Lang.T("LibreOffice başlatılamadı", "Could not start LibreOffice"));
-            // Drain output so a full pipe cannot stall the process.
-            _ = proc.StandardOutput.ReadToEndAsync();
-            _ = proc.StandardError.ReadToEndAsync();
-            if (!proc.WaitForExit(LibreOfficeTimeoutMs))
-            {
-                try { proc.Kill(true); } catch { /* already gone */ }
-                throw new DocFailure(Lang.T("Olmadı", "Failed"), Lang.T("LibreOffice zamanında bitirmedi", "LibreOffice did not finish in time"));
-            }
-            string produced = Path.Combine(work, Path.GetFileNameWithoutExtension(path) + "." + ext);
-            if (!File.Exists(produced))
-                throw new DocFailure(Lang.T("Olmadı", "Failed"), Lang.T("LibreOffice dosyayı çeviremedi", "LibreOffice could not convert the file"));
-            string target = OutPath(path, "", ext);
-            File.Move(produced, target);
-            return target;
-        }
-        finally
-        {
-            try { Directory.Delete(work, true); } catch { /* temp cleanup is best effort */ }
         }
     }
 

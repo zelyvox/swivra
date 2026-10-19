@@ -72,7 +72,7 @@ function actionsFor(file, mode) {
     return zipTools;
   }
   if (kind === 'pdf') return [
-    { id: 'docx', label: 'Word', icon: IC.doc, ready: true, prev: t("Metin Word'e · LibreOffice varsa düzen de", 'Text to Word · layout too with LibreOffice') },
+    { id: 'docx', label: 'Word', icon: IC.doc, ready: true, prev: t("Word ya da LibreOffice varsa düzen korunur", 'Layout kept with Word or LibreOffice') },
     { id: 'txt', label: t('Metin', 'Text'), icon: IC.text, ready: true, prev: t('Yalnız metin, düz .txt', 'Text only, plain .txt') },
     { id: 'png', label: 'PNG', icon: IC.image, ready: true, prev: t('Her sayfa bir görsel · 200 dpi', 'One image per page · 200 dpi') },
     { id: 'jpg', label: 'JPG', icon: IC.image, ready: true, prev: t('Her sayfa bir görsel · 200 dpi', 'One image per page · 200 dpi') }
@@ -85,12 +85,12 @@ function actionsFor(file, mode) {
     }));
   }
   if (kind === 'doc') {
-    // Native: txt/md -> docx, docx -> txt, txt/md/docx -> text-only PDF. LibreOffice (if installed) does everything else and keeps the layout in PDFs.
+    // Native: txt/md -> docx, docx -> txt, txt/md/docx -> text-only PDF. Word or LibreOffice (if installed) does everything else and keeps the layout in PDFs.
     const native = ['txt', 'md', 'docx'].includes(file.ext), plain = file.ext === 'txt' || file.ext === 'md';
     const P = {
-      pdf: native ? t('LibreOffice varsa biçim korunur, yoksa yalnız metin', 'Layout kept with LibreOffice, else text only') : t('LibreOffice gerekli', 'Needs LibreOffice'),
-      txt: file.ext === 'docx' ? t('Yalnız metin', 'Text only') : t('LibreOffice gerekli', 'Needs LibreOffice'),
-      docx: plain ? t('Düz metin, biçimsiz', 'Plain text, no formatting') : t('LibreOffice gerekli', 'Needs LibreOffice')
+      pdf: native ? t('Word ya da LibreOffice varsa biçim korunur, yoksa yalnız metin', 'Layout kept with Word or LibreOffice, else text only') : t('LibreOffice gerekli', 'Needs LibreOffice'),
+      txt: file.ext === 'docx' ? t('Yalnız metin', 'Text only') : t('Word ya da LibreOffice gerekli', 'Needs Word or LibreOffice'),
+      docx: plain ? t('Düz metin, biçimsiz', 'Plain text, no formatting') : t('Word ya da LibreOffice gerekli', 'Needs Word or LibreOffice')
     };
     return ['pdf', 'txt', 'docx'].filter(e => e !== file.ext && !(e === 'txt' && file.ext === 'md')).map(e => ({
       id: e, label: e === 'docx' ? 'Word' : (e === 'txt' ? t('Metin', 'Text') : 'PDF'), icon: e === 'pdf' ? IC.pdf : (e === 'txt' ? IC.text : IC.doc), prev: P[e], ready: true

@@ -64,7 +64,7 @@ Uygulama dijital olarak imzalı olmadığı için Windows SmartScreen ilk açıl
 
 ## Bilinmesi gerekenler
 
-- **Word'e dönüşüm ve belgeden PDF'e dönüşüm:** Sayfa düzeninin korunması için bilgisayarında [LibreOffice](https://tr.libreoffice.org/) kurulu olmalı. Swivra onu kendisi bulur. LibreOffice yoksa yalnız metin aktarılır ve sonuç ekranında bu belirtilir. Eski `.doc`, `.rtf` ve `.odt` dosyaları için LibreOffice şarttır.
+- **Word'e dönüşüm ve belgeden PDF'e dönüşüm:** Sayfa düzenini korumak için Swivra bilgisayarında zaten kurulu olan bir ofis programını kullanır: önce Microsoft Word'e, o yoksa ücretsiz [LibreOffice](https://tr.libreoffice.org/)'e bakar. Bunları kendisi bulur, arka planda ve makroları kapalı olarak çalıştırır. İkisi de yoksa yalnız metin aktarılır ve sonuç ekranında bu belirtilir. Eski `.doc`, `.rtf` ve `.odt` dosyaları için ikisinden biri şarttır.
 - **Telefona gönderme:** İlk kullanımda Windows Güvenlik Duvarı, Swivra'nın ağa erişip erişemeyeceğini sorar. İzin vermezsen telefon bağlanamaz.
 - **Parolalı zip:** AES-256 ile şifrelenir. Windows'un kendi zip açıcısı bu şifrelemeyi desteklemez, dosyayı [7-Zip](https://www.7-zip.org/) ile açabilirsin.
 - **Taranmış belgeler:** Resim olarak taranmış sayfalardaki yazılar henüz okunamıyor. Radar ve gizleme bu yazıları görmez.
@@ -106,7 +106,7 @@ Paket `publish/Swivra-<sürüm>-win-x64.zip` olarak oluşur. Uygulama tek bir ex
 - **Klavye ve fare dinleme** (`InputHook`): Sürükleme sırasında Shift, Ctrl ya da Alt'a basıldığını yakalar. Hiçbir tuşu engellemez.
 - **Çark penceresi** (`OverlayForm`): Odak çalmayan, her şeyin üstünde duran yuvarlak bir pencere. Çarkı WebView2 çizer (`web/`). Arkadaki cam görüntüsü, çark açılmadan hemen önce alınan ve bulanıklaştırılan ekran görüntüsüdür.
 - **Bırakma hedefi** (`CatcherForm`): Çarkın üstünde duran, neredeyse görünmez bir pencere. Dosyayı asıl o karşılar ve bırakma işlemini her zaman kopyalama olarak bildirir. Böylece Gezgin orijinal dosyayı asla taşımaz.
-- **İşlemler:** Resimler GDI+ ve SkiaSharp, PDF'ler PDFium, PdfPig ve PDFsharp, Word dosyaları Open XML SDK, parolalı zip'ler SharpZipLib, arka plan silme ONNX Runtime, QR kodlar QRCoder ile işlenir.
+- **İşlemler:** Resimler GDI+ ve SkiaSharp, PDF'ler PDFium, PdfPig ve PDFsharp, Word dosyaları Open XML SDK (düzen korunacaksa Microsoft Word ya da LibreOffice), parolalı zip'ler SharpZipLib, arka plan silme ONNX Runtime, QR kodlar QRCoder ile işlenir.
 
 ## Lisans
 

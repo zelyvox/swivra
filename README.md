@@ -64,7 +64,7 @@ The app is not code-signed, so Windows SmartScreen may warn you the first time. 
 
 ## Good to know
 
-- **Converting to Word, and documents to PDF:** To keep the page layout, [LibreOffice](https://www.libreoffice.org/) must be installed. Swivra finds it by itself. Without LibreOffice only the text is converted, and the result says so. Old `.doc`, `.rtf` and `.odt` files always need LibreOffice.
+- **Converting to Word, and documents to PDF:** To keep the page layout, Swivra uses an office program already on your PC: Microsoft Word first, then [LibreOffice](https://www.libreoffice.org/) (free). It finds them by itself and runs them in the background, with macros turned off. With neither installed, only the text is converted, and the result says so. Old `.doc`, `.rtf` and `.odt` files always need one of them.
 - **To phone:** The first time, Windows Firewall asks whether Swivra may use the network. If you do not allow it, your phone cannot connect.
 - **Password-protected zip:** Encrypted with AES-256. The zip support built into Windows cannot open it; use [7-Zip](https://www.7-zip.org/).
 - **Scanned documents:** Text inside scanned page images cannot be read yet, so the radar and redaction do not see it.
@@ -106,7 +106,7 @@ Results of `--run` and `--radar` are written to the log file.
 - **Keyboard and mouse listener** (`InputHook`): Notices when Shift, Ctrl or Alt is pressed during a drag. It never blocks a key.
 - **Wheel window** (`OverlayForm`): A round, always-on-top window that never steals focus. WebView2 draws the wheel (`web/`). The glass effect is a blurred screenshot of the area behind the wheel, taken just before it opens.
 - **Drop target** (`CatcherForm`): A nearly invisible window on top of the wheel. It is what actually receives the file, and it always reports the drop as a copy, so File Explorer never moves your original.
-- **Processing:** Images use GDI+ and SkiaSharp; PDFs use PDFium, PdfPig and PDFsharp; Word files use the Open XML SDK; password-protected zips use SharpZipLib; background removal uses ONNX Runtime; QR codes use QRCoder.
+- **Processing:** Images use GDI+ and SkiaSharp; PDFs use PDFium, PdfPig and PDFsharp; Word files use the Open XML SDK, and Microsoft Word or LibreOffice when the layout must be kept; password-protected zips use SharpZipLib; background removal uses ONNX Runtime; QR codes use QRCoder.
 
 ## License
 
