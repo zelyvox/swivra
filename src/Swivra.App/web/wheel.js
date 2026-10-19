@@ -29,56 +29,56 @@ let LANG = 'tr';
 const t = (tr, en) => LANG === 'tr' ? tr : en;
 
 const BADGE = { pdf: '#FF8A65', docx: '#7EA6FF', txt: '#C9D1E0', png: '#5FD0FF', jpg: '#FFC861', jpeg: '#FFC861', bmp: '#9FB4D8', webp: '#9BE8B0' };
-const MODE_NAME = { convert: 'Dönüştür', tools: 'Araçlar', send: 'Gönder' };
+const modeName = m => ({ convert: t('Dönüştür', 'Convert'), tools: t('Araçlar', 'Tools'), send: t('Gönder', 'Send') })[m];
 
 // `ready` marks what the host can really do in this build; the rest says "yakında".
 // `tool` opens a panel on drop instead of running at once, so it never joins a chain.
 function actionsFor(file, mode) {
   const kind = file ? file.kind : 'other';
   if (mode === 'send') return [
-    { id: 'wa', label: 'WhatsApp', icon: IC.chat, send: true, prev: 'Sohbete göre boyutlanır' },
-    { id: 'mail', label: 'Mail', icon: IC.mail, send: true, prev: 'Ek sınırına göre sıkışır' },
-    { id: 'tel', label: 'Telefona', icon: IC.phone, send: true, prev: 'Aynı ağdaki telefona' },
-    { id: 'path', label: 'Yolu kopyala', icon: IC.link, send: true, ready: true, prev: 'Panoya kopyalanır' }
+    { id: 'wa', label: 'WhatsApp', icon: IC.chat, send: true, prev: t('Sohbete göre boyutlanır', 'Sized for the chat') },
+    { id: 'mail', label: 'Mail', icon: IC.mail, send: true, prev: t('Ek sınırına göre sıkışır', 'Fits the attachment limit') },
+    { id: 'tel', label: t('Telefona', 'To phone'), icon: IC.phone, send: true, prev: t('Aynı ağdaki telefona', 'To a phone on the same network') },
+    { id: 'path', label: t('Yolu kopyala', 'Copy path'), icon: IC.link, send: true, ready: true, prev: t('Panoya kopyalanır', 'Copied to the clipboard') }
   ];
   if (mode === 'tools') {
     if (kind === 'img') return [
-      { id: 'crop', label: 'Kırp', icon: IC.crop, ready: true, tool: true, prev: S.count > 1 ? 'Tek resim kırpılır' : 'Bırak: kırpma paneli açılır' },
-      { id: 'cmp', label: 'Sıkıştır', icon: IC.compress, ready: true, prev: 'JPG, kalite %70' },
-      { id: 'bg', label: 'Arka planı sil', icon: IC.erase, prev: 'Şeffaf PNG' },
-      { id: 'loc', label: 'Konumu sil', icon: IC.pinoff, radar: true, ready: true, prev: 'Konum ve cihaz bilgisi silinir' },
-      { id: 'rs', label: 'Boyutlandır', icon: IC.resize, ready: true, prev: '1080 px genişlik' },
-      { id: 'rot', label: 'Döndür', icon: IC.rotate, ready: true, prev: '90° sağa' }
+      { id: 'crop', label: t('Kırp', 'Crop'), icon: IC.crop, ready: true, tool: true, prev: S.count > 1 ? t('Tek resim kırpılır', 'Crop one image at a time') : t('Bırak: kırpma paneli açılır', 'Drop: opens the crop panel') },
+      { id: 'cmp', label: t('Sıkıştır', 'Compress'), icon: IC.compress, ready: true, prev: t('JPG, kalite %70', 'JPG, quality 70%') },
+      { id: 'bg', label: t('Arka planı sil', 'Remove bg'), icon: IC.erase, prev: t('Şeffaf PNG', 'Transparent PNG') },
+      { id: 'loc', label: t('Konumu sil', 'Remove location'), icon: IC.pinoff, radar: true, ready: true, prev: t('Konum ve cihaz bilgisi silinir', 'Removes location and device info') },
+      { id: 'rs', label: t('Boyutlandır', 'Resize'), icon: IC.resize, ready: true, prev: t('1080 px genişlik', '1080 px wide') },
+      { id: 'rot', label: t('Döndür', 'Rotate'), icon: IC.rotate, ready: true, prev: t('90° sağa', '90° clockwise') }
     ];
     if (kind === 'pdf') return [
-      { id: 'cmp', label: 'Sıkıştır', icon: IC.compress, ready: true, prev: 'Görseller küçültülür' },
-      { id: 'hide', label: 'Gizle', icon: IC.hide, radar: true, prev: 'Hassas alanlar kapatılır' },
-      { id: 'lock', label: 'Şifrele', icon: IC.lock, ready: true, tool: true, prev: 'Bırak: parola sorulur' },
-      { id: 'split', label: 'Böl', icon: IC.split, ready: true, prev: 'Her sayfa ayrı dosya' },
-      { id: 'merge', label: 'Birleştir', icon: IC.merge, ready: true, prev: S.count > 1 ? `${S.count} PDF tek dosya` : "Başka PDF'lerle tek dosya" },
-      { id: 'rot', label: 'Döndür', icon: IC.rotate, ready: true, prev: 'Tüm sayfalar 90°' }
+      { id: 'cmp', label: t('Sıkıştır', 'Compress'), icon: IC.compress, ready: true, prev: t('Görseller küçültülür', 'Images are downscaled') },
+      { id: 'hide', label: t('Gizle', 'Hide'), icon: IC.hide, radar: true, prev: t('Hassas alanlar kapatılır', 'Sensitive areas are covered') },
+      { id: 'lock', label: t('Şifrele', 'Lock'), icon: IC.lock, ready: true, tool: true, prev: t('Bırak: parola sorulur', 'Drop: asks for a password') },
+      { id: 'split', label: t('Böl', 'Split'), icon: IC.split, ready: true, prev: t('Her sayfa ayrı dosya', 'One file per page') },
+      { id: 'merge', label: t('Birleştir', 'Merge'), icon: IC.merge, ready: true, prev: S.count > 1 ? t(`${S.count} PDF tek dosya`, `${S.count} PDFs into one file`) : t("Başka PDF'lerle tek dosya", 'One file with other PDFs') },
+      { id: 'rot', label: t('Döndür', 'Rotate'), icon: IC.rotate, ready: true, prev: t('Tüm sayfalar 90°', 'All pages 90°') }
     ];
     return [
-      { id: 'cmp', label: 'Sıkıştır', icon: IC.compress, prev: 'Boyutu küçült' },
-      { id: 'hide', label: 'Gizle', icon: IC.hide, radar: true, prev: 'Hassas alanlar kapatılır' },
-      { id: 'lock', label: 'Şifrele', icon: IC.lock, prev: 'Parola ile kilitle' }
+      { id: 'cmp', label: t('Sıkıştır', 'Compress'), icon: IC.compress, prev: t('Boyutu küçült', 'Reduce size') },
+      { id: 'hide', label: t('Gizle', 'Hide'), icon: IC.hide, radar: true, prev: t('Hassas alanlar kapatılır', 'Sensitive areas are covered') },
+      { id: 'lock', label: t('Şifrele', 'Lock'), icon: IC.lock, prev: t('Parola ile kilitle', 'Lock with a password') }
     ];
   }
   if (kind === 'pdf') return [
-    { id: 'docx', label: 'Word', icon: IC.doc, prev: 'Düzen korunur' },
-    { id: 'txt', label: 'Metin', icon: IC.text, ready: true, prev: 'Yalnız metin, düz .txt' },
-    { id: 'png', label: 'PNG', icon: IC.image, ready: true, prev: 'Her sayfa bir görsel · 200 dpi' },
-    { id: 'jpg', label: 'JPG', icon: IC.image, ready: true, prev: 'Her sayfa bir görsel · 200 dpi' }
+    { id: 'docx', label: 'Word', icon: IC.doc, prev: t('Düzen korunur', 'Layout is kept') },
+    { id: 'txt', label: t('Metin', 'Text'), icon: IC.text, ready: true, prev: t('Yalnız metin, düz .txt', 'Text only, plain .txt') },
+    { id: 'png', label: 'PNG', icon: IC.image, ready: true, prev: t('Her sayfa bir görsel · 200 dpi', 'One image per page · 200 dpi') },
+    { id: 'jpg', label: 'JPG', icon: IC.image, ready: true, prev: t('Her sayfa bir görsel · 200 dpi', 'One image per page · 200 dpi') }
   ];
   if (kind === 'img') {
     const own = file.ext === 'jpeg' ? 'jpg' : file.ext;
-    const P = { png: ['Kayıpsız', true], jpg: ['Kalite %92', true], bmp: ['Sıkıştırmasız', true], webp: ['Küçük ve kaliteli', false], pdf: ['Tek sayfa PDF', false] };
+    const P = { png: [t('Kayıpsız', 'Lossless'), true], jpg: [t('Kalite %92', 'Quality 92%'), true], bmp: [t('Sıkıştırmasız', 'Uncompressed'), true], webp: [t('Küçük ve kaliteli', 'Small and sharp'), false], pdf: [t('Tek sayfa PDF', 'Single-page PDF'), false] };
     return ['png', 'jpg', 'webp', 'pdf', 'bmp'].filter(e => e !== own).slice(0, 4).map(e => ({
       id: e, label: e === 'pdf' ? 'PDF' : (e === 'webp' ? 'WebP' : e.toUpperCase()), icon: e === 'pdf' ? IC.pdf : IC.image, prev: P[e][0], ready: P[e][1]
     }));
   }
   if (kind === 'doc') return ['pdf', 'txt', 'docx'].filter(e => e !== file.ext).map(e => ({
-    id: e, label: e === 'docx' ? 'Word' : (e === 'txt' ? 'Metin' : 'PDF'), icon: e === 'pdf' ? IC.pdf : (e === 'txt' ? IC.text : IC.doc), prev: 'Biçim korunur'
+    id: e, label: e === 'docx' ? 'Word' : (e === 'txt' ? t('Metin', 'Text') : 'PDF'), icon: e === 'pdf' ? IC.pdf : (e === 'txt' ? IC.text : IC.doc), prev: t('Biçim korunur', 'Format is kept')
   }));
   return [];
 }
@@ -193,25 +193,25 @@ function renderCenter() {
   setHint('');
   if (h) {
     titleEl.textContent = h.label;
-    subEl.textContent = h.ready ? h.prev : 'Yakında';
+    subEl.textContent = h.ready ? h.prev : t('Yakında', 'Coming soon');
     const pos = S.chain.findIndex(c => c.id === h.id);
-    if (pos >= 0) setHint(`Zincirde ${pos + 1}. adım · bırak`, 'done');
-    else if (S.chain.length) setHint(`Bırak: ${S.chain.length + 1} adım birden`);
-    else if (h.ready && !h.tool) setHint('Beklersen zincire eklenir', 'waiting');
+    if (pos >= 0) setHint(t(`Zincirde ${pos + 1}. adım · bırak`, `Step ${pos + 1} in chain · drop`), 'done');
+    else if (S.chain.length) setHint(t(`Bırak: ${S.chain.length + 1} adım birden`, `Drop: ${S.chain.length + 1} steps at once`));
+    else if (h.ready && !h.tool) setHint(t('Beklersen zincire eklenir', 'Hold to add to chain'), 'waiting');
   } else if (S.chain.length) {
-    titleEl.textContent = 'Zincir';
+    titleEl.textContent = t('Zincir', 'Chain');
     subEl.textContent = S.chain.map(c => c.label).join(' → ');
-    setHint('Bir dilime bırak: hepsi sırayla');
+    setHint(t('Bir dilime bırak: hepsi sırayla', 'Drop on a slice: all run in order'));
   } else if (S.sens.length) {
-    titleEl.textContent = 'Dikkat';
+    titleEl.textContent = t('Dikkat', 'Careful');
     subEl.textContent = S.sens.join(' · ');
     subEl.classList.add('radar-text');
   } else if (S.file && !S.acts.length) {
     titleEl.textContent = S.file.name;
-    subEl.textContent = 'Bu dosya türü henüz yok';
+    subEl.textContent = t('Bu dosya türü henüz yok', 'This file type is not supported yet');
   } else {
-    titleEl.textContent = MODE_NAME[S.mode];
-    subEl.textContent = S.file ? `${S.file.name}.${S.file.ext}${S.count > 1 ? ` +${S.count - 1}` : ''}` : 'Dosyayı bekliyor';
+    titleEl.textContent = modeName(S.mode);
+    subEl.textContent = S.file ? `${S.file.name}.${S.file.ext}${S.count > 1 ? ` +${S.count - 1}` : ''}` : t('Dosyayı bekliyor', 'Waiting for a file');
   }
 }
 
@@ -315,7 +315,7 @@ const handlers = {
     if (!cur.ready) {
       S.busy = true;
       titleEl.textContent = cur.label;
-      subEl.textContent = 'Yakında geliyor';
+      subEl.textContent = t('Yakında geliyor', 'Coming soon');
       setHint('');
       sfx.fail();
       setTimeout(() => post({ type: 'cancel' }), 900);
@@ -325,7 +325,7 @@ const handlers = {
     if (cur.tool) {
       S.busy = true;
       titleEl.textContent = cur.label;
-      subEl.textContent = 'Açılıyor';
+      subEl.textContent = t('Açılıyor', 'Opening');
       setHint('');
       Panel.steps = steps;
       post({ type: 'tool', tool: cur.id });
@@ -333,9 +333,9 @@ const handlers = {
     }
     if (steps[steps.length - 1] !== cur.id) steps.push(cur.id);
     S.busy = true;
-    titleEl.textContent = 'Çalışıyor';
+    titleEl.textContent = t('Çalışıyor', 'Working');
     setHint('');
-    subEl.textContent = steps.length > 1 ? `${steps.length} adım` : cur.label;
+    subEl.textContent = steps.length > 1 ? t(`${steps.length} adım`, `${steps.length} steps`) : cur.label;
     post({ type: 'run', steps });
   },
   result(m) {
@@ -440,7 +440,7 @@ panelEl.addEventListener('pointermove', e => {
 
 // ---------- crop ----------
 const CROP = { w: 560, stageMaxW: 520, stageMaxH: 360 };
-const PRESETS = [['free', 'Serbest', 0], ['sq', '1:1', 1], ['vs', 'Vesikalık', 35 / 45], ['wide', '16:9', 16 / 9]];
+const PRESETS = [['free', () => t('Serbest', 'Free'), 0], ['sq', () => '1:1', 1], ['vs', () => t('Vesikalık', 'Passport photo'), 35 / 45], ['wide', () => '16:9', 16 / 9]];
 const MIN_CROP = 16; // image px
 const stageEl = $('stage'), rectEl = $('crop-rect'), cropImg = $('crop-img');
 
@@ -472,7 +472,7 @@ const Crop = {
     PRESETS.forEach(([id, label]) => {
       const b = document.createElement('button');
       b.className = 'chip' + (id === this.preset ? ' on' : '');
-      b.textContent = label;
+      b.textContent = label();
       b.addEventListener('click', () => this.pick(id));
       box.appendChild(b);
     });
@@ -554,7 +554,7 @@ const Crop = {
     if (!Panel.open || this.busy) return;
     this.busy = true;
     $('crop-apply').disabled = true; $('crop-cancel').disabled = true;
-    this.info.textContent = 'Kırpılıyor';
+    this.info.textContent = t('Kırpılıyor', 'Cropping');
     const R = this.R, x = Math.round(R.x), y = Math.round(R.y);
     Panel.run({ crop: { x, y, w: Math.min(this.W - x, Math.round(R.w)), h: Math.min(this.H - y, Math.round(R.h)) } });
   },
@@ -588,11 +588,11 @@ const Lock = {
 
   load(m) {
     this.busy = false;
-    $('lock-file').textContent = m.count > 1 ? `${m.count} PDF` : m.name;
+    $('lock-file').textContent = m.count > 1 ? t(`${m.count} PDF`, `${m.count} PDFs`) : m.name;
     pwEl.value = '';
     pwEl.disabled = false;
     this.reveal(false);
-    this.info.textContent = m.count > 1 ? 'Hepsine aynı parola · orijinaller şifresiz kalır' : 'Orijinal dosya şifresiz kalır';
+    this.info.textContent = m.count > 1 ? t('Hepsine aynı parola · orijinaller şifresiz kalır', 'Same password for all · originals stay unlocked') : t('Orijinal dosya şifresiz kalır', 'The original file stays unlocked');
     $('lock-cancel').disabled = false;
     this.check();
     Panel.size(this, LOCK.w, LOCK.content, true);
@@ -601,7 +601,7 @@ const Lock = {
   // Windows can refuse to hand over focus; then typing would land in Explorer, so ask for a click.
   shown(m) {
     if (m.focused) pwEl.focus();
-    else { lockHint.textContent = 'Yazmak için kutuya tıkla'; pwEl.parentElement.classList.add('nudge'); }
+    else { lockHint.textContent = t('Yazmak için kutuya tıkla', 'Click the box to type'); pwEl.parentElement.classList.add('nudge'); }
   },
 
   closed() { pwEl.value = ''; pwEl.blur(); },
@@ -609,13 +609,13 @@ const Lock = {
   reveal(on) {
     pwEl.type = on ? 'text' : 'password';
     $('lock-eye-path').setAttribute('d', on ? IC.hide : EYE_OPEN);
-    $('lock-eye').setAttribute('aria-label', on ? 'Parolayı gizle' : 'Parolayı göster');
+    $('lock-eye').setAttribute('aria-label', on ? t('Parolayı gizle', 'Hide password') : t('Parolayı göster', 'Show password'));
   },
 
   check() {
     const n = pwEl.value.length;
-    lockHint.textContent = n === 0 ? 'Bu parola olmadan dosya açılmaz, unutma'
-      : n < LOCK.minLength ? `En az ${LOCK.minLength} karakter` : 'AES-256 ile kilitlenecek';
+    lockHint.textContent = n === 0 ? t('Bu parola olmadan dosya açılmaz, unutma', "The file can't be opened without this password, so don't forget it")
+      : n < LOCK.minLength ? t(`En az ${LOCK.minLength} karakter`, `At least ${LOCK.minLength} characters`) : t('AES-256 ile kilitlenecek', 'Will be locked with AES-256');
     $('lock-apply').disabled = this.busy || n < LOCK.minLength;
   },
 
@@ -624,7 +624,7 @@ const Lock = {
     this.busy = true;
     pwEl.disabled = true;
     $('lock-apply').disabled = true; $('lock-cancel').disabled = true;
-    this.info.textContent = 'Şifreleniyor';
+    this.info.textContent = t('Şifreleniyor', 'Locking');
     Panel.run({ password: pwEl.value });
     pwEl.value = '';
   },

@@ -75,7 +75,7 @@ internal sealed class SwivraContext : ApplicationContext
         catch (Exception ex)
         {
             Log.Write($"startup failed: {ex}");
-            MessageBox.Show("Swivra başlatılamadı. Ayrıntı kayıt dosyasında.", "Swivra");
+            MessageBox.Show(Lang.T("Swivra başlatılamadı. Ayrıntı kayıt dosyasında.", "Swivra could not start. See the log file for details."), "Swivra");
             ExitThread();
         }
     }
@@ -286,7 +286,7 @@ internal sealed class SwivraContext : ApplicationContext
     {
         if (_files.Length == 0 || _files.Any(f => FileKinds.KindOf(Path.GetExtension(f)) != "pdf"))
         {
-            _overlay.Post(new { type = "result", ok = false, title = "Şifrele", detail = "Yalnız PDF şifrelenir" });
+            _overlay.Post(new { type = "result", ok = false, title = Lang.T("Şifrele", "Lock"), detail = Lang.T("Yalnız PDF şifrelenir", "Only PDFs can be locked") });
             FinishSoon();
             return;
         }
@@ -301,7 +301,7 @@ internal sealed class SwivraContext : ApplicationContext
     {
         if (_files.Length != 1 || !FileKinds.IsImage(Path.GetExtension(_files[0])))
         {
-            _overlay.Post(new { type = "result", ok = false, title = "Kırp", detail = _files.Length > 1 ? "Tek resim kırpılır" : "Yalnız resimler kırpılır" });
+            _overlay.Post(new { type = "result", ok = false, title = Lang.T("Kırp", "Crop"), detail = _files.Length > 1 ? Lang.T("Tek resim kırpılır", "Crop one image at a time") : Lang.T("Yalnız resimler kırpılır", "Only images can be cropped") });
             FinishSoon();
             return;
         }
@@ -311,7 +311,7 @@ internal sealed class SwivraContext : ApplicationContext
             if (!t.IsCompletedSuccessfully)
             {
                 Log.Write($"crop preview failed {file}: {t.Exception?.InnerException}");
-                _overlay.Post(new { type = "result", ok = false, title = "Olmadı", detail = "Resim açılamadı" });
+                _overlay.Post(new { type = "result", ok = false, title = Lang.T("Olmadı", "Failed"), detail = Lang.T("Resim açılamadı", "Could not open the image") });
                 FinishSoon();
                 return;
             }
@@ -338,7 +338,7 @@ internal sealed class SwivraContext : ApplicationContext
     {
         if (_files.Length == 0)
         {
-            _overlay.Post(new { type = "result", ok = false, title = "Dosya yok", detail = "Yalnız dosyalar işlenir" });
+            _overlay.Post(new { type = "result", ok = false, title = Lang.T("Dosya yok", "No file"), detail = Lang.T("Yalnız dosyalar işlenir", "Only files can be processed") });
             FinishSoon();
             return;
         }
@@ -348,7 +348,7 @@ internal sealed class SwivraContext : ApplicationContext
         {
             _overlay.BeginInvoke(() =>
             {
-                var r = t.IsCompletedSuccessfully ? t.Result : new ActionResult(false, "Olmadı", "Beklenmeyen hata");
+                var r = t.IsCompletedSuccessfully ? t.Result : new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Beklenmeyen hata", "Unexpected error"));
                 if (r.ClipboardText is not null) Clipboard.SetText(r.ClipboardText);
                 _overlay.Post(new { type = "result", ok = r.Ok, title = r.Title, detail = r.Detail, ext = r.OutputExt });
                 FinishSoon();
@@ -375,8 +375,8 @@ internal sealed class SwivraContext : ApplicationContext
         var center = new Point(area.Left + area.Width / 2, area.Top + area.Height / 2);
         Log.Write($"demo at {center} shot={shotPath ?? "-"}");
         ShowWheel(WheelMode.Tools, center);
-        _overlay.Post(new { type = "enter", files = new[] { new { name = "Tatil", ext = "jpg", kind = "img", size = "5,1 MB" } }, count = 1 });
-        _overlay.Post(new { type = "radar", sens = new[] { "Konum bilgisi", "Cihaz modeli" } });
+        _overlay.Post(new { type = "enter", files = new[] { new { name = Lang.T("Tatil", "Holiday"), ext = "jpg", kind = "img", size = Lang.T("5,1 MB", "5.1 MB") } }, count = 1 });
+        _overlay.Post(new { type = "radar", sens = new[] { Lang.T("Konum bilgisi", "Location"), Lang.T("Cihaz modeli", "Device model") } });
 
         After(900, () => _overlay.Post(new { type = "over", x = 170 + 104, y = 170 - 56 }));
         After(2400, () =>

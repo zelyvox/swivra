@@ -36,11 +36,11 @@ internal static partial class Radar
         using var stream = File.OpenRead(path);
         using var img = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: false);
         var ids = img.PropertyIdList;
-        if (ids.Contains(0x0002) || ids.Contains(0x0004)) found.Add("Konum bilgisi");
+        if (ids.Contains(0x0002) || ids.Contains(0x0004)) found.Add(Lang.T("Konum bilgisi", "Location"));
         if (ids.Contains(0x0110))
         {
             string model = Encoding.ASCII.GetString(img.GetPropertyItem(0x0110)!.Value ?? []).Trim('\0', ' ');
-            found.Add(model.Length > 0 ? $"Cihaz modeli: {model}" : "Cihaz modeli");
+            found.Add(model.Length > 0 ? Lang.T($"Cihaz modeli: {model}", $"Device model: {model}") : Lang.T("Cihaz modeli", "Device model"));
         }
     }
 
@@ -58,10 +58,10 @@ internal static partial class Radar
 
     public static void ScanText(string text, List<string> found)
     {
-        if (TcCandidate().Matches(text).Any(m => IsValidTc(m.Value))) found.Add("TC kimlik no");
+        if (TcCandidate().Matches(text).Any(m => IsValidTc(m.Value))) found.Add(Lang.T("TC kimlik no", "Turkish ID number"));
         if (IbanCandidate().Matches(text).Any(m => IsValidIban(m.Value))) found.Add("IBAN");
-        if (Email().IsMatch(text)) found.Add("E-posta");
-        if (Phone().IsMatch(text)) found.Add("Telefon");
+        if (Email().IsMatch(text)) found.Add(Lang.T("E-posta", "Email"));
+        if (Phone().IsMatch(text)) found.Add(Lang.T("Telefon", "Phone"));
     }
 
     /// <summary>
