@@ -37,13 +37,13 @@ internal static class PdfActions
         for (int i = 0; i < steps.Count - 1; i++)
         {
             if (Terminal.Contains(steps[i]))
-                return new ActionResult(false, "Olmadı", $"{label(steps[i])} zincirin son adımı olmalı");
+                return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T($"{label(steps[i])} zincirin son adımı olmalı", $"{label(steps[i])} must be the last step in the chain"));
         }
 
         if (steps.Contains("lock") && string.IsNullOrEmpty(options.Password))
-            return new ActionResult(false, "Şifrele", "Parola gerekli");
+            return new ActionResult(false, Lang.T("Şifrele", "Lock"), Lang.T("Parola gerekli", "Password required"));
         if (IsEncrypted(path))
-            return new ActionResult(false, "Olmadı", "Şifreli PDF açılamadı");
+            return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Şifreli PDF açılamadı", "Cannot open a password-protected PDF"));
 
         string origDir = Path.GetDirectoryName(path)!;
         string name = Path.GetFileNameWithoutExtension(path);
@@ -76,13 +76,13 @@ internal static class PdfActions
                 switch (steps[i])
                 {
                     case "rot":
-                        suffix += "-dondu";
+                        suffix += Lang.T("-dondu", "-rotated");
                         string rotTarget = StepTarget(i, last, suffix);
                         Rotate(input, rotTarget);
                         input = output = rotTarget;
                         break;
                     case "cmp":
-                        string cmpTarget = StepTarget(i, last, suffix + "-kucuk");
+                        string cmpTarget = StepTarget(i, last, suffix + Lang.T("-kucuk", "-small"));
                         long before = new FileInfo(input).Length;
                         Compress(input, cmpTarget);
                         long after = new FileInfo(cmpTarget).Length;
@@ -92,7 +92,7 @@ internal static class PdfActions
                             Cleanup([cmpTarget]);
                             created.Remove(cmpTarget);
                             if (!last) break;
-                            if (input == path) return new ActionResult(true, "Zaten küçük", "Daha fazla küçülmüyor");
+                            if (input == path) return new ActionResult(true, Lang.T("Zaten küçük", "Already small"), Lang.T("Daha fazla küçülmüyor", "Cannot shrink it further"));
                             // Earlier steps already produced a file (in temp); it becomes the final output.
                             string keep = FileActions.UniquePath(origDir, name + suffix, "pdf");
                             File.Copy(input, keep);
@@ -100,12 +100,12 @@ internal static class PdfActions
                             input = output = keep;
                             break;
                         }
-                        suffix += "-kucuk";
+                        suffix += Lang.T("-kucuk", "-small");
                         input = output = cmpTarget;
-                        if (last) return new ActionResult(true, "Hazır", $"{Path.GetFileName(cmpTarget)} · {FileKinds.HumanSize(before)} → {FileKinds.HumanSize(after)}", cmpTarget, "pdf");
+                        if (last) return new ActionResult(true, Lang.T("Hazır", "Ready"), $"{Path.GetFileName(cmpTarget)} · {FileKinds.HumanSize(before)} → {FileKinds.HumanSize(after)}", cmpTarget, "pdf");
                         break;
                     case "lock":
-                        suffix += "-sifreli";
+                        suffix += Lang.T("-sifreli", "-locked");
                         string lockTarget = StepTarget(i, last, suffix);
                         Lock(input, lockTarget, options.Password!);
                         input = output = lockTarget;
@@ -121,12 +121,12 @@ internal static class PdfActions
                         output = ExtractTxt(input, origDir, baseName, created);
                         break;
                     default:
-                        return new ActionResult(false, "Yakında", $"{label(steps[i])} henüz bu sürümde yok");
+                        return new ActionResult(false, Lang.T("Yakında", "Coming soon"), Lang.T($"{label(steps[i])} henüz bu sürümde yok", $"{label(steps[i])} is not in this version yet"));
                 }
             }
 
             string? ext = isFolder ? null : Path.GetExtension(output).TrimStart('.').ToLowerInvariant();
-            return new ActionResult(true, "Hazır", Path.GetFileName(output), output, ext);
+            return new ActionResult(true, Lang.T("Hazır", "Ready"), Path.GetFileName(output), output, ext);
         }
         catch (PdfFailure f)
         {
@@ -137,13 +137,13 @@ internal static class PdfActions
         {
             Cleanup(created);
             Log.Write($"pdf io failed {path}: {ex}");
-            return new ActionResult(false, "Olmadı", "Dosya işlenemedi");
+            return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Dosya işlenemedi", "Could not process the file"));
         }
         catch (Exception ex)
         {
             Cleanup(created);
             Log.Write($"pdf open/process failed {path}: {ex}");
-            return new ActionResult(false, "Açılamadı", "PDF parolalı ya da bozuk");
+            return new ActionResult(false, Lang.T("Açılamadı", "Could not open"), Lang.T("PDF parolalı ya da bozuk", "The PDF is password-protected or damaged"));
         }
         finally
         {
@@ -157,7 +157,7 @@ internal static class PdfActions
     /// <summary>Merges the PDFs in the given order into one file next to the first.</summary>
     public static ActionResult Merge(IReadOnlyList<string> files)
     {
-        string target = FileActions.UniquePath(Path.GetDirectoryName(files[0])!, Path.GetFileNameWithoutExtension(files[0]) + "-birlesik", "pdf");
+        string target = FileActions.UniquePath(Path.GetDirectoryName(files[0])!, Path.GetFileNameWithoutExtension(files[0]) + Lang.T("-birlesik", "-merged"), "pdf");
         try
         {
             using var output = new PdfDocument();
@@ -167,19 +167,19 @@ internal static class PdfActions
                 foreach (PdfPage page in doc.Pages) output.AddPage(page);
             }
             output.Save(target);
-            return new ActionResult(true, "Hazır", Path.GetFileName(target), target, "pdf");
+            return new ActionResult(true, Lang.T("Hazır", "Ready"), Path.GetFileName(target), target, "pdf");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             Cleanup([target]);
             Log.Write($"pdf merge io failed: {ex}");
-            return new ActionResult(false, "Olmadı", "Dosya işlenemedi");
+            return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Dosya işlenemedi", "Could not process the file"));
         }
         catch (Exception ex)
         {
             Cleanup([target]);
             Log.Write($"pdf merge failed: {ex}");
-            return new ActionResult(false, "Açılamadı", "PDF parolalı ya da bozuk");
+            return new ActionResult(false, Lang.T("Açılamadı", "Could not open"), Lang.T("PDF parolalı ya da bozuk", "The PDF is password-protected or damaged"));
         }
     }
 
@@ -335,7 +335,7 @@ internal static class PdfActions
         using var doc = PdfReader.Open(input, PdfDocumentOpenMode.Import);
         int count = doc.PageCount;
         int digits = Math.Max(2, count.ToString().Length);
-        string folder = FileActions.UniqueDir(dir, baseName + "-bolum");
+        string folder = FileActions.UniqueDir(dir, baseName + Lang.T("-bolum", "-split"));
         Directory.CreateDirectory(folder);
         created.Add(folder);
         for (int i = 0; i < count; i++)
@@ -359,7 +359,7 @@ internal static class PdfActions
         int digits = Math.Max(2, count.ToString().Length);
         if (count > 1)
         {
-            folder = FileActions.UniqueDir(dir, baseName + "-sayfalar");
+            folder = FileActions.UniqueDir(dir, baseName + Lang.T("-sayfalar", "-pages"));
             Directory.CreateDirectory(folder);
             created.Add(folder);
         }
@@ -389,7 +389,7 @@ internal static class PdfActions
     {
         var pages = ExtractPages(input);
         if (pages.All(string.IsNullOrWhiteSpace))
-            throw new PdfFailure(new ActionResult(false, "Metin yok", "Taranmış PDF olabilir"));
+            throw new PdfFailure(new ActionResult(false, Lang.T("Metin yok", "No text"), Lang.T("Taranmış PDF olabilir", "It may be a scanned PDF")));
         string target = FileActions.UniquePath(dir, baseName, "txt");
         created.Add(target);
         string nl = Environment.NewLine;

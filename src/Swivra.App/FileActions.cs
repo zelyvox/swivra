@@ -19,7 +19,7 @@ internal static class FileKinds
         : "other";
 
     public static string HumanSize(long bytes) =>
-        bytes >= 1024 * 1024 ? $"{bytes / 1024d / 1024d:0.#} MB".Replace('.', ',')
+        bytes >= 1024 * 1024 ? $"{bytes / 1024d / 1024d:0.#} MB".Replace('.', Lang.IsTurkish ? ',' : '.')
         : bytes >= 1024 ? $"{bytes / 1024d:0} KB"
         : $"{bytes} B";
 }
@@ -42,12 +42,13 @@ internal sealed record StepOptions(Rectangle? Crop = null, string? Password = nu
 /// </summary>
 internal static class FileActions
 {
-    private static readonly Dictionary<string, string> Labels = new()
+    private static Dictionary<string, string> Labels => new()
     {
-        ["png"] = "PNG", ["jpg"] = "JPG", ["bmp"] = "BMP", ["webp"] = "WebP", ["pdf"] = "PDF", ["docx"] = "Word", ["txt"] = "Metin",
-        ["rot"] = "Döndür", ["loc"] = "Konumu sil", ["rs"] = "Boyutlandır", ["cmp"] = "Sıkıştır", ["crop"] = "Kırp", ["bg"] = "Arka planı sil",
-        ["hide"] = "Gizle", ["lock"] = "Şifrele", ["split"] = "Böl", ["merge"] = "Birleştir",
-        ["path"] = "Yolu kopyala", ["wa"] = "WhatsApp", ["mail"] = "Mail", ["tel"] = "Telefona",
+        ["png"] = "PNG", ["jpg"] = "JPG", ["bmp"] = "BMP", ["webp"] = "WebP", ["pdf"] = "PDF", ["docx"] = "Word", ["txt"] = Lang.T("Metin", "Text"),
+        ["rot"] = Lang.T("Döndür", "Rotate"), ["loc"] = Lang.T("Konumu sil", "Remove location"), ["rs"] = Lang.T("Boyutlandır", "Resize"),
+        ["cmp"] = Lang.T("Sıkıştır", "Compress"), ["crop"] = Lang.T("Kırp", "Crop"), ["bg"] = Lang.T("Arka planı sil", "Cut out"),
+        ["hide"] = Lang.T("Gizle", "Hide"), ["lock"] = Lang.T("Şifrele", "Lock"), ["split"] = Lang.T("Böl", "Split"), ["merge"] = Lang.T("Birleştir", "Merge"),
+        ["path"] = Lang.T("Yolu kopyala", "Copy path"), ["wa"] = "WhatsApp", ["mail"] = "Mail", ["tel"] = Lang.T("Telefona", "To phone"),
     };
 
     private static readonly HashSet<string> ImageSteps = new() { "png", "jpg", "bmp", "rot", "loc", "rs", "cmp", "crop" };
@@ -60,12 +61,12 @@ internal static class FileActions
 
         if (fileSteps.Contains("merge"))
         {
-            if (fileSteps.Count > 1) return new ActionResult(false, "Birleştir", "Birleştir zincirde tek başına olmalı");
+            if (fileSteps.Count > 1) return new ActionResult(false, Lang.T("Birleştir", "Merge"), Lang.T("Birleştir zincirde tek başına olmalı", "Merge must be alone in the chain"));
             var pdfs = files.Where(f => FileKinds.KindOf(Path.GetExtension(f)) == "pdf").ToList();
-            if (pdfs.Count < 2) return new ActionResult(false, "Birleştir", "Birden fazla PDF'i birlikte sürükle");
+            if (pdfs.Count < 2) return new ActionResult(false, Lang.T("Birleştir", "Merge"), Lang.T("Birden fazla PDF'i birlikte sürükle", "Drag several PDFs together"));
             var merged = PdfActions.Merge(pdfs);
             if (!merged.Ok || !copyPath) return merged;
-            return merged with { Detail = $"{merged.Detail} · yolu panoda", ClipboardText = merged.OutputPath };
+            return merged with { Detail = $"{merged.Detail} · {Lang.T("yolu panoda", "path copied")}", ClipboardText = merged.OutputPath };
         }
 
         var results = files.Select(f => RunOne(f, fileSteps, copyPath, options)).ToList();
@@ -76,11 +77,11 @@ internal static class FileActions
         string? clip = copyPath ? string.Join(Environment.NewLine, ok.Select(r => r.ClipboardText)) : null;
         string? ext = ok.Select(r => r.OutputExt).Distinct().Count() == 1 ? ok[0].OutputExt : null;
         if (fileSteps.Count == 0 && ok.Count == results.Count)
-            return new ActionResult(true, "Kopyalandı", $"{ok.Count} yol panoda", ClipboardText: clip);
+            return new ActionResult(true, Lang.T("Kopyalandı", "Copied"), Lang.T($"{ok.Count} yol panoda", $"{ok.Count} paths copied"), ClipboardText: clip);
         string detail = ok.Count == results.Count
-            ? $"{ok.Count} dosya hazır"
-            : $"{ok.Count}/{results.Count} dosya hazır, {results.Count - ok.Count} atlandı";
-        return new ActionResult(true, "Hazır", detail, ok[0].OutputPath, ext, clip);
+            ? Lang.T($"{ok.Count} dosya hazır", $"{ok.Count} files ready")
+            : Lang.T($"{ok.Count}/{results.Count} dosya hazır, {results.Count - ok.Count} atlandı", $"{ok.Count}/{results.Count} files ready, {results.Count - ok.Count} skipped");
+        return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, ok[0].OutputPath, ext, clip);
     }
 
     private static ActionResult RunOne(string path, List<string> fileSteps, bool copyPath, StepOptions options)
@@ -90,7 +91,7 @@ internal static class FileActions
 
         string? missing = fileSteps.FirstOrDefault(s => (kind != "img" && kind != "pdf") || !supported.Contains(s));
         if (missing is not null)
-            return new ActionResult(false, "Yakında", $"{Label(missing)} henüz bu sürümde yok");
+            return new ActionResult(false, Lang.T("Yakında", "Coming soon"), Lang.T($"{Label(missing)} henüz bu sürümde yok", $"{Label(missing)} is not in this version yet"));
 
         string finalPath = path;
         string? finalExt = null;
@@ -116,15 +117,15 @@ internal static class FileActions
             catch (Exception ex)
             {
                 Log.Write($"action failed {path}: {ex}");
-                return new ActionResult(false, "Olmadı", "Dosya işlenemedi");
+                return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Dosya işlenemedi", "Could not process the file"));
             }
         }
 
         string? clip = copyPath ? finalPath : null;
         string name = finalName ?? Path.GetFileName(finalPath);
-        if (fileSteps.Count == 0) return new ActionResult(true, "Kopyalandı", "Yol panoda", ClipboardText: clip);
-        string detail = copyPath ? $"{name} · yolu panoda" : name;
-        return new ActionResult(true, "Hazır", detail, finalPath, finalExt, clip);
+        if (fileSteps.Count == 0) return new ActionResult(true, Lang.T("Kopyalandı", "Copied"), Lang.T("Yol panoda", "Path copied"), ClipboardText: clip);
+        string detail = copyPath ? $"{name} · {Lang.T("yolu panoda", "path copied")}" : name;
+        return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, finalPath, finalExt, clip);
     }
 
     private static string Label(string step) => Labels.GetValueOrDefault(step, step);
@@ -142,12 +143,12 @@ internal static class FileActions
         {
             switch (s)
             {
-                case "crop": suffix += "-kirpik"; break;
+                case "crop": suffix += Lang.T("-kirpik", "-cropped"); break;
                 case "png" or "jpg" or "bmp": ext = s; break;
-                case "rot": rotations++; suffix += "-dondu"; break;
-                case "loc": strip = true; suffix += "-temiz"; break;
+                case "rot": rotations++; suffix += Lang.T("-dondu", "-rotated"); break;
+                case "loc": strip = true; suffix += Lang.T("-temiz", "-clean"); break;
                 case "rs": maxWidth = 1080; suffix += "-1080"; break;
-                case "cmp": compress = true; ext = "jpg"; suffix += "-kucuk"; break;
+                case "cmp": compress = true; ext = "jpg"; suffix += Lang.T("-kucuk", "-small"); break;
             }
         }
 
