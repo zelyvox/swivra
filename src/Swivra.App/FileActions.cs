@@ -51,7 +51,7 @@ internal static class FileActions
         ["path"] = Lang.T("Yolu kopyala", "Copy path"), ["wa"] = "WhatsApp", ["mail"] = "Mail", ["tel"] = Lang.T("Telefona", "To phone"),
     };
 
-    private static readonly HashSet<string> ImageSteps = new() { "png", "jpg", "bmp", "rot", "loc", "rs", "cmp", "crop" };
+    private static readonly HashSet<string> ImageSteps = new() { "png", "jpg", "bmp", "webp", "pdf", "bg", "rot", "loc", "rs", "cmp", "crop" };
 
     public static ActionResult Run(IReadOnlyList<string> files, IReadOnlyList<string> steps, StepOptions? options = null)
     {
@@ -135,7 +135,7 @@ internal static class FileActions
         string ext = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
         if (ext == "jpeg") ext = "jpg";
         string suffix = "";
-        bool strip = false, compress = false;
+        bool strip = false, compress = false, cutout = false;
         int rotations = 0;
         int? maxWidth = null;
 
@@ -144,13 +144,17 @@ internal static class FileActions
             switch (s)
             {
                 case "crop": suffix += Lang.T("-kirpik", "-cropped"); break;
-                case "png" or "jpg" or "bmp": ext = s; break;
+                case "png" or "jpg" or "bmp" or "webp" or "pdf": ext = s; break;
+                case "bg": cutout = true; suffix += Lang.T("-arkaplansiz", "-nobg"); break;
                 case "rot": rotations++; suffix += Lang.T("-dondu", "-rotated"); break;
                 case "loc": strip = true; suffix += Lang.T("-temiz", "-clean"); break;
                 case "rs": maxWidth = 1080; suffix += "-1080"; break;
                 case "cmp": compress = true; ext = "jpg"; suffix += Lang.T("-kucuk", "-small"); break;
             }
         }
+
+        // A cut-out needs alpha: PNG, unless the chain ends in WebP or PDF (both keep transparency).
+        if (cutout && ext is not ("webp" or "pdf")) ext = "png";
 
         if (steps.Contains("crop") && options.Crop is null) throw new InvalidOperationException("crop step without a crop rectangle");
 
@@ -184,6 +188,13 @@ internal static class FileActions
                 work = resized;
             }
 
+            if (cutout)
+            {
+                var cut = ImageActions.RemoveBackground(work);
+                work.Dispose();
+                work = cut;
+            }
+
             if (!strip)
             {
                 foreach (var p in props)
@@ -195,7 +206,9 @@ internal static class FileActions
 
             string baseName = Path.GetFileNameWithoutExtension(path) + suffix;
             string target = UniquePath(Path.GetDirectoryName(path)!, baseName, ext);
-            Save(work, target, ext, compress ? 70L : 92L);
+            if (ext == "webp") ImageActions.SaveWebp(work, target);
+            else if (ext == "pdf") ImageActions.SavePdf(work, target, cutout);
+            else Save(work, target, ext, compress ? 70L : 92L);
             return target;
         }
         finally

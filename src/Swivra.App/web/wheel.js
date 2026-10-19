@@ -45,7 +45,7 @@ function actionsFor(file, mode) {
     if (kind === 'img') return [
       { id: 'crop', label: t('Kırp', 'Crop'), icon: IC.crop, ready: true, tool: true, prev: S.count > 1 ? t('Tek resim kırpılır', 'Crop one image at a time') : t('Bırak: kırpma paneli açılır', 'Drop: opens the crop panel') },
       { id: 'cmp', label: t('Sıkıştır', 'Compress'), icon: IC.compress, ready: true, prev: t('JPG, kalite %70', 'JPG, quality 70%') },
-      { id: 'bg', label: t('Arka planı sil', 'Cut out'), icon: IC.erase, prev: t('Şeffaf PNG', 'Transparent PNG') },
+      { id: 'bg', label: t('Arka planı sil', 'Cut out'), icon: IC.erase, ready: true, prev: t('Şeffaf PNG · basit nesnelerde iyi', 'Transparent PNG · best on simple subjects') },
       { id: 'loc', label: t('Konumu sil', 'Remove location'), icon: IC.pinoff, radar: true, ready: true, prev: t('Konum ve cihaz bilgisi silinir', 'Removes location and device info') },
       { id: 'rs', label: t('Boyutlandır', 'Resize'), icon: IC.resize, ready: true, prev: t('1080 px genişlik', '1080 px wide') },
       { id: 'rot', label: t('Döndür', 'Rotate'), icon: IC.rotate, ready: true, prev: t('90° sağa', '90° clockwise') }
@@ -72,7 +72,7 @@ function actionsFor(file, mode) {
   ];
   if (kind === 'img') {
     const own = file.ext === 'jpeg' ? 'jpg' : file.ext;
-    const P = { png: [t('Kayıpsız', 'Lossless'), true], jpg: [t('Kalite %92', 'Quality 92%'), true], bmp: [t('Sıkıştırmasız', 'Uncompressed'), true], webp: [t('Küçük ve kaliteli', 'Small and sharp'), false], pdf: [t('Tek sayfa PDF', 'Single-page PDF'), false] };
+    const P = { png: [t('Kayıpsız', 'Lossless'), true], jpg: [t('Kalite %92', 'Quality 92%'), true], bmp: [t('Sıkıştırmasız', 'Uncompressed'), true], webp: [t('Küçük ve kaliteli · %82', 'Small and sharp · 82%'), true], pdf: [t('Tek sayfa PDF · A4 içine sığar', 'Single-page PDF · fits A4'), true] };
     return ['png', 'jpg', 'webp', 'pdf', 'bmp'].filter(e => e !== own).slice(0, 4).map(e => ({
       id: e, label: e === 'pdf' ? 'PDF' : (e === 'webp' ? 'WebP' : e.toUpperCase()), icon: e === 'pdf' ? IC.pdf : IC.image, prev: P[e][0], ready: P[e][1]
     }));
