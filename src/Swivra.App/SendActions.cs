@@ -47,13 +47,18 @@ internal static class SendActions
     private static ActionResult WhatsApp(List<string> files)
     {
         // Images are shrunk into a temp copy; everything else is referenced as is (never modified).
-        var prepared = Prepare(files, shrinkImages: true);
+        // The README promises location-free photos here, so an image that cannot be re-encoded stays behind.
+        var prepared = Prepare(files, shrinkImages: true, out var held, out string? reason);
+        if (prepared.Count == 0)
+            return new ActionResult(false, Lang.T("Gönderilmedi", "Not sent"), reason ?? Lang.T("Konum bilgisi silinemedi", "Could not remove the location data"));
         bool installed = WhatsAppInstalled();
         string where = installed ? Lang.T("WhatsApp'ta", "in WhatsApp") : Lang.T("WhatsApp Web'de", "in WhatsApp Web");
-        string detail = files.Count == 1
+        string detail = prepared.Count == 1
             ? Lang.T($"Panoda · {where} Ctrl+V", $"On clipboard · Ctrl+V {where}")
-            : Lang.T($"{files.Count} dosya panoda · {where} Ctrl+V", $"{files.Count} files on clipboard · Ctrl+V {where}");
-        Log.Write($"wa prepared {prepared.Count} file(s), whatsapp installed={installed}");
+            : Lang.T($"{prepared.Count} dosya panoda · {where} Ctrl+V", $"{prepared.Count} files on clipboard · Ctrl+V {where}");
+        if (held.Count > 0)
+            detail += Lang.T($" · {held.Count} resim konumu silinemediği için eklenmedi", $" · {held.Count} image(s) left out, location could not be removed");
+        Log.Write($"wa prepared {prepared.Count} file(s), held back {held.Count}, whatsapp installed={installed}");
         return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, OnUi: () =>
         {
             if (!SetClipboardFiles(prepared)) return false;
@@ -104,7 +109,8 @@ internal static class SendActions
         // Only above that are images shrunk like for WhatsApp; other files cannot be shrunk.
         long total = files.Sum(f => new FileInfo(f).Length);
         bool shrink = total > MailLimit;
-        var attach = shrink ? Prepare(files, shrinkImages: true) : files;
+        // Mail makes no location promise (small sets go out untouched), so an image that cannot be shrunk goes as it is.
+        var attach = shrink ? Prepare(files, shrinkImages: true, out _, out _, passThroughFailures: true) : files;
         long sent = attach.Sum(f => new FileInfo(f).Length);
         string note = shrink
             ? (sent > MailLimit
@@ -267,12 +273,16 @@ internal static class SendActions
     /// <summary>
     /// Returns the paths to hand over. With <paramref name="shrinkImages"/>, still images become
     /// a temp JPEG (long side at most 1600 px, quality 85, EXIF orientation applied, all EXIF
-    /// incl. location dropped); other files and images that cannot be decoded are passed through.
+    /// incl. location dropped); other files are passed through. Images that cannot be decoded are passed
+    /// through only with <paramref name="passThroughFailures"/>; otherwise they land in <paramref name="held"/>
+    /// and <paramref name="reason"/> says why (the codec hint for HEIC/AVIF when that is the cause).
     /// </summary>
-    private static List<string> Prepare(List<string> files, bool shrinkImages)
+    private static List<string> Prepare(List<string> files, bool shrinkImages, out List<string> held, out string? reason, bool passThroughFailures = false)
     {
         string? dir = null;
         var result = new List<string>();
+        held = [];
+        reason = null;
         foreach (string f in files)
         {
             string ext = Path.GetExtension(f);
@@ -285,8 +295,15 @@ internal static class SendActions
             }
             catch (Exception ex)
             {
-                Log.Write($"could not shrink {f}, passing it through: {ex.Message}");
-                result.Add(f);
+                if (passThroughFailures)
+                {
+                    Log.Write($"could not shrink {f}, passing it through: {ex.Message}");
+                    result.Add(f);
+                    continue;
+                }
+                Log.Write($"could not shrink {f}, holding it back: {ex.Message}");
+                held.Add(f);
+                reason ??= ex is MissingCodecException ? ex.Message : Lang.T("Konum bilgisi silinemedi", "Could not remove the location data");
             }
         }
         return result;
