@@ -8,18 +8,25 @@ public enum WheelMode { Convert, Tools, Send }
 /// Global low-level mouse and keyboard hooks. Detects "a modifier was pressed while the
 /// left button is held and the mouse has moved", which is how a wheel is summoned.
 /// Never swallows input: every event is passed on.
+/// The hooks live on their own thread with its own message loop. Windows silently removes a low-level
+/// hook whose callback is late (LowLevelHooksTimeout, about a second); on the UI thread any stall
+/// (a clipboard call, ShellExecute, WebView2) could do that and the wheel would stop opening.
+/// Events are raised on the hook thread; subscribers marshal to the UI themselves.
 /// </summary>
 internal sealed class InputHook : IDisposable
 {
     private const int DragThreshold = 8;
+    private const uint WM_QUIT = 0x0012;
 
     private readonly Native.LowLevelProc _mouseProc;
     private readonly Native.LowLevelProc _keyProc;
     private IntPtr _mouseHook;
     private IntPtr _keyHook;
+    private Thread? _thread;
+    private uint _threadId;
 
     private bool _leftDown;
-    private bool _dragging;
+    private volatile bool _dragging; // written on the hook thread, read on the UI thread
     private Point _downAt;
     private readonly HashSet<uint> _held = new();
 
@@ -40,12 +47,35 @@ internal sealed class InputHook : IDisposable
         _keyProc = KeyCallback;
     }
 
+    /// <summary>Starts the hook thread and returns once both hooks are installed (or failed).</summary>
     public void Install()
     {
+        if (_thread is not null) return;
+        using var ready = new ManualResetEventSlim();
+        _thread = new Thread(() => Run(ready)) { IsBackground = true, Name = "Swivra input hooks" };
+        _thread.Start();
+        ready.Wait();
+    }
+
+    private void Run(ManualResetEventSlim ready)
+    {
+        _threadId = Native.GetCurrentThreadId();
         IntPtr module = Native.GetModuleHandle(null);
         _mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, _mouseProc, module, 0);
         _keyHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, _keyProc, module, 0);
         Log.Write($"hooks installed mouse={_mouseHook != IntPtr.Zero} key={_keyHook != IntPtr.Zero} err={Marshal.GetLastWin32Error()}");
+        ready.Set();
+
+        // Low-level hook callbacks are delivered through this thread's message loop.
+        while (Native.GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0)
+        {
+            Native.TranslateMessage(ref msg);
+            Native.DispatchMessage(ref msg);
+        }
+
+        if (_mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_mouseHook);
+        if (_keyHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_keyHook);
+        _mouseHook = _keyHook = IntPtr.Zero;
     }
 
     private IntPtr MouseCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -109,10 +139,12 @@ internal sealed class InputHook : IDisposable
         return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
     }
 
+    /// <summary>Ends the message loop; the hook thread unhooks on its way out.</summary>
     public void Dispose()
     {
-        if (_mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_mouseHook);
-        if (_keyHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_keyHook);
-        _mouseHook = _keyHook = IntPtr.Zero;
+        if (_thread is null) return;
+        Native.PostThreadMessage(_threadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+        _thread.Join(TimeSpan.FromSeconds(2));
+        _thread = null;
     }
 }
