@@ -62,6 +62,7 @@ internal sealed class SwivraContext : ApplicationContext
             await _overlay.InitAsync();
             _overlay.Post(new { type = "lang", lang = Lang.Current });
             _hook.Install();
+            if (!_args.Contains("--demo") && !_args.Contains("--demo-tool")) AskStartupOnce();
             int demo = Array.IndexOf(_args, "--demo");
             if (demo >= 0)
             {
@@ -94,8 +95,28 @@ internal sealed class SwivraContext : ApplicationContext
         lang.DropDownItems.Add(new ToolStripMenuItem("Türkçe", null, (_, _) => SetLanguage("tr")) { Checked = Lang.IsTurkish });
         lang.DropDownItems.Add(new ToolStripMenuItem("English", null, (_, _) => SetLanguage("en")) { Checked = !Lang.IsTurkish });
         menu.Items.Add(lang);
+        var startup = new ToolStripMenuItem(Lang.T("Windows ile başlat", "Start with Windows")) { Checked = Startup.IsEnabled };
+        startup.Click += (_, _) => { Startup.Set(!Startup.IsEnabled); startup.Checked = Startup.IsEnabled; };
+        menu.Items.Add(startup);
         menu.Items.Add(Lang.T("Kayıtları aç", "Open logs"), null, (_, _) => OpenLogFolder());
         menu.Items.Add(Lang.T("Çıkış", "Exit"), null, (_, _) => ExitThread());
+    }
+
+    /// <summary>
+    /// First run only: Swivra works only while it runs, so ask once whether it should start with
+    /// Windows. The answer is never asked again; the tray menu changes it later.
+    /// </summary>
+    private void AskStartupOnce()
+    {
+        if (Settings.GetBool("startupAsked")) return;
+        Settings.Set("startupAsked", true);
+        if (Startup.IsEnabled) return;
+        var answer = MessageBox.Show(
+            Lang.T("Swivra yalnız açıkken çalışır. Windows açıldığında kendiliğinden başlasın mı?\n\nBunu sonra tepsi menüsünden değiştirebilirsin.",
+                   "Swivra only works while it is running. Start it with Windows?\n\nYou can change this later from the tray menu."),
+            "Swivra", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (answer == DialogResult.Yes) Startup.Set(true);
+        BuildTrayMenu();
     }
 
     private void SetLanguage(string lang)

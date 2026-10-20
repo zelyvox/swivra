@@ -60,6 +60,7 @@ Uygulama dijital olarak imzalı olmadığı için Windows SmartScreen ilk açıl
 - Vazgeçmek için dosyayı çarkın ortasına bırak.
 - Kırpma ve parola panellerinde **Enter** onaylar, **Esc** vazgeçer.
 - Dili değiştirmek için tepsi simgesine sağ tıkla ve **Dil / Language** menüsünü kullan. İlk açılışta Windows hangi dildeyse o seçilir.
+- Swivra yalnız açıkken çalışır. İlk açılışta Windows ile başlayıp başlamayacağını sorar; bunu sonra tepsi menüsündeki **Windows ile başlat** seçeneğinden değiştirebilirsin.
 - Tepsi menüsünde ayrıca **Çarkı göster (demo)**, **Kayıtları aç** ve **Çıkış** seçenekleri var.
 
 ## Bilinmesi gerekenler

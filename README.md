@@ -60,6 +60,7 @@ The app is not code-signed, so Windows SmartScreen may warn you the first time. 
 - To cancel, drop the file in the center of the wheel.
 - In the crop and password panels, **Enter** confirms and **Esc** cancels.
 - To change the language, right-click the tray icon and use **Dil / Language**. On first start, Swivra follows your Windows display language.
+- Swivra only works while it is running. On first start it asks whether to start with Windows; you can change this later with **Start with Windows** in the tray menu.
 - The tray menu also has **Show the wheel (demo)**, **Open logs** and **Exit**.
 
 ## Good to know
