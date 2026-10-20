@@ -35,10 +35,10 @@ internal static class ImageActions
     /// inside A4 in the matching orientation, so it prints at a sensible size whatever the pixel count.
     /// Photos are embedded as JPEG (q92) to keep the PDF small; images with transparency stay PNG.
     /// </summary>
-    public static void SavePdf(Bitmap bmp, string target, bool hasAlpha)
+    public static void SavePdf(Bitmap bmp, string target)
     {
         using var ms = new MemoryStream();
-        if (hasAlpha) bmp.Save(ms, ImageFormat.Png);
+        if (HasTransparency(bmp)) bmp.Save(ms, ImageFormat.Png);
         else
         {
             var codec = ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
@@ -61,6 +61,50 @@ internal static class ImageActions
         using (var xi = XImage.FromStream(ms))
             gfx.DrawImage(xi, 0, 0, pw, ph);
         doc.Save(target);
+    }
+
+    /// <summary>True when at least one pixel is not fully opaque. Scans the alpha bytes (early exit), no GetPixel.</summary>
+    public static bool HasTransparency(Bitmap bmp)
+    {
+        var fmt = bmp.PixelFormat;
+        if ((fmt & PixelFormat.Indexed) != 0) return (bmp.Palette.Flags & (int)PaletteFlags.HasAlpha) != 0; // GIF with a transparent entry
+        if (!Image.IsAlphaPixelFormat(fmt)) return false;
+        // Other alpha layouts (64bpp keeps alpha as 0..8192, 16bpp ARGB1555) are rare here: be safe and say yes.
+        if (fmt is not (PixelFormat.Format32bppArgb or PixelFormat.Format32bppPArgb)) return true;
+        var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, fmt);
+        try
+        {
+            byte[] row = new byte[data.Width * 4]; // one row at a time keeps 48 MP photos cheap
+            for (int y = 0; y < data.Height; y++)
+            {
+                System.Runtime.InteropServices.Marshal.Copy(IntPtr.Add(data.Scan0, y * data.Stride), row, 0, row.Length);
+                for (int x = 3; x < row.Length; x += 4) // BGRA: alpha is the fourth byte
+                    if (row[x] != 255) return true;
+            }
+            return false;
+        }
+        finally
+        {
+            bmp.UnlockBits(data);
+        }
+    }
+
+    /// <summary>
+    /// Copy of the bitmap drawn onto an opaque white 24bpp canvas of the same size (for formats without alpha).
+    /// The metadata items come along, so flattening never decides on its own what EXIF the output keeps.
+    /// </summary>
+    public static Bitmap FlattenOnWhite(Bitmap bmp)
+    {
+        var flat = new Bitmap(bmp.Width, bmp.Height, PixelFormat.Format24bppRgb);
+        flat.SetResolution(bmp.HorizontalResolution, bmp.VerticalResolution);
+        using (var g = Graphics.FromImage(flat))
+        {
+            g.Clear(Color.White);
+            g.DrawImage(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height), 0, 0, bmp.Width, bmp.Height, GraphicsUnit.Pixel);
+        }
+        foreach (var p in bmp.PropertyItems)
+            try { flat.SetPropertyItem(p); } catch { /* some tags are not writable */ }
+        return flat;
     }
 
     // ---------- background removal (u2netp via ONNX Runtime, CPU) ----------

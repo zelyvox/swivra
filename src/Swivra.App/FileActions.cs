@@ -244,7 +244,7 @@ internal static class FileActions
             string baseName = Path.GetFileNameWithoutExtension(path) + suffix;
             string target = UniquePath(Path.GetDirectoryName(path)!, baseName, ext);
             if (ext == "webp") ImageActions.SaveWebp(work, target);
-            else if (ext == "pdf") ImageActions.SavePdf(work, target, cutout);
+            else if (ext == "pdf") ImageActions.SavePdf(work, target);
             else Save(work, target, ext, compress ? 70L : 92L);
             return target;
         }
@@ -281,7 +281,9 @@ internal static class FileActions
             var codec = ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
             using var ps = new EncoderParameters(1);
             ps.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, jpegQuality);
-            bmp.Save(target, codec, ps);
+            // The JPEG encoder drops alpha and stores transparent pixels as black: flatten onto white first.
+            using Bitmap? flat = ImageActions.HasTransparency(bmp) ? ImageActions.FlattenOnWhite(bmp) : null;
+            (flat ?? bmp).Save(target, codec, ps);
         }
         else
         {
