@@ -235,7 +235,8 @@ internal static class FileActions
             {
                 foreach (var p in props)
                 {
-                    if (p.Id == 0x0112) continue; // orientation would be wrong after our own rotation
+                    if (!KeepTag(p.Id)) continue;
+                    if (p.Id is 0xA002 or 0xA003) SetLong(p, (uint)(p.Id == 0xA002 ? work.Width : work.Height));
                     try { work.SetPropertyItem(p); } catch { /* some tags are not writable */ }
                 }
             }
@@ -251,6 +252,20 @@ internal static class FileActions
         {
             work.Dispose();
         }
+    }
+
+    /// <summary>
+    /// EXIF items that still describe the new pixels. Dropped: orientation (we rotated ourselves), the stored
+    /// width/height of IFD0, and the embedded thumbnail (0x0201/0x0202 and GDI+'s 0x50xx tags): after a crop it
+    /// would still show the whole original photo.
+    /// </summary>
+    private static bool KeepTag(int id) => id is not (0x0112 or 0x0100 or 0x0101 or 0x0201 or 0x0202) && id is not (>= 0x5000 and <= 0x50FF);
+
+    private static void SetLong(PropertyItem p, uint value)
+    {
+        p.Type = 4; // LONG
+        p.Len = 4;
+        p.Value = BitConverter.GetBytes(value);
     }
 
     /// <summary>
