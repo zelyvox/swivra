@@ -165,13 +165,13 @@ internal static class SendActions
     {
         try
         {
-            using var office = Registry.CurrentUser.OpenSubKey(@"SoftwareMicrosoftOffice");
+            using var office = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Office");
             foreach (string ver in office?.GetSubKeyNames() ?? [])
             {
-                using var profiles = office!.OpenSubKey(ver + @"OutlookProfiles");
+                using var profiles = office!.OpenSubKey(ver + @"\Outlook\Profiles");
                 if (profiles?.SubKeyCount > 0) return true;
             }
-            using var legacy = Registry.CurrentUser.OpenSubKey(@"SoftwareMicrosoftWindows NTCurrentVersionWindows Messaging SubsystemProfiles");
+            using var legacy = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles");
             return legacy?.SubKeyCount > 0;
         }
         catch { return false; }
