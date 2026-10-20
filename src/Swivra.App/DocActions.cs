@@ -413,19 +413,18 @@ internal static class DocActions
                 total += MaskRuns<Text>(p) + MaskRuns<DeletedText>(p) + MaskRuns<FieldCode>(p) + MaskRuns<DeletedFieldCode>(p);
             foreach (var f in root.Descendants<SimpleField>())
                 f.Instruction = MaskValue(f.Instruction?.Value, ref total);
-            foreach (var d in root.Descendants<DocumentFormat.OpenXml.Drawing.Wordprocessing.DocProperties>())
-            {
-                if (d.Description is not null) d.Description = MaskValue(d.Description.Value, ref total);
-                if (d.Title is not null) d.Title = MaskValue(d.Title.Value, ref total);
-            }
-            // A masked mailto:/tel: target is no valid URI, so the link goes and its (masked) text stays.
+            // Alt text sits in wp:docPr, pic:cNvPr, wps:cNvPr and, in the VML fallback, v:shape@alt / o:title.
+            total += MaskAttributes(root, name => name is "descr" or "title" or "alt");
+            // A masked mailto:/tel: target is no valid URI. The relationship keeps its id (w:hyperlink and
+            // DrawingML a:hlinkClick may point at it; a dangling id makes Word refuse the file) and goes nowhere.
             foreach (var rel in part.HyperlinkRelationships.ToList())
             {
                 MaskText(rel.Uri.OriginalString, out int c);
                 if (c == 0) continue;
                 total += c;
-                foreach (var h in root.Descendants<Hyperlink>().Where(h => h.Id?.Value == rel.Id)) h.Id = null;
+                string id = rel.Id;
                 part.DeleteReferenceRelationship(rel);
+                part.AddHyperlinkRelationship(new Uri("about:blank"), true, id);
             }
             root.Save();
         }
@@ -438,12 +437,35 @@ internal static class DocActions
         pp.Description = MaskValue(pp.Description, ref total);
         pp.LastModifiedBy = MaskValue(pp.LastModifiedBy, ref total);
         pp.Category = MaskValue(pp.Category, ref total);
-        foreach (OpenXmlPart? part in new OpenXmlPart?[] { doc.ExtendedFilePropertiesPart, doc.CustomFilePropertiesPart })
+        // Only string-typed values can take the mask; a number or date holding a value (an ID stored as
+        // vt:r8, say) would make the file invalid, so that custom property is removed instead.
+        if (doc.ExtendedFilePropertiesPart?.Properties is { } app)
         {
-            if (part?.RootElement is not OpenXmlPartRootElement root) continue;
-            foreach (var t in root.Descendants<OpenXmlLeafTextElement>())
+            foreach (var t in app.Descendants<OpenXmlLeafTextElement>().Where(IsStringProperty))
                 t.Text = MaskValue(t.Text, ref total)!;
-            root.Save();
+            app.Save();
+        }
+        if (doc.CustomFilePropertiesPart?.Properties is { } custom)
+        {
+            foreach (var prop in custom.Elements<DocumentFormat.OpenXml.CustomProperties.CustomDocumentProperty>().ToList())
+            {
+                if (prop.FirstChild is not OpenXmlLeafTextElement value) continue;
+                if (IsStringProperty(value)) value.Text = MaskValue(value.Text, ref total)!;
+                else
+                {
+                    MaskText(value.Text, out int c);
+                    if (c == 0) continue;
+                    total += c;
+                    prop.Remove();
+                }
+            }
+            custom.Save();
+        }
+        // Co-authors signed in with a work account are stored as "S::name@company.com::guid".
+        if (main.WordprocessingPeoplePart?.RootElement is OpenXmlPartRootElement people)
+        {
+            total += MaskAttributes(people, _ => true);
+            people.Save();
         }
 
         foreach (var part in main.CustomXmlParts)
@@ -455,6 +477,26 @@ internal static class DocActions
 
     // xml:space="preserve" on w:t, w:delText and w:instrText alike (only Text exposes it as a typed property).
     private static readonly OpenXmlAttribute PreserveSpace = new("xml", "space", "http://www.w3.org/XML/1998/namespace", "preserve");
+
+    private static bool IsStringProperty(OpenXmlLeafTextElement e) => e is
+        DocumentFormat.OpenXml.VariantTypes.VTLPWSTR or DocumentFormat.OpenXml.VariantTypes.VTLPSTR or DocumentFormat.OpenXml.VariantTypes.VTBString or
+        DocumentFormat.OpenXml.ExtendedProperties.Company or DocumentFormat.OpenXml.ExtendedProperties.Manager or
+        DocumentFormat.OpenXml.ExtendedProperties.HyperlinkBase or DocumentFormat.OpenXml.ExtendedProperties.Template;
+
+    /// <summary>Masks the attributes whose local name passes <paramref name="names"/> on every element under <paramref name="root"/>.</summary>
+    private static int MaskAttributes(OpenXmlElement root, Func<string, bool> names)
+    {
+        int total = 0;
+        foreach (var e in root.Descendants().ToList())
+            foreach (var a in e.GetAttributes())
+            {
+                if (!names(a.LocalName) || string.IsNullOrEmpty(a.Value)) continue;
+                int before = total;
+                string masked = MaskValue(a.Value, ref total)!;
+                if (total > before) e.SetAttribute(new OpenXmlAttribute(a.Prefix, a.LocalName, a.NamespaceUri, masked));
+            }
+        return total;
+    }
 
     /// <summary>The value with sensitive items masked; adds what it covered to <paramref name="total"/>.</summary>
     private static string? MaskValue(string? value, ref int total)
