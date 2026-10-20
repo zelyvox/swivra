@@ -31,12 +31,17 @@ internal static class ImageIO
             using var ms = new MemoryStream(data);
             using var img = Image.FromStream(ms);
             props = img.PropertyItems;
-            // GDI+ ignores an embedded profile. Skia applies it; TIFF has no Skia codec, so WIC does it there.
+            // GDI+ ignores an embedded profile. Skia applies it; for TIFF (no Skia codec) or a profile Skia cannot parse, WIC does.
             if (props.Any(p => p.Id == IccTag))
             {
                 try
                 {
-                    Bitmap? srgb = LoadSkia(data);
+                    Bitmap? srgb = LoadSkia(data, out bool skiaApplied);
+                    if (srgb is not null && !skiaApplied)
+                    {
+                        srgb.Dispose(); // Skia could not parse the profile, so the pixels were not converted
+                        srgb = null;
+                    }
                     if (srgb is null)
                     {
                         srgb = Wic.Load(path, out bool converted);
@@ -47,7 +52,7 @@ internal static class ImageIO
                         }
                         else
                         {
-                            // Unlike the HEIF decoder, WIC's TIFF decoder leaves the EXIF orientation to us.
+                            // Unlike the HEIF decoder, WIC's TIFF and JPEG decoders leave the EXIF orientation to us.
                             var to = props.FirstOrDefault(p => p.Id == 0x0112);
                             if (to?.Value is { Length: >= 2 } tv) Orient(srgb, BitConverter.ToUInt16(tv, 0));
                         }
@@ -77,7 +82,7 @@ internal static class ImageIO
         Exception? skiaError = null;
         try
         {
-            if (LoadSkia(data) is Bitmap b) return b;
+            if (LoadSkia(data, out _) is Bitmap b) return b;
         }
         catch (Exception ex)
         {
@@ -138,12 +143,17 @@ internal static class ImageIO
         if (flip is not null) bmp.RotateFlip(flip.Value);
     }
 
-    /// <summary>WebP (and anything else this Skia build reads), converted to sRGB. Null when Skia has no codec for the data.</summary>
-    private static Bitmap? LoadSkia(byte[] data)
+    /// <summary>
+    /// WebP (and anything else this Skia build reads), converted to sRGB. Null when Skia has no codec for the data.
+    /// <paramref name="profileApplied"/> is false when the file's profile was missing or unreadable for Skia.
+    /// </summary>
+    private static Bitmap? LoadSkia(byte[] data, out bool profileApplied)
     {
+        profileApplied = false;
         using var skData = SKData.CreateCopy(data);
         using var codec = SKCodec.Create(skData);
         if (codec is null) return null;
+        profileApplied = codec.Info.ColorSpace is not null;
         using var srgb = SKColorSpace.CreateSrgb();
         var info = new SKImageInfo(codec.Info.Width, codec.Info.Height, SKColorType.Bgra8888, SKAlphaType.Unpremul, srgb);
         var bmp = new Bitmap(info.Width, info.Height, PixelFormat.Format32bppArgb);
