@@ -218,7 +218,9 @@ internal static class FileActions
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.SmoothingMode = SmoothingMode.HighQuality;
                     g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                    g.DrawImage(work, 0, 0, mw, h);
+                    using var wrap = new ImageAttributes();
+                    wrap.SetWrapMode(WrapMode.TileFlipXY); // without it the bicubic kernel blends the edge with transparent black
+                    g.DrawImage(work, new Rectangle(0, 0, mw, h), 0, 0, work.Width, work.Height, GraphicsUnit.Pixel, wrap);
                 }
                 work.Dispose();
                 work = resized;

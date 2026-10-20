@@ -1,3 +1,4 @@
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Net;
 using System.Text.Json;
@@ -421,7 +422,16 @@ internal sealed class SwivraContext : ApplicationContext
         const int MaxSide = 1400;
         using var full = FileActions.LoadOriented(path, out _);
         double k = Math.Min(1.0, MaxSide / (double)Math.Max(full.Width, full.Height));
-        using var small = new Bitmap(full, Math.Max(1, (int)(full.Width * k)), Math.Max(1, (int)(full.Height * k)));
+        int sw = Math.Max(1, (int)(full.Width * k)), sh = Math.Max(1, (int)(full.Height * k));
+        using var small = new Bitmap(sw, sh, PixelFormat.Format24bppRgb);
+        using (var g = Graphics.FromImage(small))
+        {
+            g.Clear(Color.White); // JPEG preview has no alpha
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            using var wrap = new ImageAttributes();
+            wrap.SetWrapMode(WrapMode.TileFlipXY);
+            g.DrawImage(full, new Rectangle(0, 0, sw, sh), 0, 0, full.Width, full.Height, GraphicsUnit.Pixel, wrap);
+        }
         using var ms = new MemoryStream();
         var jpeg = ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
         using var ps = new EncoderParameters(1);

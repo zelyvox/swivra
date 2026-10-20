@@ -323,7 +323,9 @@ internal static class SendActions
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.SmoothingMode = SmoothingMode.HighQuality;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.DrawImage(src, 0, 0, w, h);
+            using var wrap = new ImageAttributes();
+            wrap.SetWrapMode(WrapMode.TileFlipXY); // no dark rim along the edges
+            g.DrawImage(src, new Rectangle(0, 0, w, h), 0, 0, src.Width, src.Height, GraphicsUnit.Pixel, wrap);
         }
         string target = FileActions.UniquePath(dir, Path.GetFileNameWithoutExtension(path), "jpg");
         var codec = ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);

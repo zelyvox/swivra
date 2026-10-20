@@ -132,7 +132,9 @@ internal static class ImageActions
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.CompositingMode = CompositingMode.SourceCopy;
-                g.DrawImage(src, new Rectangle(0, 0, ModelSize, ModelSize), 0, 0, src.Width, src.Height, GraphicsUnit.Pixel);
+                using var wrap = new ImageAttributes();
+                wrap.SetWrapMode(WrapMode.TileFlipXY);
+                g.DrawImage(src, new Rectangle(0, 0, ModelSize, ModelSize), 0, 0, src.Width, src.Height, GraphicsUnit.Pixel, wrap);
             }
             var data = small.LockBits(new Rectangle(0, 0, ModelSize, ModelSize), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             try
