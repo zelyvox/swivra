@@ -49,9 +49,108 @@ internal static partial class Radar
         {
             (gps, model) = ImageIO.ReadPrivacy(path); // HEIC, AVIF, WebP: GDI+ cannot read them, WIC can
         }
+        if (!gps && path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) gps = PngHasGps(path); // GDI+ ignores eXIf and XMP in PNG
         if (gps) found.Add(Lang.T("Konum bilgisi", "Location"));
         if (model is not null)
             found.Add(model.Length > 0 ? Lang.T($"Cihaz modeli: {model}", $"Device model: {model}") : Lang.T("Cihaz modeli", "Device model"));
+    }
+
+    private const int MaxPngBytes = 8 * 1024 * 1024; // metadata sits before the pixels; do not read a whole 50 MB PNG while dragging
+    private const int MaxXmpBytes = 4 * 1024 * 1024;
+
+    /// <summary>GPS in a PNG: an eXIf chunk with a GPS IFD, or XMP (XML:com.adobe.xmp) with exif:GPSLatitude/Longitude. Never throws.</summary>
+    private static bool PngHasGps(string path)
+    {
+        try
+        {
+            byte[] buf;
+            using (var fs = File.OpenRead(path))
+            {
+                buf = new byte[(int)Math.Min(fs.Length, MaxPngBytes)];
+                fs.ReadExactly(buf);
+            }
+            if (buf.Length < 8 || buf[0] != 0x89 || buf[1] != 'P' || buf[2] != 'N' || buf[3] != 'G') return false;
+            int pos = 8;
+            while (pos + 12 <= buf.Length)
+            {
+                uint len = (uint)(buf[pos] << 24 | buf[pos + 1] << 16 | buf[pos + 2] << 8 | buf[pos + 3]);
+                string type = Encoding.ASCII.GetString(buf, pos + 4, 4);
+                if (len > buf.Length - pos - 12) return false; // truncated: nothing more to trust
+                var data = new ReadOnlySpan<byte>(buf, pos + 8, (int)len);
+                if (type == "IDAT" || type == "IEND") return false; // metadata chunks come first in practice
+                if (type == "eXIf" && ExifHasGps(data.ToArray())) return true;
+                if (type is "iTXt" or "tEXt" or "zTXt" && XmpHasGps(type, data)) return true;
+                pos += 12 + (int)len;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"radar png metadata skipped {path}: {ex.Message}");
+        }
+        return false;
+    }
+
+    /// <summary>TIFF-structured EXIF block: IFD0 has tag 0x8825 (GPS IFD pointer) and that IFD has at least one entry.</summary>
+    internal static bool ExifHasGps(byte[] t)
+    {
+        if (t.Length >= 6 && t[0] == 'E' && t[1] == 'x' && t[2] == 'i' && t[3] == 'f') t = t[6..]; // optional "Exif\0\0" prefix
+        if (t.Length < 8) return false;
+        bool le = t[0] == 'I' && t[1] == 'I';
+        if (!le && !(t[0] == 'M' && t[1] == 'M')) return false;
+        ushort U16(int o) => (ushort)(le ? t[o] | t[o + 1] << 8 : t[o] << 8 | t[o + 1]);
+        uint U32(int o) => le ? (uint)(t[o] | t[o + 1] << 8 | t[o + 2] << 16 | t[o + 3] << 24) : (uint)(t[o] << 24 | t[o + 1] << 16 | t[o + 2] << 8 | t[o + 3]);
+        long ifd0 = U32(4);
+        if (ifd0 + 2 > t.Length) return false;
+        int n = U16((int)ifd0);
+        for (int i = 0; i < n; i++)
+        {
+            long e = ifd0 + 2 + i * 12L;
+            if (e + 12 > t.Length) return false;
+            if (U16((int)e) != 0x8825) continue;
+            long gps = U32((int)e + 8);
+            return gps + 2 <= t.Length && U16((int)gps) > 0;
+        }
+        return false;
+    }
+
+    /// <summary>iTXt / tEXt / zTXt with keyword XML:com.adobe.xmp whose XML names exif:GPSLatitude or GPSLongitude.</summary>
+    private static bool XmpHasGps(string type, ReadOnlySpan<byte> d)
+    {
+        int nul = d.IndexOf((byte)0);
+        if (nul < 0 || Encoding.Latin1.GetString(d[..nul]) != "XML:com.adobe.xmp") return false;
+        byte[] body;
+        if (type == "tEXt") body = d[(nul + 1)..].ToArray();
+        else if (type == "zTXt")
+        {
+            if (nul + 2 > d.Length) return false;
+            body = Inflate(d[(nul + 2)..]);
+        }
+        else
+        {
+            if (nul + 3 > d.Length) return false;
+            bool compressed = d[nul + 1] == 1;
+            var rest = d[(nul + 3)..]; // after flag and method: language tag, translated keyword, text
+            int a = rest.IndexOf((byte)0);
+            if (a < 0) return false;
+            rest = rest[(a + 1)..];
+            int b = rest.IndexOf((byte)0);
+            if (b < 0) return false;
+            rest = rest[(b + 1)..];
+            body = compressed ? Inflate(rest) : rest.ToArray();
+        }
+        string xml = Encoding.UTF8.GetString(body);
+        return xml.Contains("GPSLatitude", StringComparison.Ordinal) || xml.Contains("GPSLongitude", StringComparison.Ordinal);
+    }
+
+    private static byte[] Inflate(ReadOnlySpan<byte> zlib)
+    {
+        using var input = new MemoryStream(zlib.ToArray());
+        using var z = new System.IO.Compression.ZLibStream(input, System.IO.Compression.CompressionMode.Decompress);
+        using var output = new MemoryStream();
+        var chunk = new byte[16 * 1024];
+        int read;
+        while (output.Length < MaxXmpBytes && (read = z.Read(chunk, 0, chunk.Length)) > 0) output.Write(chunk, 0, read);
+        return output.ToArray();
     }
 
     private static void ScanPdf(string path, List<string> found)
