@@ -303,7 +303,9 @@ internal static class SendActions
                 }
                 Log.Write($"could not shrink {f}, holding it back: {ex.Message}");
                 held.Add(f);
-                reason ??= ex is MissingCodecException ? ex.Message : Lang.T("Konum bilgisi silinemedi", "Could not remove the location data");
+                // The codec hint tells the user what to install, so it wins over the generic reason.
+                if (ex is MissingCodecException) reason = ex.Message;
+                else reason ??= Lang.T("Konum bilgisi silinemedi", "Could not remove the location data");
             }
         }
         return result;
