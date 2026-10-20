@@ -4,6 +4,12 @@ using System.Text;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
+using Cell = DocumentFormat.OpenXml.Spreadsheet.Cell;
+using CellValues = DocumentFormat.OpenXml.Spreadsheet.CellValues;
+using CommentText = DocumentFormat.OpenXml.Spreadsheet.CommentText;
+using InlineString = DocumentFormat.OpenXml.Spreadsheet.InlineString;
+using SharedStringItem = DocumentFormat.OpenXml.Spreadsheet.SharedStringItem;
+using SText = DocumentFormat.OpenXml.Spreadsheet.Text;
 using ICSharpCode.SharpZipLib.Zip;
 using Microsoft.Win32;
 using PdfSharp.Drawing;
@@ -327,13 +333,13 @@ internal static class DocActions
 
         string suffix = Lang.T("-gizli", "-hidden");
         string output = OutPath(path, suffix, ext.TrimStart('.'));
-        int count;
+        int count, skipped = 0;
         try
         {
             if (ext == ".docx")
             {
                 File.Copy(path, output);
-                count = MaskDocx(output);
+                count = MaskDocx(output, out skipped);
             }
             else
             {
@@ -347,12 +353,14 @@ internal static class DocActions
             TryDelete(output);
             throw;
         }
+        // Binary embedded objects cannot be looked into; say so rather than suggest the file is clean.
+        string skippedNote = skipped == 0 ? "" : Lang.T($" · {skipped} gömülü nesne kontrol edilemedi", skipped == 1 ? " · 1 embedded object not checked" : $" · {skipped} embedded objects not checked");
         if (count == 0)
         {
             TryDelete(output);
-            return new ActionResult(false, Lang.T("Gizle", "Hide"), Lang.T("Kapatılacak hassas veri bulunamadı", "No sensitive data found to cover"));
+            return new ActionResult(false, Lang.T("Gizle", "Hide"), Lang.T("Kapatılacak hassas veri bulunamadı", "No sensitive data found to cover") + skippedNote);
         }
-        return Done(output, Lang.T($"{count} alan kapatıldı", count == 1 ? "1 item covered" : $"{count} items covered"));
+        return Done(output, Lang.T($"{count} alan kapatıldı", count == 1 ? "1 item covered" : $"{count} items covered") + skippedNote);
     }
 
     /// <summary>Merges overlapping spans and replaces each with the mask.</summary>
@@ -388,15 +396,54 @@ internal static class DocActions
 
     /// <summary>
     /// Masks every place a .docx keeps text, not only what Word shows: all story parts (body, headers, footers,
-    /// footnotes, endnotes, comments, building blocks), tracked deletions and field codes, alt text, link targets,
-    /// document properties and the custom XML that content controls are bound to (Word refills a bound control
-    /// from it on open). The thumbnail is a picture of the unmasked first page, so it always goes.
-    /// Paragraph by paragraph, so a value split across runs is still caught. Returns the number of covered items.
+    /// footnotes, endnotes, comments, building blocks), tracked deletions, field codes and equations, legacy
+    /// form-field texts, alt text, link targets, document variables and mail-merge settings, document
+    /// properties, the custom XML that content controls are bound to (Word refills a bound control from it on
+    /// open), SmartArt and chart text, and embedded Word, Excel and PowerPoint files. Photos lose their EXIF/XMP
+    /// metadata. The thumbnail is a picture of the unmasked first page, so it always goes.
+    /// Paragraph by paragraph, so a value split across runs is still caught.
+    /// Returns the number of distinct values covered; <paramref name="skipped"/> counts embedded objects
+    /// that cannot be opened (binary OLE, ActiveX) and were left as they are.
     /// </summary>
-    private static int MaskDocx(string copy)
+    private static int MaskDocx(string copy, out int skipped)
     {
-        int total = 0;
-        using var doc = WordprocessingDocument.Open(copy, true);
+        var covered = new Covered();
+        using (var doc = WordprocessingDocument.Open(copy, true))
+            MaskWord(doc, covered);
+        skipped = covered.Unchecked;
+        return covered.Count;
+    }
+
+    /// <summary>
+    /// What was covered across one document and everything embedded in it. Values are counted once however
+    /// often they occur (link text and target, field code and result, the two copies of a text box).
+    /// </summary>
+    private sealed class Covered
+    {
+        private readonly HashSet<string> _values = new(StringComparer.OrdinalIgnoreCase);
+        public int Unchecked;
+        public int Count => _values.Count;
+
+        /// <summary>The value with sensitive items masked; remembers what it covered.</summary>
+        public string? Mask(string? value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            var spans = MergeSpans(Radar.FindSensitiveSpans(value));
+            Note(value, spans);
+            return spans.Count == 0 ? value : MaskText(value, out _);
+        }
+
+        public void Note(string text, List<(int Start, int Length)> spans)
+        {
+            foreach (var (s, l) in spans) _values.Add(string.Concat(text.AsSpan(s, l).ToString().Where(c => !char.IsWhiteSpace(c))));
+        }
+
+        /// <summary>A photo that carried a location counts as one covered item of its own.</summary>
+        public void NoteLocation(Uri part) => _values.Add("location:" + part);
+    }
+
+    private static void MaskWord(WordprocessingDocument doc, Covered c)
+    {
         var main = doc.MainDocumentPart ?? throw new DocFailure(Lang.T("Olmadı", "Failed"), Lang.T("Word dosyası açılamadı", "Could not open the Word file"));
 
         var stories = new List<OpenXmlPart> { main };
@@ -410,69 +457,291 @@ internal static class DocActions
         {
             if (part.RootElement is not OpenXmlPartRootElement root) continue;
             foreach (var p in root.Descendants<Paragraph>())
-                total += MaskRuns<Text>(p) + MaskRuns<DeletedText>(p) + MaskRuns<FieldCode>(p) + MaskRuns<DeletedFieldCode>(p);
-            foreach (var f in root.Descendants<SimpleField>())
-                f.Instruction = MaskValue(f.Instruction?.Value, ref total);
-            // Alt text sits in wp:docPr, pic:cNvPr, wps:cNvPr and, in the VML fallback, v:shape@alt / o:title.
-            total += MaskAttributes(root, name => name is "descr" or "title" or "alt");
-            // A masked mailto:/tel: target is no valid URI. The relationship keeps its id (w:hyperlink and
-            // DrawingML a:hlinkClick may point at it; a dangling id makes Word refuse the file) and goes nowhere.
-            foreach (var rel in part.HyperlinkRelationships.ToList())
             {
-                MaskText(rel.Uri.OriginalString, out int c);
-                if (c == 0) continue;
-                total += c;
-                string id = rel.Id;
-                part.DeleteReferenceRelationship(rel);
-                part.AddHyperlinkRelationship(new Uri("about:blank"), true, id);
+                MaskRuns<Text>(p, c, preserveSpace: true);
+                MaskRuns<DeletedText>(p, c, preserveSpace: true);
+                MaskRuns<FieldCode>(p, c, preserveSpace: true);
+                MaskRuns<DeletedFieldCode>(p, c, preserveSpace: true);
+                MaskRuns<DocumentFormat.OpenXml.Math.Text>(p, c, preserveSpace: true);
             }
+            foreach (var f in root.Descendants<SimpleField>())
+                f.Instruction = c.Mask(f.Instruction?.Value);
+            // Legacy form fields keep their default, help and status text in w:val attributes.
+            foreach (var ff in root.Descendants<FormFieldData>())
+                MaskAttributes(ff, name => name == "val", c);
+            // Alt text sits in wp:docPr, pic:cNvPr, wps:cNvPr and, in the VML fallback, v:shape@alt / o:title.
+            MaskAttributes(root, name => name is "descr" or "title" or "alt", c);
+            MaskHyperlinks(part, c);
             root.Save();
         }
 
-        var pp = doc.PackageProperties;
-        pp.Title = MaskValue(pp.Title, ref total);
-        pp.Subject = MaskValue(pp.Subject, ref total);
-        pp.Creator = MaskValue(pp.Creator, ref total);
-        pp.Keywords = MaskValue(pp.Keywords, ref total);
-        pp.Description = MaskValue(pp.Description, ref total);
-        pp.LastModifiedBy = MaskValue(pp.LastModifiedBy, ref total);
-        pp.Category = MaskValue(pp.Category, ref total);
-        // Only string-typed values can take the mask; a number or date holding a value (an ID stored as
-        // vt:r8, say) would make the file invalid, so that custom property is removed instead.
-        if (doc.ExtendedFilePropertiesPart?.Properties is { } app)
+        // Document variables and the mail-merge connection (query, data source) live in settings.xml.
+        if (main.DocumentSettingsPart?.Settings is { } settings)
         {
-            foreach (var t in app.Descendants<OpenXmlLeafTextElement>().Where(IsStringProperty))
-                t.Text = MaskValue(t.Text, ref total)!;
-            app.Save();
-        }
-        if (doc.CustomFilePropertiesPart?.Properties is { } custom)
-        {
-            foreach (var prop in custom.Elements<DocumentFormat.OpenXml.CustomProperties.CustomDocumentProperty>().ToList())
-            {
-                if (prop.FirstChild is not OpenXmlLeafTextElement value) continue;
-                if (IsStringProperty(value)) value.Text = MaskValue(value.Text, ref total)!;
-                else
-                {
-                    MaskText(value.Text, out int c);
-                    if (c == 0) continue;
-                    total += c;
-                    prop.Remove();
-                }
-            }
-            custom.Save();
+            foreach (var e in settings.Elements().Where(e => e is DocumentVariables or MailMerge))
+                MaskAttributes(e, name => name == "val", c);
+            settings.Save();
         }
         // Co-authors signed in with a work account are stored as "S::name@company.com::guid".
         if (main.WordprocessingPeoplePart?.RootElement is OpenXmlPartRootElement people)
         {
-            total += MaskAttributes(people, _ => true);
+            MaskAttributes(people, _ => true, c);
             people.Save();
         }
-
         foreach (var part in main.CustomXmlParts)
-            total += MaskXmlPart(part);
+            MaskXmlPart(part, c);
 
+        MaskProperties(doc, c);
+        MaskInnerParts(doc, c);
         if (doc.ThumbnailPart is { } thumb) doc.DeletePart(thumb);
-        return total;
+    }
+
+    /// <summary>Excel embedded in a document (or behind a chart): shared strings, cells, comments, properties.</summary>
+    private static void MaskExcel(SpreadsheetDocument doc, Covered c)
+    {
+        if (doc.WorkbookPart is not { } wb) return;
+        if (wb.SharedStringTablePart?.SharedStringTable is { } sst)
+        {
+            foreach (var item in sst.Elements<SharedStringItem>()) MaskRuns<SText>(item, c, preserveSpace: true);
+            sst.Save();
+        }
+        foreach (var ws in wb.WorksheetParts)
+        {
+            foreach (var cell in ws.Worksheet.Descendants<Cell>())
+            {
+                if (cell.InlineString is { } inline) { MaskRuns<SText>(inline, c, preserveSpace: true); continue; }
+                if (cell.CellFormula is not null || cell.CellValue is not { } v) continue;
+                var type = cell.DataType?.Value;
+                if (type == CellValues.String) { v.Text = c.Mask(v.Text)!; continue; }
+                if (type is not null && type != CellValues.Number) continue; // shared strings are done above; booleans and errors hold no text
+                string masked = c.Mask(v.Text)!;
+                if (masked == v.Text) continue;
+                // A masked number is no number any more: the cell becomes an inline string.
+                cell.CellValue = null;
+                cell.DataType = CellValues.InlineString;
+                cell.InlineString = new InlineString(new SText(masked));
+            }
+            ws.Worksheet.Save();
+            if (ws.WorksheetCommentsPart?.Comments is { } comments)
+            {
+                foreach (var ct in comments.Descendants<CommentText>()) MaskRuns<SText>(ct, c, preserveSpace: true);
+                comments.Save();
+            }
+        }
+        MaskProperties(doc, c);
+        MaskInnerParts(doc, c);
+    }
+
+    /// <summary>PowerPoint embedded in a document: slides, notes, alt text, links, properties.</summary>
+    private static void MaskPowerPoint(PresentationDocument doc, Covered c)
+    {
+        if (doc.PresentationPart is not { } pres) return;
+        var parts = new List<OpenXmlPart>();
+        foreach (var slide in pres.SlideParts)
+        {
+            parts.Add(slide);
+            if (slide.NotesSlidePart is { } notes) parts.Add(notes);
+        }
+        foreach (var part in parts)
+        {
+            if (part.RootElement is not OpenXmlPartRootElement root) continue;
+            foreach (var p in root.Descendants<DocumentFormat.OpenXml.Drawing.Paragraph>()) MaskRuns<DocumentFormat.OpenXml.Drawing.Text>(p, c, preserveSpace: false);
+            MaskAttributes(root, name => name is "descr" or "title", c);
+            MaskHyperlinks(part, c);
+            root.Save();
+        }
+        MaskProperties(doc, c);
+        MaskInnerParts(doc, c);
+    }
+
+    /// <summary>
+    /// Parts below a story: embedded Office files (masked in place), binary objects (counted as skipped),
+    /// photos (metadata removed), and the text of SmartArt and charts.
+    /// </summary>
+    private static void MaskInnerParts(OpenXmlPackage package, Covered c)
+    {
+        foreach (var part in package.GetAllParts().ToList())
+        {
+            switch (part)
+            {
+                case EmbeddedPackagePart embedded: MaskEmbedded(embedded, c); break;
+                case EmbeddedObjectPart or EmbeddedControlPersistencePart or EmbeddedControlPersistenceBinaryDataPart: c.Unchecked++; break;
+                case ImagePart image: StripImageMetadata(image, c); break;
+                case ChartPart or ChartDrawingPart or DiagramDataPart or DiagramPersistLayoutPart: MaskDrawingText(part, c); break;
+            }
+        }
+    }
+
+    private static void MaskEmbedded(EmbeddedPackagePart part, Covered c)
+    {
+        using var ms = new MemoryStream();
+        using (var s = part.GetStream(FileMode.Open, FileAccess.Read)) s.CopyTo(ms);
+        ms.Position = 0;
+        try
+        {
+            string type = part.ContentType;
+            if (type.Contains("wordprocessingml", StringComparison.Ordinal)) { using var d = WordprocessingDocument.Open(ms, true); MaskWord(d, c); }
+            else if (type.Contains("spreadsheetml", StringComparison.Ordinal)) { using var d = SpreadsheetDocument.Open(ms, true); MaskExcel(d, c); }
+            else if (type.Contains("presentationml", StringComparison.Ordinal)) { using var d = PresentationDocument.Open(ms, true); MaskPowerPoint(d, c); }
+            else { c.Unchecked++; return; }
+        }
+        catch (Exception ex) when (ex is not DocFailure)
+        {
+            Log.Write($"embedded {part.ContentType} not masked: {ex.Message}");
+            c.Unchecked++;
+            return;
+        }
+        ms.Position = 0;
+        part.FeedData(ms);
+    }
+
+    /// <summary>
+    /// Chart, SmartArt and chart-shape text. Chart values (c:v) also back the drawn chart; a number that
+    /// holds a value becomes 0 so the chart stays readable, text becomes the mask.
+    /// </summary>
+    private static void MaskDrawingText(OpenXmlPart part, Covered c)
+    {
+        if (part.RootElement is not OpenXmlPartRootElement root) return;
+        foreach (var p in root.Descendants<DocumentFormat.OpenXml.Drawing.Paragraph>()) MaskRuns<DocumentFormat.OpenXml.Drawing.Text>(p, c, preserveSpace: false);
+        foreach (var v in root.Descendants<DocumentFormat.OpenXml.Drawing.Charts.NumericValue>())
+        {
+            string masked = c.Mask(v.Text)!;
+            if (masked == v.Text) continue;
+            v.Text = v.Ancestors<DocumentFormat.OpenXml.Drawing.Charts.NumberingCache>().Any() ? "0" : masked;
+        }
+        root.Save();
+    }
+
+    /// <summary>
+    /// A masked mailto:/tel: target is no valid URI. The relationship keeps its id (w:hyperlink and
+    /// DrawingML a:hlinkClick may point at it; a dangling id makes Word refuse the file) and goes nowhere.
+    /// </summary>
+    private static void MaskHyperlinks(OpenXmlPart part, Covered c)
+    {
+        foreach (var rel in part.HyperlinkRelationships.ToList())
+        {
+            string target = rel.Uri.OriginalString;
+            if (c.Mask(target) == target) continue;
+            string id = rel.Id;
+            part.DeleteReferenceRelationship(rel);
+            part.AddHyperlinkRelationship(new Uri("about:blank"), true, id);
+        }
+    }
+
+    /// <summary>Core, extended and custom document properties of any Office package.</summary>
+    private static void MaskProperties(OpenXmlPackage package, Covered c)
+    {
+        var pp = package.PackageProperties;
+        pp.Title = c.Mask(pp.Title);
+        pp.Subject = c.Mask(pp.Subject);
+        pp.Creator = c.Mask(pp.Creator);
+        pp.Keywords = c.Mask(pp.Keywords);
+        pp.Description = c.Mask(pp.Description);
+        pp.LastModifiedBy = c.Mask(pp.LastModifiedBy);
+        pp.Category = c.Mask(pp.Category);
+        // Only string-typed values can take the mask; a number or date holding a value (an ID stored as
+        // vt:r8, say) would make the file invalid, so that custom property is removed instead.
+        if (package.GetPartsOfType<ExtendedFilePropertiesPart>().FirstOrDefault()?.Properties is { } app)
+        {
+            foreach (var t in app.Descendants<OpenXmlLeafTextElement>().Where(IsStringProperty))
+                t.Text = c.Mask(t.Text)!;
+            app.Save();
+        }
+        if (package.GetPartsOfType<CustomFilePropertiesPart>().FirstOrDefault()?.Properties is { } custom)
+        {
+            foreach (var prop in custom.Elements<DocumentFormat.OpenXml.CustomProperties.CustomDocumentProperty>().ToList())
+            {
+                if (prop.FirstChild is not OpenXmlLeafTextElement value) continue;
+                string masked = c.Mask(value.Text)!;
+                if (masked == value.Text) continue;
+                if (IsStringProperty(value)) value.Text = masked;
+                else prop.Remove();
+            }
+            custom.Save();
+        }
+    }
+
+    /// <summary>
+    /// Removes EXIF, XMP, IPTC and text metadata from an embedded JPEG or PNG without touching the pixels or
+    /// the colour profile. A photo whose metadata held a location counts as a covered item.
+    /// </summary>
+    private static void StripImageMetadata(ImagePart part, Covered c)
+    {
+        byte[] data;
+        using (var s = part.GetStream(FileMode.Open, FileAccess.Read))
+        using (var ms = new MemoryStream())
+        {
+            s.CopyTo(ms);
+            data = ms.ToArray();
+        }
+        bool gps = false;
+        byte[]? clean = part.ContentType switch
+        {
+            "image/jpeg" => StripJpeg(data, ref gps),
+            "image/png" => StripPng(data, ref gps),
+            _ => null,
+        };
+        if (clean is null) return;
+        if (gps) c.NoteLocation(part.Uri);
+        using var output = new MemoryStream(clean);
+        part.FeedData(output);
+    }
+
+    /// <summary>JPEG without APP1 (EXIF, XMP), APP13 (IPTC) and comments; null when there was nothing to remove or the file is odd.</summary>
+    private static byte[]? StripJpeg(byte[] d, ref bool gps)
+    {
+        if (d.Length < 4 || d[0] != 0xFF || d[1] != 0xD8) return null;
+        using var o = new MemoryStream(d.Length);
+        o.Write(d, 0, 2);
+        int i = 2;
+        bool removed = false;
+        while (i + 4 <= d.Length)
+        {
+            if (d[i] != 0xFF) return null;
+            byte marker = d[i + 1];
+            if (marker == 0xFF) { i++; continue; } // fill byte
+            if (marker == 0xDA) break; // start of scan: the rest is image data
+            int len = d[i + 2] << 8 | d[i + 3];
+            if (len < 2 || i + 2 + len > d.Length) return null;
+            if (marker is 0xE1 or 0xED or 0xFE)
+            {
+                if (marker == 0xE1 && Radar.ExifHasGps(d[(i + 4)..(i + 2 + len)])) gps = true;
+                if (marker == 0xE1 && System.Text.Encoding.Latin1.GetString(d, i + 4, len - 2).Contains("GPSLatitude", StringComparison.Ordinal)) gps = true; // XMP
+                removed = true;
+            }
+            else o.Write(d, i, 2 + len);
+            i += 2 + len;
+        }
+        if (!removed) return null;
+        o.Write(d, i, d.Length - i);
+        return o.ToArray();
+    }
+
+    /// <summary>PNG without eXIf, text chunks (tEXt, zTXt, iTXt: XMP lives there) and tIME; null when there was nothing to remove.</summary>
+    private static byte[]? StripPng(byte[] d, ref bool gps)
+    {
+        if (d.Length < 8 || d[1] != 'P' || d[2] != 'N' || d[3] != 'G') return null;
+        using var o = new MemoryStream(d.Length);
+        o.Write(d, 0, 8);
+        int i = 8;
+        bool removed = false;
+        while (i + 12 <= d.Length)
+        {
+            int len = d[i] << 24 | d[i + 1] << 16 | d[i + 2] << 8 | d[i + 3];
+            if (len < 0 || i + 12 + len > d.Length) return null;
+            string type = System.Text.Encoding.ASCII.GetString(d, i + 4, 4);
+            if (type is "eXIf" or "tEXt" or "zTXt" or "iTXt" or "tIME")
+            {
+                if (type == "eXIf" && Radar.ExifHasGps(d[(i + 8)..(i + 8 + len)])) gps = true;
+                // Text chunks may be compressed; any location there comes from XMP, which also names GPSLatitude.
+                if (type != "eXIf" && System.Text.Encoding.Latin1.GetString(d, i + 8, len).Contains("GPSLatitude", StringComparison.Ordinal)) gps = true;
+                removed = true;
+            }
+            else o.Write(d, i, 12 + len);
+            i += 12 + len;
+            if (type == "IEND") break;
+        }
+        return removed ? o.ToArray() : null;
     }
 
     // xml:space="preserve" on w:t, w:delText and w:instrText alike (only Text exposes it as a typed property).
@@ -484,31 +753,19 @@ internal static class DocActions
         DocumentFormat.OpenXml.ExtendedProperties.HyperlinkBase or DocumentFormat.OpenXml.ExtendedProperties.Template;
 
     /// <summary>Masks the attributes whose local name passes <paramref name="names"/> on every element under <paramref name="root"/>.</summary>
-    private static int MaskAttributes(OpenXmlElement root, Func<string, bool> names)
+    private static void MaskAttributes(OpenXmlElement root, Func<string, bool> names, Covered c)
     {
-        int total = 0;
         foreach (var e in root.Descendants().ToList())
             foreach (var a in e.GetAttributes())
             {
                 if (!names(a.LocalName) || string.IsNullOrEmpty(a.Value)) continue;
-                int before = total;
-                string masked = MaskValue(a.Value, ref total)!;
-                if (total > before) e.SetAttribute(new OpenXmlAttribute(a.Prefix, a.LocalName, a.NamespaceUri, masked));
+                string masked = c.Mask(a.Value)!;
+                if (masked != a.Value) e.SetAttribute(new OpenXmlAttribute(a.Prefix, a.LocalName, a.NamespaceUri, masked));
             }
-        return total;
-    }
-
-    /// <summary>The value with sensitive items masked; adds what it covered to <paramref name="total"/>.</summary>
-    private static string? MaskValue(string? value, ref int total)
-    {
-        if (string.IsNullOrEmpty(value)) return value;
-        string masked = MaskText(value, out int c);
-        total += c;
-        return masked;
     }
 
     /// <summary>Masks text nodes and attribute values of a custom XML part; rewrites it only when something changed.</summary>
-    private static int MaskXmlPart(OpenXmlPart part)
+    private static void MaskXmlPart(OpenXmlPart part, Covered c)
     {
         System.Xml.Linq.XDocument xml;
         try
@@ -516,46 +773,57 @@ internal static class DocActions
             using var s = part.GetStream(FileMode.Open, FileAccess.Read);
             xml = System.Xml.Linq.XDocument.Load(s, System.Xml.Linq.LoadOptions.PreserveWhitespace);
         }
-        catch (System.Xml.XmlException) { return 0; } // not XML after all; nothing Word would bind to
-        int total = 0;
+        catch (System.Xml.XmlException) { return; } // not XML after all; nothing Word would bind to
+        bool changed = false;
         foreach (var t in xml.DescendantNodes().OfType<System.Xml.Linq.XText>())
-            t.Value = MaskValue(t.Value, ref total)!;
+        {
+            string masked = c.Mask(t.Value)!;
+            if (masked != t.Value) { t.Value = masked; changed = true; }
+        }
         foreach (var a in xml.Descendants().SelectMany(e => e.Attributes()))
-            a.Value = MaskValue(a.Value, ref total)!;
-        if (total == 0) return 0;
+        {
+            string masked = c.Mask(a.Value)!;
+            if (masked != a.Value) { a.Value = masked; changed = true; }
+        }
+        if (!changed) return;
         using var ms = new MemoryStream();
         xml.Save(ms, System.Xml.Linq.SaveOptions.DisableFormatting);
         ms.Position = 0;
         part.FeedData(ms);
-        return total;
     }
 
-    private static int MaskRuns<T>(Paragraph p) where T : OpenXmlLeafTextElement
+    /// <summary>
+    /// Masks the <typeparamref name="T"/> runs of one paragraph-like element (w:p, a:p, a shared string) as a
+    /// whole, so a value split across runs is still caught. Runs that belong to a paragraph nested inside it
+    /// (a text box) are left to that paragraph, so the two texts are never joined into a false match.
+    /// </summary>
+    private static void MaskRuns<T>(OpenXmlElement p, Covered c, bool preserveSpace) where T : OpenXmlLeafTextElement
     {
-        var texts = p.Descendants<T>().ToList();
-        if (texts.Count == 0) return 0;
+        Type paragraph = p.GetType();
+        var texts = p.Descendants<T>().Where(t => t.Ancestors().First(a => a.GetType() == paragraph) == p).ToList();
+        if (texts.Count == 0) return;
         string full = string.Concat(texts.Select(t => t.Text));
         var spans = MergeSpans(Radar.FindSensitiveSpans(full));
-        if (spans.Count == 0) return 0;
+        if (spans.Count == 0) return;
+        c.Note(full, spans);
 
         int pos = 0, si = 0;
         foreach (var t in texts)
         {
             var sb = new StringBuilder();
-            foreach (char c in t.Text)
+            foreach (char ch in t.Text)
             {
                 while (si < spans.Count && pos >= spans[si].Start + spans[si].Length) si++;
                 if (si < spans.Count && pos >= spans[si].Start)
                 {
                     if (pos == spans[si].Start) sb.Append(Mask); // the whole mask sits in the first run the value touches
                 }
-                else sb.Append(c);
+                else sb.Append(ch);
                 pos++;
             }
             t.Text = sb.ToString();
-            t.SetAttribute(PreserveSpace);
+            if (preserveSpace) t.SetAttribute(PreserveSpace);
         }
-        return spans.Count;
     }
 
     // ---------- zip: compress and lock ----------

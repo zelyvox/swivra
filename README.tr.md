@@ -71,6 +71,7 @@ Uygulama dijital olarak imzalı olmadığı için Windows SmartScreen ilk açıl
 - **Telefona gönderme:** İlk kullanımda Windows Güvenlik Duvarı, Swivra'nın ağa erişip erişemeyeceğini sorar. İzin vermezsen telefon bağlanamaz.
 - **Parolalı zip:** AES-256 ile şifrelenir. Windows'un kendi zip açıcısı bu şifrelemeyi desteklemez, dosyayı [7-Zip](https://www.7-zip.org/) ile açabilirsin.
 - **Taranmış belgeler:** Resim olarak taranmış sayfalardaki yazılar henüz okunamıyor. Radar ve gizleme bu yazıları görmez.
+- **Word dosyalarındaki gömülü nesneler:** Gömülü Word, Excel ve PowerPoint dosyaları da maskelenir. Ama diğer gömülü nesnelerin (eski ikili OLE nesneleri, ActiveX denetimleri) içine bakılamaz. Gizle bunları olduğu gibi bırakır ve kaç tane olduğunu söyler.
 - **Arka plan silme:** Küçük bir yapay zekâ modeliyle (U-2-Net) tamamen bilgisayarında çalışır. Belirgin nesnelerde iyi sonuç verir. Saç ve ince kenarlarda kusursuz değildir.
 - **İnternet:** Swivra internete hiçbir şey göndermez. Yalnız "Telefona" dilimi, paneli açık olduğu sürece yerel ağını kullanır.
 - **Kayıtlar:** `%LOCALAPPDATA%\Swivra\swivra.log` dosyasına yazılır. Parolalar ve paylaşım adresleri kayda yazılmaz.

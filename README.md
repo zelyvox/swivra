@@ -71,6 +71,7 @@ The app is not code-signed, so Windows SmartScreen may warn you the first time. 
 - **To phone:** The first time, Windows Firewall asks whether Swivra may use the network. If you do not allow it, your phone cannot connect.
 - **Password-protected zip:** Encrypted with AES-256. The zip support built into Windows cannot open it; use [7-Zip](https://www.7-zip.org/).
 - **Scanned documents:** Text inside scanned page images cannot be read yet, so the radar and redaction do not see it.
+- **Embedded objects in Word files:** Embedded Word, Excel and PowerPoint files are masked too, but other embedded objects (older binary OLE objects, ActiveX controls) cannot be looked into. Hide leaves them as they are and tells you how many there were.
 - **Background removal:** Runs entirely on your PC with a small AI model (U-2-Net). It works well on clear subjects; hair and fine edges are not perfect.
 - **Internet:** Swivra sends nothing to the internet. Only the To phone slice uses your local network, and only while its panel is open.
 - **Logs:** Written to `%LOCALAPPDATA%\Swivra\swivra.log`. Passwords and share links are never logged.
