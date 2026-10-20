@@ -11,8 +11,9 @@ internal sealed class MissingCodecException(string message, Exception inner) : E
 /// Reads every image Swivra accepts. GDI+ first (JPG, PNG, BMP, GIF, TIFF; keeps EXIF as property items),
 /// then SkiaSharp for WebP, then the Windows Imaging Component for HEIC/HEIF/AVIF. WIC decodes those
 /// only when the free HEIF (and HEVC or AV1) extensions from the Microsoft Store are installed.
-/// Pixels always come back in sRGB: phones embed Display P3 profiles, and every output path (JPG/PNG
-/// without metadata, WebP, PDF) would otherwise show those numbers as sRGB, duller and shifted.
+/// Pixels come back in sRGB whenever the file embeds a colour profile: phones embed Display P3, and every
+/// output path (JPG/PNG without metadata, WebP, PDF) would otherwise show those numbers as sRGB, duller and
+/// shifted. Files without a profile are taken as sRGB as they are (PNG gAMA/cHRM alone is not applied).
 /// </summary>
 internal static class ImageIO
 {
@@ -30,14 +31,30 @@ internal static class ImageIO
             using var ms = new MemoryStream(data);
             using var img = Image.FromStream(ms);
             props = img.PropertyItems;
-            // GDI+ ignores an embedded profile; Skia applies it. TIFF has no Skia codec and keeps its profile item.
+            // GDI+ ignores an embedded profile. Skia applies it; TIFF has no Skia codec, so WIC does it there.
             if (props.Any(p => p.Id == IccTag))
             {
                 try
                 {
-                    if (LoadSkia(data) is Bitmap srgb)
+                    Bitmap? srgb = LoadSkia(data);
+                    if (srgb is null)
                     {
-                        props = props.Where(p => p.Id != IccTag).ToArray(); // the pixels are sRGB now; the old profile would recolour them
+                        srgb = Wic.Load(path, out bool converted);
+                        if (!converted)
+                        {
+                            srgb.Dispose();
+                            srgb = null;
+                        }
+                        else
+                        {
+                            // Unlike the HEIF decoder, WIC's TIFF decoder leaves the EXIF orientation to us.
+                            var to = props.FirstOrDefault(p => p.Id == 0x0112);
+                            if (to?.Value is { Length: >= 2 } tv) Orient(srgb, BitConverter.ToUInt16(tv, 0));
+                        }
+                    }
+                    if (srgb is not null)
+                    {
+                        props = AsSrgb(props);
                         return srgb;
                     }
                 }
@@ -68,7 +85,7 @@ internal static class ImageIO
         }
         try
         {
-            return Wic.Load(path);
+            return Wic.Load(path, out _);
         }
         catch (Exception ex)
         {
@@ -80,6 +97,22 @@ internal static class ImageIO
                 throw new MissingCodecException(Lang.T("AVIF için Microsoft Store'dan HEIF ve AV1 uzantıları gerekebilir", "AVIF may need the HEIF and AV1 extensions from the Microsoft Store"), ex);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Metadata for pixels that were converted to sRGB: the old profile would recolour them, and EXIF ColorSpace
+    /// (iPhones write 0xFFFF, "uncalibrated") now really is 1 = sRGB.
+    /// </summary>
+    private static PropertyItem[] AsSrgb(PropertyItem[] props)
+    {
+        var kept = props.Where(p => p.Id != IccTag).ToArray();
+        foreach (var p in kept.Where(p => p.Id == 0xA001))
+        {
+            p.Type = 3; // SHORT
+            p.Len = 2;
+            p.Value = BitConverter.GetBytes((ushort)1);
+        }
+        return kept;
     }
 
     /// <summary>GDI+ reports an unknown or broken format as ArgumentException, sometimes as OutOfMemory or a generic error.</summary>
@@ -145,8 +178,10 @@ internal static class ImageIO
         private const uint GenericRead = 0x80000000;
         private const int CacheOnLoad = 1;
         private const uint ExifSrgb = 1;
+        private const int ContextProfile = 1; // WICColorContextProfile
 
-        public static Bitmap Load(string path)
+        /// <param name="converted">True when a colour transform to sRGB was applied.</param>
+        public static Bitmap Load(string path, out bool converted)
         {
             var factory = CreateFactory();
             IWICBitmapDecoder? decoder = null;
@@ -161,6 +196,7 @@ internal static class ImageIO
                 Guid bgra = PixelFormatBgra;
                 Check(converter.Initialize(frame, ref bgra, 0, IntPtr.Zero, 0, 0));
                 transform = ToSrgb(factory, frame, converter, path);
+                converted = transform is not null;
                 IWICBitmapSource source = transform is not null ? transform : (IWICBitmapSource)converter;
                 Check(source.GetSize(out uint w, out uint h));
 
@@ -210,11 +246,13 @@ internal static class ImageIO
             {
                 for (int i = 0; i < count; i++) Check(factory.CreateColorContext(out contexts[i]));
                 Check(frame.GetColorContexts(count, contexts, out _));
+                // An ICC profile beats an EXIF colour-space tag when a file carries both.
+                var source = contexts.FirstOrDefault(c => c.GetContextType(out int type) == 0 && type == ContextProfile) ?? contexts[0];
                 Check(factory.CreateColorContext(out srgb));
                 Check(srgb.InitializeFromExifColorSpace(ExifSrgb));
                 Check(factory.CreateColorTransformer(out transform));
                 Guid bgra = PixelFormatBgra;
-                Check(transform.Initialize((IWICBitmapSource)converter, contexts[0], srgb, ref bgra));
+                Check(transform.Initialize((IWICBitmapSource)converter, source, srgb, ref bgra));
                 var result = transform;
                 transform = null;
                 return result;
@@ -382,6 +420,7 @@ internal static class ImageIO
             [PreserveSig] int InitializeFromFilename();
             [PreserveSig] int InitializeFromMemory();
             [PreserveSig] int InitializeFromExifColorSpace(uint value);
+            [PreserveSig] int GetContextType(out int type); // GetType in the SDK; renamed so it does not read like object.GetType
         }
 
         // IWICBitmapSource methods first, then IWICColorTransform's own.
