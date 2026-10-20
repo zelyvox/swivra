@@ -26,7 +26,7 @@ Windows için çevrimdışı çalışan bir dosya çarkı. Bir dosyayı sürükl
 
 ### Gönder (Alt)
 
-- **WhatsApp:** Dosya panoya kopyalanır ve WhatsApp açılır. Bir sohbete girip Ctrl+V yapman yeterli. Resimler gönderilmeden önce küçültülür, konum bilgisi silinir.
+- **WhatsApp:** Dosya panoya kopyalanır ve WhatsApp açılır. Bir sohbete girip Ctrl+V yapman yeterli. Resimler gönderilmeden önce küçültülür, konum bilgisi silinir. Konumu silinemeyen bir resim gönderilmez ve Swivra bunu söyler. iPhone HEIC fotoğraflarında bunun sebebi genellikle Microsoft Store'daki ücretsiz HEIF ve HEVC uzantılarının kurulu olmamasıdır.
 - **Mail:** Varsayılan e-posta programında, dosya ekli yeni bir ileti açılır. Bilgisayarında e-posta programı yoksa dosya panoya kopyalanır ve tarayıcıda yeni bir Gmail iletisi açılır. Dosyayı iletiye yapıştırman ya da sürüklemen yeterli.
 - **Telefona:** Ekranda bir QR kod çıkar. Aynı Wi-Fi ağındaki telefonunla okutunca dosya doğrudan bilgisayarından iner. Bağlantı adresi her seferinde rastgele oluşturulur. Panel kapanınca ya da 10 dakika sonra adres geçersiz olur.
 - **Yolu kopyala:** Dosyanın tam yolunu panoya kopyalar.

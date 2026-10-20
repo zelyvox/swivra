@@ -26,7 +26,7 @@ There are three wheels. The key you press decides which one opens.
 
 ### Send (Alt)
 
-- **WhatsApp:** The file is copied to the clipboard and WhatsApp opens. Open a chat and press Ctrl+V. Images are downscaled first and their location data is removed.
+- **WhatsApp:** The file is copied to the clipboard and WhatsApp opens. Open a chat and press Ctrl+V. Images are downscaled first and their location data is removed. An image whose location cannot be removed is left out and Swivra says so; for iPhone HEIC photos that usually means the free HEIF and HEVC extensions from the Microsoft Store are missing.
 - **Mail:** A new message opens in your default mail app with the file attached. If you have no mail app, the file is copied to the clipboard and a new Gmail message opens in your browser; paste or drag the file into it.
 - **To phone:** A QR code appears. Scan it with a phone on the same Wi-Fi and the file downloads straight from your PC. The link is random every time and stops working when you close the panel or after 10 minutes.
 - **Copy path:** Copies the file's full path to the clipboard.
