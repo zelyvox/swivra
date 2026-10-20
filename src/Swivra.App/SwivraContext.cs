@@ -30,7 +30,7 @@ internal sealed class SwivraContext : ApplicationContext
 
         _tray = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = TrayIcon(),
             ContextMenuStrip = new ContextMenuStrip(),
             Visible = true,
         };
@@ -82,6 +82,16 @@ internal sealed class SwivraContext : ApplicationContext
             MessageBox.Show(Lang.T("Swivra başlatılamadı. Ayrıntı kayıt dosyasında.", "Swivra could not start. See the log file for details."), "Swivra");
             ExitThread();
         }
+    }
+
+    /// <summary>
+    /// The app icon at the tray's size (16 px, more on high DPI). The exe's own icon would be
+    /// scaled down from 32 px and look soft, so the matching frame is picked from the embedded .ico.
+    /// </summary>
+    private static Icon TrayIcon()
+    {
+        using var s = typeof(SwivraContext).Assembly.GetManifestResourceStream("swivra.ico");
+        return s is null ? SystemIcons.Application : new Icon(s, SystemInformation.SmallIconSize);
     }
 
     /// <summary>Tray menu and tooltip in the current language; rebuilt when the language changes.</summary>

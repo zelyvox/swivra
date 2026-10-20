@@ -1,3 +1,5 @@
+<img src="docs/images/logo.png" alt="Swivra logosu" width="96">
+
 # Swivra
 
 [English](README.md)

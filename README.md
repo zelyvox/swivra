@@ -1,3 +1,5 @@
+<img src="docs/images/logo.png" alt="Swivra logo" width="96">
+
 # Swivra
 
 [Türkçe](README.tr.md)
