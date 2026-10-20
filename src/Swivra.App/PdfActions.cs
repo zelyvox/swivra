@@ -227,8 +227,17 @@ internal static class PdfActions
     private static void Compress(string input, string target)
     {
         using var doc = PdfReader.Open(input, PdfDocumentOpenMode.Modify);
+        // Soft masks and stencil masks must stay DeviceGray/1-bit as they are: collect them first, then leave them alone.
+        var masks = new HashSet<PdfObject>(ReferenceEqualityComparer.Instance);
         foreach (PdfObject obj in doc.Internals.GetAllObjects())
         {
+            if (obj is not PdfDictionary { Stream: not null } img || img.Elements.GetName("/Subtype") != "/Image") continue;
+            foreach (string key in new[] { "/SMask", "/Mask" })
+                if (img.Elements[key] is PdfReference { Value: PdfObject mask }) masks.Add(mask);
+        }
+        foreach (PdfObject obj in doc.Internals.GetAllObjects())
+        {
+            if (masks.Contains(obj)) continue;
             if (obj is PdfDictionary { Stream: not null } dict && dict.Elements.GetName("/Subtype") == "/Image")
             {
                 try { RecompressImage(dict); }
