@@ -9,7 +9,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>Swivra</AssemblyName>
     <RootNamespace>Swivra.App</RootNamespace>
-    <Version>0.2.1</Version>
+    <Version>0.2.2</Version>
     <ApplicationIcon>swivra.ico</ApplicationIcon>
   </PropertyGroup>
 
