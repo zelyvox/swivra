@@ -267,7 +267,7 @@ internal static class SendActions
     /// <summary>
     /// Returns the paths to hand over. With <paramref name="shrinkImages"/>, still images become
     /// a temp JPEG (long side at most 1600 px, quality 85, EXIF orientation applied, all EXIF
-    /// incl. location dropped); other files and images GDI+ cannot read are passed through.
+    /// incl. location dropped); other files and images that cannot be decoded are passed through.
     /// </summary>
     private static List<string> Prepare(List<string> files, bool shrinkImages)
     {

@@ -35,15 +35,23 @@ internal static partial class Radar
 
     private static void ScanImage(string path, List<string> found)
     {
-        using var stream = File.OpenRead(path);
-        using var img = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: false);
-        var ids = img.PropertyIdList;
-        if (ids.Contains(0x0002) || ids.Contains(0x0004)) found.Add(Lang.T("Konum bilgisi", "Location"));
-        if (ids.Contains(0x0110))
+        bool gps;
+        string? model;
+        try
         {
-            string model = Encoding.ASCII.GetString(img.GetPropertyItem(0x0110)!.Value ?? []).Trim('\0', ' ');
-            found.Add(model.Length > 0 ? Lang.T($"Cihaz modeli: {model}", $"Device model: {model}") : Lang.T("Cihaz modeli", "Device model"));
+            using var stream = File.OpenRead(path);
+            using var img = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: false);
+            var ids = img.PropertyIdList;
+            gps = ids.Contains(0x0002) || ids.Contains(0x0004);
+            model = ids.Contains(0x0110) ? Encoding.ASCII.GetString(img.GetPropertyItem(0x0110)!.Value ?? []).Trim('\0', ' ') : null;
         }
+        catch (Exception e) when (ImageIO.IsGdiRefusal(e))
+        {
+            (gps, model) = ImageIO.ReadPrivacy(path); // HEIC, AVIF, WebP: GDI+ cannot read them, WIC can
+        }
+        if (gps) found.Add(Lang.T("Konum bilgisi", "Location"));
+        if (model is not null)
+            found.Add(model.Length > 0 ? Lang.T($"Cihaz modeli: {model}", $"Device model: {model}") : Lang.T("Cihaz modeli", "Device model"));
     }
 
     private static void ScanPdf(string path, List<string> found)

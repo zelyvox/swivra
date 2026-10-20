@@ -396,7 +396,8 @@ internal sealed class SwivraContext : ApplicationContext
             if (!t.IsCompletedSuccessfully)
             {
                 Log.Write($"crop preview failed {file}: {t.Exception?.InnerException}");
-                _overlay.Post(new { type = "result", ok = false, title = Lang.T("Olmadı", "Failed"), detail = Lang.T("Resim açılamadı", "Could not open the image") });
+                string detail = t.Exception?.InnerException is MissingCodecException mc ? mc.Message : Lang.T("Resim açılamadı", "Could not open the image");
+                _overlay.Post(new { type = "result", ok = false, title = Lang.T("Olmadı", "Failed"), detail });
                 FinishSoon();
                 return;
             }

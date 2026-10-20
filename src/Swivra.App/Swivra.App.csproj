@@ -21,11 +21,14 @@
     <PackageReference Include="PDFtoImage" Version="5.4.0" />
     <PackageReference Include="QRCoder" Version="1.8.1" />
     <PackageReference Include="SharpZipLib" Version="1.4.2" />
+    <!-- Also comes in through PDFtoImage; pinned here because ImageIO decodes WebP with it directly. -->
+    <PackageReference Include="SkiaSharp" Version="4.150.1" />
   </ItemGroup>
 
   <ItemGroup>
     <Content Include="web\**\*" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="models\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="swivra.ico" LogicalName="swivra.ico" />
   </ItemGroup>
 
 </Project>

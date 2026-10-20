@@ -6,7 +6,7 @@ namespace Swivra.App;
 internal static class FileKinds
 {
     private static readonly HashSet<string> Images = new(StringComparer.OrdinalIgnoreCase)
-        { ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp", ".avif", ".heic" };
+        { ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp", ".avif", ".heic", ".heif" };
     private static readonly HashSet<string> Docs = new(StringComparer.OrdinalIgnoreCase)
         { ".docx", ".doc", ".txt", ".md", ".rtf", ".odt" };
 
@@ -141,6 +141,11 @@ internal static class FileActions
                     finalExt = Path.GetExtension(finalPath).TrimStart('.').ToLowerInvariant();
                 }
             }
+            catch (MissingCodecException ex)
+            {
+                Log.Write($"action failed {path}: {ex.InnerException?.Message}");
+                return new ActionResult(false, Lang.T("Açılamadı", "Could not open"), ex.Message);
+            }
             catch (Exception ex)
             {
                 Log.Write($"action failed {path}: {ex}");
@@ -179,6 +184,10 @@ internal static class FileActions
                 case "cmp": compress = true; ext = "jpg"; suffix += Lang.T("-kucuk", "-small"); break;
             }
         }
+
+        // Swivra writes only these; other inputs keep a format it can write (HEIC/AVIF are photos, GIF/TIFF may have alpha).
+        if (ext is "heic" or "heif" or "avif") ext = "jpg";
+        else if (ext is not ("png" or "jpg" or "bmp" or "webp" or "pdf")) ext = "png";
 
         // A cut-out needs alpha: PNG, unless the chain ends in WebP or PDF (both keep transparency).
         if (cutout && ext is not ("webp" or "pdf")) ext = "png";
@@ -245,34 +254,10 @@ internal static class FileActions
     }
 
     /// <summary>
-    /// Loads an image the way photo viewers show it: EXIF orientation applied to the pixels.
+    /// Loads an image the way photo viewers show it: orientation applied to the pixels.
     /// Phones store portrait shots sideways plus a tag; ignoring it turns them on their side.
-    /// The file is read into memory so it is not locked while we work.
     /// </summary>
-    internal static Bitmap LoadOriented(string path, out PropertyItem[] props)
-    {
-        using var ms = new MemoryStream(File.ReadAllBytes(path));
-        using var img = Image.FromStream(ms);
-        props = img.PropertyItems;
-        var bmp = new Bitmap(img);
-        var orientation = props.FirstOrDefault(p => p.Id == 0x0112);
-        if (orientation?.Value is { Length: >= 2 } v)
-        {
-            RotateFlipType? flip = BitConverter.ToUInt16(v, 0) switch
-            {
-                2 => RotateFlipType.RotateNoneFlipX,
-                3 => RotateFlipType.Rotate180FlipNone,
-                4 => RotateFlipType.RotateNoneFlipY,
-                5 => RotateFlipType.Rotate90FlipX,
-                6 => RotateFlipType.Rotate90FlipNone,
-                7 => RotateFlipType.Rotate270FlipX,
-                8 => RotateFlipType.Rotate270FlipNone,
-                _ => null,
-            };
-            if (flip is not null) bmp.RotateFlip(flip.Value);
-        }
-        return bmp;
-    }
+    internal static Bitmap LoadOriented(string path, out PropertyItem[] props) => ImageIO.Load(path, out props);
 
     private static void Save(Bitmap bmp, string target, string ext, long jpegQuality)
     {
