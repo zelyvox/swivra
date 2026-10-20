@@ -11,12 +11,16 @@ internal sealed class MissingCodecException(string message, Exception inner) : E
 /// Reads every image Swivra accepts. GDI+ first (JPG, PNG, BMP, GIF, TIFF; keeps EXIF as property items),
 /// then SkiaSharp for WebP, then the Windows Imaging Component for HEIC/HEIF/AVIF. WIC decodes those
 /// only when the free HEIF (and HEVC or AV1) extensions from the Microsoft Store are installed.
+/// Pixels always come back in sRGB: phones embed Display P3 profiles, and every output path (JPG/PNG
+/// without metadata, WebP, PDF) would otherwise show those numbers as sRGB, duller and shifted.
 /// </summary>
 internal static class ImageIO
 {
+    private const int IccTag = 0x8773;
+
     /// <summary>
-    /// Decodes upright (orientation applied). <paramref name="props"/> are the GDI+ EXIF items; formats
-    /// GDI+ cannot read return none, so their output carries no metadata at all, location included.
+    /// Decodes upright (orientation applied) and in sRGB. <paramref name="props"/> are the GDI+ EXIF items;
+    /// formats GDI+ cannot read return none, so their output carries no metadata at all, location included.
     /// </summary>
     public static Bitmap Load(string path, out PropertyItem[] props)
     {
@@ -26,6 +30,22 @@ internal static class ImageIO
             using var ms = new MemoryStream(data);
             using var img = Image.FromStream(ms);
             props = img.PropertyItems;
+            // GDI+ ignores an embedded profile; Skia applies it. TIFF has no Skia codec and keeps its profile item.
+            if (props.Any(p => p.Id == IccTag))
+            {
+                try
+                {
+                    if (LoadSkia(data) is Bitmap srgb)
+                    {
+                        props = props.Where(p => p.Id != IccTag).ToArray(); // the pixels are sRGB now; the old profile would recolour them
+                        return srgb;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Write($"colour conversion failed {path}: {ex.Message}");
+                }
+            }
             var bmp = new Bitmap(img);
             var o = props.FirstOrDefault(p => p.Id == 0x0112);
             if (o?.Value is { Length: >= 2 } v) Orient(bmp, BitConverter.ToUInt16(v, 0));
@@ -85,13 +105,14 @@ internal static class ImageIO
         if (flip is not null) bmp.RotateFlip(flip.Value);
     }
 
-    /// <summary>WebP (and anything else this Skia build reads). Null when Skia has no codec for the data.</summary>
+    /// <summary>WebP (and anything else this Skia build reads), converted to sRGB. Null when Skia has no codec for the data.</summary>
     private static Bitmap? LoadSkia(byte[] data)
     {
         using var skData = SKData.CreateCopy(data);
         using var codec = SKCodec.Create(skData);
         if (codec is null) return null;
-        var info = new SKImageInfo(codec.Info.Width, codec.Info.Height, SKColorType.Bgra8888, SKAlphaType.Unpremul);
+        using var srgb = SKColorSpace.CreateSrgb();
+        var info = new SKImageInfo(codec.Info.Width, codec.Info.Height, SKColorType.Bgra8888, SKAlphaType.Unpremul, srgb);
         var bmp = new Bitmap(info.Width, info.Height, PixelFormat.Format32bppArgb);
         try
         {
@@ -116,13 +137,14 @@ internal static class ImageIO
         }
     }
 
-    /// <summary>Minimal Windows Imaging Component interop: decode the first frame to 32-bit BGRA, read two metadata names.</summary>
+    /// <summary>Minimal Windows Imaging Component interop: decode the first frame to 32-bit BGRA in sRGB, read two metadata names.</summary>
     private static class Wic
     {
         private static readonly Guid ClsidFactory = new("cacaf262-9370-4615-a13b-9f5539da4c0a");
         private static readonly Guid PixelFormatBgra = new("6fddc324-4e03-4bfe-b185-3d77768dc90f");
         private const uint GenericRead = 0x80000000;
         private const int CacheOnLoad = 1;
+        private const uint ExifSrgb = 1;
 
         public static Bitmap Load(string path)
         {
@@ -130,6 +152,7 @@ internal static class ImageIO
             IWICBitmapDecoder? decoder = null;
             IWICBitmapFrameDecode? frame = null;
             IWICFormatConverter? converter = null;
+            IWICColorTransform? transform = null;
             try
             {
                 Check(factory.CreateDecoderFromFilename(path, IntPtr.Zero, GenericRead, CacheOnLoad, out decoder));
@@ -137,7 +160,9 @@ internal static class ImageIO
                 Check(factory.CreateFormatConverter(out converter));
                 Guid bgra = PixelFormatBgra;
                 Check(converter.Initialize(frame, ref bgra, 0, IntPtr.Zero, 0, 0));
-                Check(converter.GetSize(out uint w, out uint h));
+                transform = ToSrgb(factory, frame, converter, path);
+                IWICBitmapSource source = transform is not null ? transform : (IWICBitmapSource)converter;
+                Check(source.GetSize(out uint w, out uint h));
 
                 // No EXIF rotation here: the HEIF decoder already applies the container's rotation
                 // (irot/imir), and iPhones also keep Orientation=6 in EXIF, so applying it would turn the photo twice.
@@ -147,7 +172,7 @@ internal static class ImageIO
                     var bits = bmp.LockBits(new Rectangle(0, 0, (int)w, (int)h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
                     try
                     {
-                        Check(converter.CopyPixels(IntPtr.Zero, (uint)bits.Stride, (uint)bits.Stride * h, bits.Scan0));
+                        Check(source.CopyPixels(IntPtr.Zero, (uint)bits.Stride, (uint)bits.Stride * h, bits.Scan0));
                     }
                     finally
                     {
@@ -163,10 +188,47 @@ internal static class ImageIO
             }
             finally
             {
+                Release(transform);
                 Release(converter);
                 Release(frame);
                 Release(decoder);
                 Release(factory);
+            }
+        }
+
+        /// <summary>
+        /// A transform from the frame's own colour context (iPhone HEIC: a Display P3 ICC profile) to sRGB,
+        /// or null when the frame declares none or the transform cannot be built; the pixels are then used as they are.
+        /// </summary>
+        private static IWICColorTransform? ToSrgb(IWICImagingFactory factory, IWICBitmapFrameDecode frame, IWICFormatConverter converter, string path)
+        {
+            if (frame.GetColorContexts(0, null, out uint count) < 0 || count == 0) return null;
+            var contexts = new IWICColorContext[count];
+            IWICColorContext? srgb = null;
+            IWICColorTransform? transform = null;
+            try
+            {
+                for (int i = 0; i < count; i++) Check(factory.CreateColorContext(out contexts[i]));
+                Check(frame.GetColorContexts(count, contexts, out _));
+                Check(factory.CreateColorContext(out srgb));
+                Check(srgb.InitializeFromExifColorSpace(ExifSrgb));
+                Check(factory.CreateColorTransformer(out transform));
+                Guid bgra = PixelFormatBgra;
+                Check(transform.Initialize((IWICBitmapSource)converter, contexts[0], srgb, ref bgra));
+                var result = transform;
+                transform = null;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                Log.Write($"colour conversion failed {path}: {ex.Message}");
+                return null;
+            }
+            finally
+            {
+                Release(transform);
+                Release(srgb);
+                foreach (var c in contexts) Release(c);
             }
         }
 
@@ -266,6 +328,12 @@ internal static class ImageIO
             [PreserveSig] int CreateEncoder();
             [PreserveSig] int CreatePalette();
             [PreserveSig] int CreateFormatConverter(out IWICFormatConverter converter);
+            [PreserveSig] int CreateBitmapScaler();
+            [PreserveSig] int CreateBitmapClipper();
+            [PreserveSig] int CreateBitmapFlipRotator();
+            [PreserveSig] int CreateStream();
+            [PreserveSig] int CreateColorContext(out IWICColorContext context);
+            [PreserveSig] int CreateColorTransformer(out IWICColorTransform transform);
         }
 
         [ComImport, Guid("9edde9e7-8dee-47ea-99df-e6faf2ed44bf"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -294,6 +362,38 @@ internal static class ImageIO
             [PreserveSig] int CopyPalette(IntPtr palette);
             [PreserveSig] int CopyPixels(IntPtr rect, uint stride, uint size, IntPtr buffer);
             [PreserveSig] int GetMetadataQueryReader(out IWICMetadataQueryReader reader);
+            // The caller creates the contexts; the decoder initialises them.
+            [PreserveSig] int GetColorContexts(uint count, [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)] IWICColorContext[]? contexts, out uint actual);
+        }
+
+        [ComImport, Guid("00000120-a8f2-4877-ba0a-fd2b6645fb94"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IWICBitmapSource
+        {
+            [PreserveSig] int GetSize(out uint width, out uint height);
+            [PreserveSig] int GetPixelFormat(out Guid format);
+            [PreserveSig] int GetResolution(out double dpiX, out double dpiY);
+            [PreserveSig] int CopyPalette(IntPtr palette);
+            [PreserveSig] int CopyPixels(IntPtr rect, uint stride, uint size, IntPtr buffer);
+        }
+
+        [ComImport, Guid("3c613a02-34b2-44ea-9a7c-45aea9c6fd6d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IWICColorContext
+        {
+            [PreserveSig] int InitializeFromFilename();
+            [PreserveSig] int InitializeFromMemory();
+            [PreserveSig] int InitializeFromExifColorSpace(uint value);
+        }
+
+        // IWICBitmapSource methods first, then IWICColorTransform's own.
+        [ComImport, Guid("b66f034f-d0e2-40ab-b436-6de39e321a94"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IWICColorTransform : IWICBitmapSource
+        {
+            [PreserveSig] new int GetSize(out uint width, out uint height);
+            [PreserveSig] new int GetPixelFormat(out Guid format);
+            [PreserveSig] new int GetResolution(out double dpiX, out double dpiY);
+            [PreserveSig] new int CopyPalette(IntPtr palette);
+            [PreserveSig] new int CopyPixels(IntPtr rect, uint stride, uint size, IntPtr buffer);
+            [PreserveSig] int Initialize(IWICBitmapSource source, IWICColorContext contextSource, IWICColorContext contextDest, ref Guid pixelFormat);
         }
 
         // IWICBitmapSource methods first, then IWICFormatConverter's own.
