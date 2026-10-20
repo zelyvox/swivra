@@ -47,6 +47,7 @@ $licenseFiles = @(
     @{ From = 'skiasharp/4.150.1/LICENSE.txt'; To = 'SkiaSharp-LICENSE.txt' },
     @{ From = 'skiasharp.nativeassets.win32/4.150.1/THIRD-PARTY-NOTICES.txt'; To = 'SkiaSharp-native-THIRD-PARTY-NOTICES.txt' },
     @{ From = 'microsoft.extensions.logging.abstractions/8.0.3/LICENSE.TXT'; To = 'Microsoft.Extensions-LICENSE.txt' },
+    @{ From = 'microsoft.extensions.dependencyinjection.abstractions/8.0.2/LICENSE.TXT'; To = 'Microsoft.Extensions.DependencyInjection-LICENSE.txt' },
     @{ From = 'microsoft.ml.onnxruntime/1.31.0/LICENSE'; To = 'OnnxRuntime-LICENSE.txt' },
     @{ From = 'microsoft.ml.onnxruntime/1.31.0/ThirdPartyNotices.txt'; To = 'OnnxRuntime-ThirdPartyNotices.txt' },
     @{ From = 'qrcoder/1.8.1/LICENSE.txt'; To = 'QRCoder-LICENSE.txt' }
@@ -55,6 +56,10 @@ foreach ($f in $licenseFiles) {
     $src = Join-Path $nuget $f.From
     if (Test-Path $src) { Copy-Item $src (Join-Path $licenses $f.To) } else { Write-Warning "License file not found: $src" }
 }
+# Texts that have no file inside the NuGet packages (PdfPig, PDFium and its bundled code, PDFsharp, model weights, ...) are kept in the repo.
+$thirdParty = Join-Path $root 'third-party-licenses'
+if (-not (Test-Path $thirdParty)) { throw "third-party-licenses/ is missing: $thirdParty" }
+Copy-Item (Join-Path $thirdParty '*') $licenses -Recurse -Force
 foreach ($f in @('LICENSE.txt', 'ThirdPartyNotices.txt')) {
     $src = Join-Path $dotnetRoot $f
     if (Test-Path $src) { Copy-Item $src (Join-Path $licenses "dotnet-$f") } else { Write-Warning "License file not found: $src" }

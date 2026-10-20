@@ -35,14 +35,32 @@ The WebView2 **Runtime** (the Edge-based browser engine) is not part of the pack
   - **gif** (a library section that is tri-licensed MPL 1.1 / GPL 2.0 / LGPL 2.1) is used under the **MPL 1.1** option.
   - **ICU** uses the ICU (Unicode) license, which is permissive.
   Which of these are actually linked into the Windows build is decided by the SkiaSharp maintainers; this file only repeats what their notices list.
-- **pdfium.dll** is Apache-2.0 (the NuGet package declares it). PDFium itself statically includes further third-party code (for example FreeType, lcms2, OpenJPEG, libjpeg-turbo, zlib, ICU). Their license texts are in the PDFium source tree and in the release archives of https://github.com/bblanchon/pdfium-binaries, not in the NuGet package, so they were **not** verified here.
-- **PdfPig** is Apache-2.0. It started as a port of Apache PDFBox. The NuGet package ships no separate notice file for any third-party data it embeds, so that was **not** verified here.
+- **pdfium.dll** is Apache-2.0 (the NuGet package declares it). PDFium itself statically includes further third-party code (for example FreeType, lcms2, OpenJPEG, libjpeg-turbo, zlib, ICU). Their license texts are not in the NuGet package, so they were taken from the `pdfium-win-x64.tgz` release archive of https://github.com/bblanchon/pdfium-binaries for the same version (152.0.7961). The archive's `licenses/` folder names: abseil (Apache-2.0), AGG 2.3 (Anti-Grain Geometry, its own short permissive notice), fast_float (MIT), FreeType (FreeType License), ICU (Unicode License v3), lcms2 (MIT), libjpeg-turbo (BSD-style and IJG), OpenJPEG (BSD 2-clause), libpng (PNG Reference Library License), libtiff (permissive, BSD-like), llvm-libc (Apache-2.0 with LLVM Exceptions), simdutf (MIT), zlib (zlib License), and PDFium itself (BSD 3-clause text followed by the Apache-2.0 text). The archive's own `LICENSE` (the pdfium-binaries build scripts, MIT, Copyright Benoit Blanchon) is included too. Which of these are actually linked into `pdfium.dll` is decided by the PDFium build; this file only repeats what the archive lists. The FreeType credit line from the SkiaSharp section applies here too. Because only executable code is distributed, the IJG license also requires this statement: *This software is based in part on the work of the Independent JPEG Group.*
+- **PdfPig** is Apache-2.0. It started as a port of Apache PDFBox. Its repository `NOTICES.txt` (tag v0.1.16) states: derived from Apache Software Foundation software (PDFBox and FontBox, Copyright (c) 2002-2007 www.pdfbox.org), and includes the Adobe Glyph List and the Zapf Dingbats Glyph List (Copyright Adobe Systems Incorporated). The Adobe list license (BSD 3-clause) was taken from https://github.com/adobe-type-tools/agl-aglfn (default branch, no release tag).
 - **PDFsharp 6.2.4 and PdfSharp.WPFonts.dll** are MIT per the nuspec. PDFsharp's Pkcs dependency (`System.Security.Cryptography.Pkcs.dll`) is part of the .NET runtime (MIT).
 
 ## What the license summary shows
 
-Everything is MIT, Apache-2.0 or BSD-style, except the third-party code listed inside SkiaSharp's native notices (FreeType credit line, Adobe DNG SDK, the MPL-licensed gif code) and the PDFium bundled code that was not checked. Nothing in the package is GPL-only or requires Swivra to be open-sourced beyond what it already is.
+Everything is MIT, Apache-2.0 or BSD-style, except the third-party code listed inside SkiaSharp's native notices (FreeType credit line, Adobe DNG SDK, the MPL-licensed gif code) and the code bundled in PDFium (AGG, libtiff, FreeType, IJG and other permissive but non-standard texts, listed above). Nothing in the package is GPL-only or requires Swivra to be open-sourced beyond what it already is.
 
 ## License texts
 
-MIT and Apache-2.0 texts are in the respective projects. The files copied into the release zip are: WebView2 `LICENSE.txt` and `NOTICE.txt`, SkiaSharp `LICENSE.txt` and the native `THIRD-PARTY-NOTICES.txt`, the Microsoft.Extensions `LICENSE.TXT`, and the .NET `LICENSE.txt` and `ThirdPartyNotices.txt`.
+The files copied into the `licenses/` folder of the release zip are of two kinds.
+
+From the NuGet cache: WebView2 `LICENSE.txt` and `NOTICE.txt`, SkiaSharp `LICENSE.txt` and the native `THIRD-PARTY-NOTICES.txt`, the Microsoft.Extensions (Logging.Abstractions and DependencyInjection.Abstractions) `LICENSE.TXT`, ONNX Runtime `LICENSE` and `ThirdPartyNotices.txt`, QRCoder `LICENSE.txt`, and the .NET `LICENSE.txt` and `ThirdPartyNotices.txt`.
+
+From the `third-party-licenses/` folder of this repository (copied as a whole by `scripts/publish.ps1`, which fails if the folder is missing). These packages carry no license file in their NuGet package, so the texts were taken from the upstream repositories:
+
+| File | Component | Source |
+| --- | --- | --- |
+| `PdfPig-LICENSE.txt`, `PdfPig-NOTICES.txt` | PdfPig 0.1.16 (Apache-2.0) | UglyToad/PdfPig, tag v0.1.16 |
+| `AdobeGlyphList-LICENSE.md` | Adobe Glyph List, used by PdfPig (BSD 3-clause) | adobe-type-tools/agl-aglfn, default branch |
+| `PDFsharp-LICENSE.txt` | PDFsharp 6.2.4 and PdfSharp.WPFonts (MIT) | empira/PDFsharp, tag v6.2.4 |
+| `PDFtoImage-LICENSE.txt` | PDFtoImage 5.4.0 (MIT) | sungaila/PDFtoImage, tag v5.4.0 |
+| `OpenXml-LICENSE.txt` | DocumentFormat.OpenXml 3.5.1 (MIT) | dotnet/Open-XML-SDK, tag v3.5.1 |
+| `SharpZipLib-LICENSE.txt` | SharpZipLib 1.4.2 (MIT) | icsharpcode/SharpZipLib, tag v1.4.2 |
+| `U-2-Net-LICENSE.txt` | U-2-Net weights (Apache-2.0) | xuebinqin/U-2-Net, default branch (master) |
+| `rembg-LICENSE.txt` | rembg ONNX export (MIT) | danielgatis/rembg, default branch (main) |
+| `pdfium-LICENSE.txt`, `pdfium-binaries-LICENSE.txt`, `pdfium-third-party/*` | `pdfium.dll` 152.0.7961 and the code it bundles | `pdfium-win-x64.tgz` of bblanchon/pdfium-binaries release chromium/7961 |
+
+The Apache-2.0 files from PdfPig and U-2-Net are the unmodified standard text, as published upstream, with the appendix template unfilled (no project-specific copyright line exists in those files).
