@@ -182,10 +182,44 @@ internal static class PdfRedact
                 double gap = Math.Sqrt(Math.Pow(l.StartBaseLine.X - prev.EndBaseLine.X, 2) + Math.Pow(l.StartBaseLine.Y - prev.EndBaseLine.Y, 2));
                 if (gap > 0.15 * Math.Max(prev.PointSize, l.PointSize)) { sb.Append(' '); rects.Add(null); }
             }
-            foreach (char ch in l.Value) { sb.Append(ch); rects.Add(l.GlyphRectangle); }
+            var box = CoverBox(l);
+            foreach (char ch in l.Value) { sb.Append(ch); rects.Add(box); }
             prev = l;
         }
         return sb.ToString();
+    }
+
+    // Line box around the baseline, in multiples of the font size: below for descenders (g, ş, ç), above for
+    // capitals with accents (İ, Ğ, Ş). Generous on purpose: covering a little too much is fine, too little is a leak.
+    private const double Descent = 0.3, Ascent = 1.05;
+
+    /// <summary>
+    /// The area a letter can paint, axis-aligned: its glyph bounding box joined with a box spanned along the baseline
+    /// from the font size. The glyph box alone depends on font metrics and can miss accents or come out empty.
+    /// </summary>
+    private static UglyToad.PdfPig.Core.PdfRectangle CoverBox(Letter l)
+    {
+        var xs = new List<double>();
+        var ys = new List<double>();
+        void Add(double x, double y) { xs.Add(x); ys.Add(y); }
+
+        var g = l.BoundingBox;
+        if (g.Width > 0 || g.Height > 0)
+        {
+            Add(g.TopLeft.X, g.TopLeft.Y); Add(g.TopRight.X, g.TopRight.Y);
+            Add(g.BottomLeft.X, g.BottomLeft.Y); Add(g.BottomRight.X, g.BottomRight.Y);
+        }
+
+        double size = l.PointSize > 0 ? l.PointSize : Math.Max(g.Height, 1);
+        var (sx, sy, ex, ey) = (l.StartBaseLine.X, l.StartBaseLine.Y, l.EndBaseLine.X, l.EndBaseLine.Y);
+        double dx = ex - sx, dy = ey - sy, len = Math.Sqrt(dx * dx + dy * dy);
+        if (len < 1e-6) (dx, dy, len) = (1, 0, 1);   // zero-width letter: assume horizontal text
+        double ux = -dy / len, uy = dx / len;          // "up", perpendicular to the baseline
+        foreach (var (bx, by) in new[] { (sx, sy), (ex, ey) })
+            foreach (double k in new[] { -Descent * size, Ascent * size })
+                Add(bx + ux * k, by + uy * k);
+
+        return new UglyToad.PdfPig.Core.PdfRectangle(xs.Min(), ys.Min(), xs.Max(), ys.Max());
     }
 
     /// <summary>True when two consecutive letter boxes belong to the same run (same line, or same column on rotated text): they touch or nearly do.</summary>
