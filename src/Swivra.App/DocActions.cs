@@ -386,28 +386,111 @@ internal static class DocActions
         return merged;
     }
 
-    /// <summary>Masks paragraph by paragraph so a value split across runs is still caught. Returns the number of covered items.</summary>
+    /// <summary>
+    /// Masks every place a .docx keeps text, not only what Word shows: all story parts (body, headers, footers,
+    /// footnotes, endnotes, comments, building blocks), tracked deletions and field codes, alt text, link targets,
+    /// document properties and the custom XML that content controls are bound to (Word refills a bound control
+    /// from it on open). The thumbnail is a picture of the unmasked first page, so it always goes.
+    /// Paragraph by paragraph, so a value split across runs is still caught. Returns the number of covered items.
+    /// </summary>
     private static int MaskDocx(string copy)
     {
         int total = 0;
         using var doc = WordprocessingDocument.Open(copy, true);
         var main = doc.MainDocumentPart ?? throw new DocFailure(Lang.T("Olmadı", "Failed"), Lang.T("Word dosyası açılamadı", "Could not open the Word file"));
-        var roots = new List<OpenXmlPartRootElement>();
-        if (main.Document is not null) roots.Add(main.Document);
-        roots.AddRange(main.HeaderParts.Select(h => (OpenXmlPartRootElement)h.Header));
-        roots.AddRange(main.FooterParts.Select(f => (OpenXmlPartRootElement)f.Footer));
-        foreach (var root in roots)
+
+        var stories = new List<OpenXmlPart> { main };
+        stories.AddRange(main.HeaderParts);
+        stories.AddRange(main.FooterParts);
+        if (main.FootnotesPart is { } fn) stories.Add(fn);
+        if (main.EndnotesPart is { } en) stories.Add(en);
+        if (main.WordprocessingCommentsPart is { } cm) stories.Add(cm);
+        if (main.GlossaryDocumentPart is { } gl) stories.Add(gl);
+        foreach (var part in stories)
         {
+            if (part.RootElement is not OpenXmlPartRootElement root) continue;
             foreach (var p in root.Descendants<Paragraph>())
-                total += MaskParagraph(p);
+                total += MaskRuns<Text>(p) + MaskRuns<DeletedText>(p) + MaskRuns<FieldCode>(p) + MaskRuns<DeletedFieldCode>(p);
+            foreach (var f in root.Descendants<SimpleField>())
+                f.Instruction = MaskValue(f.Instruction?.Value, ref total);
+            foreach (var d in root.Descendants<DocumentFormat.OpenXml.Drawing.Wordprocessing.DocProperties>())
+            {
+                if (d.Description is not null) d.Description = MaskValue(d.Description.Value, ref total);
+                if (d.Title is not null) d.Title = MaskValue(d.Title.Value, ref total);
+            }
+            // A masked mailto:/tel: target is no valid URI, so the link goes and its (masked) text stays.
+            foreach (var rel in part.HyperlinkRelationships.ToList())
+            {
+                MaskText(rel.Uri.OriginalString, out int c);
+                if (c == 0) continue;
+                total += c;
+                foreach (var h in root.Descendants<Hyperlink>().Where(h => h.Id?.Value == rel.Id)) h.Id = null;
+                part.DeleteReferenceRelationship(rel);
+            }
             root.Save();
         }
+
+        var pp = doc.PackageProperties;
+        pp.Title = MaskValue(pp.Title, ref total);
+        pp.Subject = MaskValue(pp.Subject, ref total);
+        pp.Creator = MaskValue(pp.Creator, ref total);
+        pp.Keywords = MaskValue(pp.Keywords, ref total);
+        pp.Description = MaskValue(pp.Description, ref total);
+        pp.LastModifiedBy = MaskValue(pp.LastModifiedBy, ref total);
+        pp.Category = MaskValue(pp.Category, ref total);
+        foreach (OpenXmlPart? part in new OpenXmlPart?[] { doc.ExtendedFilePropertiesPart, doc.CustomFilePropertiesPart })
+        {
+            if (part?.RootElement is not OpenXmlPartRootElement root) continue;
+            foreach (var t in root.Descendants<OpenXmlLeafTextElement>())
+                t.Text = MaskValue(t.Text, ref total)!;
+            root.Save();
+        }
+
+        foreach (var part in main.CustomXmlParts)
+            total += MaskXmlPart(part);
+
+        if (doc.ThumbnailPart is { } thumb) doc.DeletePart(thumb);
         return total;
     }
 
-    private static int MaskParagraph(Paragraph p)
+    // xml:space="preserve" on w:t, w:delText and w:instrText alike (only Text exposes it as a typed property).
+    private static readonly OpenXmlAttribute PreserveSpace = new("xml", "space", "http://www.w3.org/XML/1998/namespace", "preserve");
+
+    /// <summary>The value with sensitive items masked; adds what it covered to <paramref name="total"/>.</summary>
+    private static string? MaskValue(string? value, ref int total)
     {
-        var texts = p.Descendants<Text>().ToList();
+        if (string.IsNullOrEmpty(value)) return value;
+        string masked = MaskText(value, out int c);
+        total += c;
+        return masked;
+    }
+
+    /// <summary>Masks text nodes and attribute values of a custom XML part; rewrites it only when something changed.</summary>
+    private static int MaskXmlPart(OpenXmlPart part)
+    {
+        System.Xml.Linq.XDocument xml;
+        try
+        {
+            using var s = part.GetStream(FileMode.Open, FileAccess.Read);
+            xml = System.Xml.Linq.XDocument.Load(s, System.Xml.Linq.LoadOptions.PreserveWhitespace);
+        }
+        catch (System.Xml.XmlException) { return 0; } // not XML after all; nothing Word would bind to
+        int total = 0;
+        foreach (var t in xml.DescendantNodes().OfType<System.Xml.Linq.XText>())
+            t.Value = MaskValue(t.Value, ref total)!;
+        foreach (var a in xml.Descendants().SelectMany(e => e.Attributes()))
+            a.Value = MaskValue(a.Value, ref total)!;
+        if (total == 0) return 0;
+        using var ms = new MemoryStream();
+        xml.Save(ms, System.Xml.Linq.SaveOptions.DisableFormatting);
+        ms.Position = 0;
+        part.FeedData(ms);
+        return total;
+    }
+
+    private static int MaskRuns<T>(Paragraph p) where T : OpenXmlLeafTextElement
+    {
+        var texts = p.Descendants<T>().ToList();
         if (texts.Count == 0) return 0;
         string full = string.Concat(texts.Select(t => t.Text));
         var spans = MergeSpans(Radar.FindSensitiveSpans(full));
@@ -428,7 +511,7 @@ internal static class DocActions
                 pos++;
             }
             t.Text = sb.ToString();
-            t.Space = SpaceProcessingModeValues.Preserve;
+            t.SetAttribute(PreserveSpace);
         }
         return spans.Count;
     }
