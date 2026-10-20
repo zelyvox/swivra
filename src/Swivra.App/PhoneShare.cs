@@ -18,8 +18,12 @@ internal sealed class PhoneShare : IDisposable
     public static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(10);
     private const int MaxHeadBytes = 8192, MaxConnections = 16, MaxPerClient = 4;
     private static readonly TimeSpan HeadDeadline = TimeSpan.FromSeconds(5);
-    // A download that started before the panel closed may finish, but not forever.
-    private static readonly TimeSpan TransferDeadline = TimeSpan.FromMinutes(30);
+    // A download that started before the panel closed may finish, but not forever: it gets ten more
+    // minutes after the panel closes, and any transfer is cut when the phone takes no data for a minute.
+    // A single transfer never runs longer than an hour (a big file on slow Wi-Fi while the panel is open).
+    private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan AfterClose = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan TransferCeiling = TimeSpan.FromHours(1);
 
     private readonly TcpListener _listener;
     private readonly string _token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
@@ -149,7 +153,7 @@ internal sealed class PhoneShare : IDisposable
     private async Task Handle(TcpClient client)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(_transfers.Token);
-        cts.CancelAfter(TimeSpan.FromHours(1));
+        cts.CancelAfter(TransferCeiling);
         var stream = client.GetStream();
 
         // Read the request head (we ignore any body and all headers). One deadline for the whole
@@ -200,7 +204,7 @@ internal sealed class PhoneShare : IDisposable
                        $"Content-Length: {length}\r\n" +
                        $"Content-Disposition: attachment; filename=\"{ascii}\"; filename*=UTF-8''{Uri.EscapeDataString(file.Name)}\r\n" +
                        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n";
-            await stream.WriteAsync(Encoding.ASCII.GetBytes(h), cts.Token);
+            await WriteStalling(stream, Encoding.ASCII.GetBytes(h), cts.Token);
             if (headOnly) return;
 
             // Send exactly the announced length, even if another program is writing the file meanwhile.
@@ -210,7 +214,7 @@ internal sealed class PhoneShare : IDisposable
             {
                 int n = await fs.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, left)), cts.Token);
                 if (n == 0) return; // the file shrank: the phone sees a short download, not counted
-                await stream.WriteAsync(buf.AsMemory(0, n), cts.Token);
+                await WriteStalling(stream, buf.AsMemory(0, n), cts.Token);
                 left -= n;
             }
             await stream.FlushAsync(cts.Token);
@@ -218,6 +222,14 @@ internal sealed class PhoneShare : IDisposable
         int total = Interlocked.Increment(ref _downloads);
         Log.Write($"phone share: file sent ({total} total)");
         Downloaded?.Invoke(total);
+    }
+
+    /// <summary>One write that gives up when the phone takes no data for <see cref="StallTimeout"/>.</summary>
+    private static async Task WriteStalling(NetworkStream stream, ReadOnlyMemory<byte> data, CancellationToken ct)
+    {
+        using var stall = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        stall.CancelAfter(StallTimeout);
+        await stream.WriteAsync(data, stall.Token);
     }
 
     private string IndexPage()
@@ -250,7 +262,7 @@ internal sealed class PhoneShare : IDisposable
 
     /// <summary>
     /// Stops taking new connections (panel closed, time is up). Downloads already running may
-    /// finish, up to <see cref="TransferDeadline"/>.
+    /// finish, within <see cref="AfterClose"/> (and <see cref="StallTimeout"/> as always).
     /// </summary>
     public void Stop()
     {
@@ -258,7 +270,7 @@ internal sealed class PhoneShare : IDisposable
         _expiry.Dispose();
         _accept.Cancel();
         try { _listener.Stop(); } catch { /* already closed */ }
-        _transfers.CancelAfter(TransferDeadline);
+        _transfers.CancelAfter(AfterClose);
         Log.Write($"phone share stopped ({_downloads} downloads)");
     }
 
