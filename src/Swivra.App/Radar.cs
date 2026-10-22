@@ -226,9 +226,10 @@ internal static partial class Radar
     [GeneratedRegex(@"(?<!\d)[1-9]\d{10}(?!\d)")]
     private static partial Regex TcCandidate();
 
-    // One optional space between any two digits, not only between groups of four: a long IBAN that wraps
-    // onto the next line in a PDF comes back as "TR33000610051978645 7841326" (the line break becomes a space).
-    [GeneratedRegex(@"TR\d{2}(?:\s?\d){22}", RegexOptions.IgnoreCase)]
+    // Up to two spaces between any two digits, not only between groups of four: a long IBAN that wraps
+    // onto the next line in a PDF comes back as "TR33000610051978645 7841326" (the line break becomes a space,
+    // next to a typed one it is two). Bounded, so no backtracking blow-up; mod-97 still decides.
+    [GeneratedRegex(@"TR\d{2}(?:\s{0,2}\d){22}", RegexOptions.IgnoreCase)]
     private static partial Regex IbanCandidate();
 
     [GeneratedRegex(@"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")]

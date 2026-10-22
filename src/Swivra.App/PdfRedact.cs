@@ -210,7 +210,8 @@ internal static class PdfRedact
             Add(g.BottomLeft.X, g.BottomLeft.Y); Add(g.BottomRight.X, g.BottomRight.Y);
         }
 
-        double size = l.PointSize > 0 ? l.PointSize : Math.Max(g.Height, 1);
+        // No font size and no glyph box (broken or Type 3 font): assume ordinary 10 pt text rather than a 1 pt sliver.
+        double size = l.PointSize > 0 ? l.PointSize : g.Height > 0 ? g.Height : 10;
         var (sx, sy, ex, ey) = (l.StartBaseLine.X, l.StartBaseLine.Y, l.EndBaseLine.X, l.EndBaseLine.Y);
         double dx = ex - sx, dy = ey - sy, len = Math.Sqrt(dx * dx + dy * dy);
         if (len < 1e-6) (dx, dy, len) = (1, 0, 1);   // zero-width letter: assume horizontal text
