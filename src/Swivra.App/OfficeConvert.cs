@@ -38,13 +38,21 @@ internal static class OfficeConvert
             // that but cannot export, and leaving it triggers the fetch. So OOXML and RTF go in as a copy
             // with their external references cut. Legacy .doc and .odt cannot be cleaned: LibreOffice
             // (which does not load Word templates) gets them first, Word only when it is the only engine.
+            // Word reads the format from the bytes, not the name, so the bytes pick the cleaning: an RTF
+            // named .doc is cleaned too, and a .docx or .rtf that is neither is not converted at all.
             string safe = input;
-            if (OoxmlExts.Contains(inExt) || inExt == ".rtf")
+            var kind = Sniff(input);
+            if (kind == Kind.Other && (OoxmlExts.Contains(inExt) || inExt == ".rtf"))
+            {
+                Log.Write("office input: contents do not match the extension, not converted");
+                return null;
+            }
+            if (kind != Kind.Other)
             {
                 work = Directory.CreateTempSubdirectory("swivra-word-").FullName;
                 safe = Path.Combine(work, Path.GetFileName(input));
                 File.Copy(input, safe);
-                int cut = inExt == ".rtf" ? CutRtfReferences(safe) : CutExternalReferences(safe);
+                int cut = kind == Kind.Rtf ? CutRtfReferences(safe) : CutExternalReferences(safe);
                 if (cut > 0) Log.Write($"office input: {cut} external reference(s) cut before conversion");
             }
 
@@ -68,6 +76,18 @@ internal static class OfficeConvert
 
     private static readonly HashSet<string> OoxmlExts = new(StringComparer.OrdinalIgnoreCase) { ".docx", ".docm", ".dotx", ".dotm" };
 
+    private enum Kind { Other, Zip, Rtf }
+
+    /// <summary>A ZIP package (OOXML, also ODT) by its local-header signature, RTF by <c>{\rtf</c> near the start.</summary>
+    private static Kind Sniff(string path)
+    {
+        var head = new byte[1024];
+        int n;
+        using (var f = File.OpenRead(path)) n = f.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+        if (n >= 4 && head[0] == 'P' && head[1] == 'K' && head[2] == 3 && head[3] == 4) return Kind.Zip;
+        return System.Text.Encoding.Latin1.GetString(head, 0, n).Contains(@"{\rtf", StringComparison.Ordinal) ? Kind.Rtf : Kind.Other;
+    }
+
     // A local path that does not exist: Word looks for it on disk and moves on, nothing leaves the machine.
     private const string Blocked = "file:///C:/swivra-blocked-reference";
 
@@ -79,7 +99,7 @@ internal static class OfficeConvert
     /// <summary>
     /// Points every external relationship except hyperlinks (attached template, linked pictures and
     /// objects, frames, subdocuments, altChunks) at <see cref="Blocked"/>. Ids stay, so the file stays
-    /// valid. Hyperlinks are only followed on a click. In the document parts, fields that fetch a file
+    /// valid. Hyperlinks are only followed on a click. In every XML part, fields that fetch a file
     /// (w:instrText, w:fldSimple@w:instr) become QUOTE fields, as for RTF. Returns how many were cut.
     /// </summary>
     private static int CutExternalReferences(string path)
@@ -90,7 +110,8 @@ internal static class OfficeConvert
         {
             string name = entry.FullName;
             bool rels = name.EndsWith(".rels", StringComparison.OrdinalIgnoreCase);
-            bool story = name.StartsWith("word/", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase);
+            // Any part may hold a story: _rels/.rels can put the main document anywhere in the package.
+            bool story = name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase);
             if (!rels && !story) continue;
             XDocument xml;
             try
