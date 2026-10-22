@@ -44,7 +44,7 @@ internal static class OfficeConvert
                 work = Directory.CreateTempSubdirectory("swivra-word-").FullName;
                 safe = Path.Combine(work, Path.GetFileName(input));
                 File.Copy(input, safe);
-                int cut = inExt == ".rtf" ? CutRtfReferences(safe) : CutExternalRelationships(safe);
+                int cut = inExt == ".rtf" ? CutRtfReferences(safe) : CutExternalReferences(safe);
                 if (cut > 0) Log.Write($"office input: {cut} external reference(s) cut before conversion");
             }
 
@@ -71,26 +71,55 @@ internal static class OfficeConvert
     // A local path that does not exist: Word looks for it on disk and moves on, nothing leaves the machine.
     private const string Blocked = "file:///C:/swivra-blocked-reference";
 
+    // Fields that pull in a file or a live link when Word updates them. QUOTE only prints its argument.
+    private static readonly System.Text.RegularExpressions.Regex FetchingField = new(
+        @"\b(INCLUDEPICTURE|INCLUDETEXT|IMPORT|LINK|DDEAUTO|DDE)\b",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
     /// <summary>
     /// Points every external relationship except hyperlinks (attached template, linked pictures and
     /// objects, frames, subdocuments, altChunks) at <see cref="Blocked"/>. Ids stay, so the file stays
-    /// valid. Hyperlinks are only followed on a click. Returns how many were cut.
+    /// valid. Hyperlinks are only followed on a click. In the document parts, fields that fetch a file
+    /// (w:instrText, w:fldSimple@w:instr) become QUOTE fields, as for RTF. Returns how many were cut.
     /// </summary>
-    private static int CutExternalRelationships(string path)
+    private static int CutExternalReferences(string path)
     {
         int cut = 0;
         using var zip = ZipFile.Open(path, ZipArchiveMode.Update);
-        foreach (var entry in zip.Entries.Where(e => e.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)).ToList())
+        foreach (var entry in zip.Entries.ToList())
         {
+            string name = entry.FullName;
+            bool rels = name.EndsWith(".rels", StringComparison.OrdinalIgnoreCase);
+            bool story = name.StartsWith("word/", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase);
+            if (!rels && !story) continue;
             XDocument xml;
-            using (var s = entry.Open()) xml = XDocument.Load(s);
-            int before = cut;
-            foreach (var rel in xml.Descendants().Where(e => e.Name.LocalName == "Relationship"))
+            try
             {
-                if ((string?)rel.Attribute("TargetMode") != "External") continue;
-                if (((string?)rel.Attribute("Type"))?.EndsWith("/hyperlink", StringComparison.Ordinal) == true) continue;
-                rel.SetAttributeValue("Target", Blocked);
-                cut++;
+                using var s = entry.Open();
+                xml = XDocument.Load(s, LoadOptions.PreserveWhitespace);
+            }
+            catch (System.Xml.XmlException) { continue; } // not XML: Word cannot read it either
+            int before = cut;
+            if (rels)
+            {
+                foreach (var rel in xml.Descendants().Where(e => e.Name.LocalName == "Relationship"))
+                {
+                    if ((string?)rel.Attribute("TargetMode") != "External") continue;
+                    if (((string?)rel.Attribute("Type"))?.EndsWith("/hyperlink", StringComparison.Ordinal) == true) continue;
+                    rel.SetAttributeValue("Target", Blocked);
+                    cut++;
+                }
+            }
+            else
+            {
+                cut += NeutralizeFields(xml);
+                foreach (var a in xml.Descendants().Attributes().Where(a => a.Name.LocalName == "instr").ToList())
+                {
+                    string value = Neutralize(a.Value, ref cut);
+                    if (value == a.Value) continue;
+                    a.Value = value;
+                    KeepResult(a.Parent!);
+                }
             }
             if (cut == before) continue;
             using var w = entry.Open();
@@ -100,10 +129,163 @@ internal static class OfficeConvert
         return cut;
     }
 
+    private static string Neutralize(string instruction, ref int cut)
+    {
+        int found = 0;
+        string result = FetchingField.Replace(instruction, _ => { found++; return "QUOTE"; });
+        cut += found;
+        return result;
+    }
+
+    // The field's name is spelled out before anything nested: one word, then a space.
+    private static readonly System.Text.RegularExpressions.Regex NamedField = new(@"^\s*\S+\s");
+
+    // What a field printed by QUOTE shows when its real instruction could not be trusted.
+    private const string Inert = " QUOTE \"\" ";
+
+    // A dirty field is updated on open, and an updated QUOTE prints its argument (the URL) instead of
+    // what the author saw. Without the flag Word shows the stored result.
+    private static void KeepResult(XElement field) =>
+        field.Attributes().Where(a => a.Name.LocalName == "dirty").Remove();
+
+    private sealed class FieldCode
+    {
+        public XElement? Begin; // the fldChar that opens the field
+        public readonly List<XElement> Pieces = new();
+        public readonly System.Text.StringBuilder Head = new(); // instruction text before the first nested field
+        public bool Nested, Collecting = true;
+    }
+
     /// <summary>
-    /// RTF can name a remote template (<c>{\*\template ...}</c>) and pull files in through fields. The
-    /// template group is removed and INCLUDEPICTURE/INCLUDETEXT/LINK/DDE fields become QUOTE fields,
-    /// which only print their argument. Returns how many were cut.
+    /// Word splits one instruction over several w:instrText runs ("INCLUDE" in one, "PICTURE" in the
+    /// next), so the pieces of each field (fldChar begin … separate/end, nesting followed) are joined
+    /// before the check. A field whose name could come from a nested field cannot be read here and only
+    /// prints. A changed instruction goes into its first piece, the others are emptied.
+    /// </summary>
+    private static int NeutralizeFields(XDocument xml)
+    {
+        int cut = 0;
+        var open = new Stack<FieldCode>();
+        foreach (var e in xml.Descendants().ToList())
+        {
+            string name = e.Name.LocalName;
+            if (name == "instrText")
+            {
+                if (open.Count > 0 && open.Peek().Collecting)
+                {
+                    var f = open.Peek();
+                    f.Pieces.Add(e);
+                    if (!f.Nested) f.Head.Append(e.Value);
+                }
+                else e.Value = Neutralize(e.Value, ref cut); // outside any field: checked on its own
+                continue;
+            }
+            if (name != "fldChar") continue;
+            switch ((string?)e.Attributes().FirstOrDefault(a => a.Name.LocalName == "fldCharType"))
+            {
+                case "begin":
+                    if (open.Count > 0 && open.Peek().Collecting) open.Peek().Nested = true;
+                    open.Push(new FieldCode { Begin = e });
+                    break;
+                case "separate" when open.Count > 0 && open.Peek().Collecting:
+                    cut += Finish(open.Peek());
+                    open.Peek().Collecting = false;
+                    break;
+                case "end" when open.Count > 0:
+                    var done = open.Pop();
+                    if (done.Collecting) cut += Finish(done);
+                    break;
+            }
+        }
+        while (open.Count > 0) // left open by a broken file: still checked
+        {
+            var f = open.Pop();
+            if (f.Collecting) cut += Finish(f);
+        }
+        return cut;
+    }
+
+    private static int Finish(FieldCode f)
+    {
+        if (f.Pieces.Count == 0) return 0;
+        int cut = 0;
+        string result = Neutralize(string.Concat(f.Pieces.Select(p => p.Value)), ref cut);
+        if (cut == 0 && f.Nested && !NamedField.IsMatch(f.Head.ToString())) { result = Inert; cut = 1; }
+        if (cut == 0) return 0;
+        f.Pieces[0].Value = result;
+        f.Pieces[0].SetAttributeValue(XNamespace.Xml + "space", "preserve");
+        foreach (var p in f.Pieces.Skip(1)) p.Value = "";
+        if (f.Begin is not null) KeepResult(f.Begin);
+        return cut;
+    }
+
+    /// <summary>
+    /// One RTF field instruction (from <c>\fldinst</c> to its group's closing brace). Its text is read
+    /// the way Word reads it, groups, <c>\'hh</c> and <c>\uN</c> included, so a keyword split over groups
+    /// or escaped letters is still found; such an instruction, or one whose name could come from a
+    /// nested field, is replaced by an inert QUOTE. Anything else stays byte for byte.
+    /// </summary>
+    private static string NeutralizeRtfField(string instruction, ref int cut)
+    {
+        var nested = System.Text.RegularExpressions.Regex.Match(instruction, @"\\field(?![a-zA-Z])");
+        bool unnamed = nested.Success && !NamedField.IsMatch(RtfText(instruction[..nested.Index]));
+        if (!unnamed && !FetchingField.IsMatch(RtfText(instruction))) return instruction;
+        cut++;
+        return @"\fldinst" + Inert;
+    }
+
+    /// <summary>
+    /// The text Word reads from an RTF fragment: ignorable destinations ({\*...}) and control words
+    /// dropped, \'hh and \uN decoded, control symbols kept as their character.
+    /// </summary>
+    private static string RtfText(string rtf)
+    {
+        var sb = new System.Text.StringBuilder(rtf.Length);
+        for (int j = 0; j < rtf.Length; j++)
+        {
+            char ch = rtf[j];
+            if (ch == '{')
+            {
+                if (j + 2 < rtf.Length && rtf[j + 1] == '\\' && rtf[j + 2] == '*') j = GroupEnd(rtf, j + 1, 1);
+                continue;
+            }
+            if (ch is '}' or '\r' or '\n') continue;
+            if (ch != '\\') { sb.Append(ch); continue; }
+            if (++j >= rtf.Length) break;
+            ch = rtf[j];
+            if (ch == '\'')
+            {
+                if (j + 2 < rtf.Length && int.TryParse(rtf.AsSpan(j + 1, 2), System.Globalization.NumberStyles.HexNumber, null, out int hex)) { sb.Append((char)hex); j += 2; }
+                continue;
+            }
+            if (!char.IsAsciiLetter(ch)) { if (ch != '-') sb.Append(ch is '\\' or '{' or '}' ? ch : ' '); continue; } // \- is an invisible hyphen
+            int k = j;
+            while (k < rtf.Length && char.IsAsciiLetter(rtf[k])) k++;
+            string word = rtf[j..k];
+            int num = k;
+            if (k < rtf.Length && rtf[k] == '-') k++;
+            while (k < rtf.Length && char.IsAsciiDigit(rtf[k])) k++;
+            bool hasNum = int.TryParse(rtf.AsSpan(num, k - num), out int n);
+            if (k < rtf.Length && rtf[k] == ' ') k++; // the delimiter belongs to the control word
+            if (word == "u" && hasNum)
+            {
+                sb.Append((char)(n < 0 ? n + 65536 : n));
+                // the fallback character readers without Unicode show instead
+                if (k + 3 < rtf.Length && rtf[k] == '\\' && rtf[k + 1] == '\'') k += 4;
+                else if (k < rtf.Length && rtf[k] is not ('\\' or '{' or '}')) k++;
+            }
+            else if (word is "par" or "line" or "tab" or "cell" or "row" or "sect" or "page") sb.Append(' ');
+            j = k - 1;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// RTF can name a remote template (<c>{\*\template ...}</c>), pull files in through fields and carry
+    /// OLE links that update themselves on open. The template group is removed; every field instruction
+    /// that fetches (INCLUDEPICTURE, INCLUDETEXT, IMPORT, LINK, DDE) becomes an inert QUOTE, see
+    /// <see cref="NeutralizeRtfField"/>; automatic OLE links become manual ones and lose their
+    /// "update before showing" flag. Returns how many were cut.
     /// </summary>
     private static int CutRtfReferences(string path)
     {
@@ -111,6 +293,7 @@ internal static class OfficeConvert
         var latin1 = System.Text.Encoding.Latin1;
         string rtf = File.ReadAllText(path, latin1);
         int cut = 0;
+
         var sb = new System.Text.StringBuilder(rtf.Length);
         int i = 0;
         while (i < rtf.Length)
@@ -118,22 +301,39 @@ internal static class OfficeConvert
             int at = rtf.IndexOf(@"{\*\template", i, StringComparison.Ordinal);
             if (at < 0) { sb.Append(rtf, i, rtf.Length - i); break; }
             sb.Append(rtf, i, at - i);
-            int depth = 0, j = at;
-            for (; j < rtf.Length; j++)
-            {
-                if (rtf[j] == '\\') { j++; continue; } // escaped brace or control symbol
-                if (rtf[j] == '{') depth++;
-                else if (rtf[j] == '}' && --depth == 0) break;
-            }
-            i = Math.Min(j + 1, rtf.Length);
+            i = GroupEnd(rtf, at + 1, 1) + 1;
             cut++;
         }
-        string result = System.Text.RegularExpressions.Regex.Replace(sb.ToString(),
-            @"(\\fldinst\s*\{?[^{}]*?)\b(INCLUDEPICTURE|INCLUDETEXT|LINK|DDEAUTO|DDE)\b",
-            m => { cut++; return m.Groups[1].Value + "QUOTE"; },
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        if (cut > 0) File.WriteAllText(path, result, latin1);
+        rtf = sb.ToString();
+
+        sb.Clear();
+        i = 0;
+        while (i < rtf.Length)
+        {
+            int at = rtf.IndexOf(@"\fldinst", i, StringComparison.Ordinal);
+            if (at < 0) { sb.Append(rtf, i, rtf.Length - i); break; }
+            int end = GroupEnd(rtf, at, 1); // the instruction group that holds \fldinst, nested groups included
+            sb.Append(rtf, i, at - i).Append(NeutralizeRtfField(rtf[at..end], ref cut));
+            i = end;
+        }
+        rtf = sb.ToString();
+
+        rtf = System.Text.RegularExpressions.Regex.Replace(rtf, @"\\objupdate(?![a-zA-Z])", _ => { cut++; return ""; });
+        rtf = System.Text.RegularExpressions.Regex.Replace(rtf, @"\\objautlink(?![a-zA-Z])", _ => { cut++; return @"\objlink"; });
+        if (cut > 0) File.WriteAllText(path, rtf, latin1);
         return cut;
+    }
+
+    /// <summary>Index of the brace that closes the group open at <paramref name="from"/> with the given depth (or the end of the text).</summary>
+    private static int GroupEnd(string rtf, int from, int depth)
+    {
+        for (int j = from; j < rtf.Length; j++)
+        {
+            if (rtf[j] == '\\') { j++; continue; } // escaped brace or control symbol
+            if (rtf[j] == '{') depth++;
+            else if (rtf[j] == '}' && --depth == 0) return j;
+        }
+        return rtf.Length;
     }
 
     // ---------- Microsoft Word (COM automation) ----------
