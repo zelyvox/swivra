@@ -422,6 +422,7 @@ internal static class DocActions
     {
         private readonly HashSet<string> _values = new(StringComparer.OrdinalIgnoreCase);
         public int Unchecked;
+        public int Depth; // embedded packages currently open, one inside the other
         public int Count => _values.Count;
 
         /// <summary>The value with sensitive items masked; remembers what it covered.</summary>
@@ -572,11 +573,17 @@ internal static class DocActions
         }
     }
 
+    // Real documents nest one or two levels (a chart's workbook inside a document). A crafted file can
+    // nest without end; past this depth the inner files count as not checked instead of overflowing the stack.
+    private const int MaxEmbedDepth = 8;
+
     private static void MaskEmbedded(EmbeddedPackagePart part, Covered c)
     {
+        if (c.Depth >= MaxEmbedDepth) { c.Unchecked++; return; }
         using var ms = new MemoryStream();
         using (var s = part.GetStream(FileMode.Open, FileAccess.Read)) s.CopyTo(ms);
         ms.Position = 0;
+        c.Depth++;
         try
         {
             string type = part.ContentType;
@@ -591,13 +598,17 @@ internal static class DocActions
             c.Unchecked++;
             return;
         }
+        finally
+        {
+            c.Depth--;
+        }
         ms.Position = 0;
         part.FeedData(ms);
     }
 
     /// <summary>
-    /// Chart, SmartArt and chart-shape text. Chart values (c:v) also back the drawn chart; a number that
-    /// holds a value becomes 0 so the chart stays readable, text becomes the mask.
+    /// Chart, SmartArt and chart-shape text. Chart values (c:v) also back the drawn chart; text values
+    /// (category and series names) take the mask, a number that holds a value becomes 0 so the chart stays valid.
     /// </summary>
     private static void MaskDrawingText(OpenXmlPart part, Covered c)
     {
@@ -607,7 +618,10 @@ internal static class DocActions
         {
             string masked = c.Mask(v.Text)!;
             if (masked == v.Text) continue;
-            v.Text = v.Ancestors<DocumentFormat.OpenXml.Drawing.Charts.NumberingCache>().Any() ? "0" : masked;
+            // numCache and numLit hold numbers only; everything else (string caches, series names in c:tx,
+            // multi-level categories) is text and takes the mask.
+            bool number = v.Ancestors().Any(a => a is DocumentFormat.OpenXml.Drawing.Charts.NumberingCache or DocumentFormat.OpenXml.Drawing.Charts.NumberLiteral);
+            v.Text = number ? "0" : masked;
         }
         root.Save();
     }
