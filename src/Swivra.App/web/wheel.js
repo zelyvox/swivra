@@ -375,6 +375,10 @@ const handlers = {
   'lock-form'(m) { Lock.load(m); },
   'tel-form'(m) { Tel.load(m); },
   'tel-count'(m) { Tel.count(m.n); },
+  'tel-progress'(m) { Tel.progress(m); },
+  'tel-ended'(m) { Tel.ended(m); },
+  'tel-expired'() { Tel.expired(); },
+  'tel-ask'() { Tel.ask(true); },
   'panel-open'(m) { Panel.show(m); },
   key(m) { if (Panel.open) Panel.tool.key(m.key); },
   close() {
@@ -680,26 +684,73 @@ const Tel = {
     $('tel-file').textContent = m.count > 1 ? t(`${m.count} dosya`, `${m.count} files`) : m.name;
     $('tel-qr').src = m.qr;
     $('tel-url').textContent = m.url;
-    $('tel-minutes').textContent = t(`${m.minutes} dakika sonra kapanır`, `Closes in ${m.minutes} minutes`);
-    $('tel-count').textContent = t('Henüz indirilmedi', 'Nothing downloaded yet');
-    $('tel-count').classList.remove('got');
+    this.minutes = t(`${m.minutes} dakika sonra kapanır`, `Closes in ${m.minutes} minutes`);
+    $('tel-minutes').textContent = this.minutes;
+    this.going = false;
+    this.status(t('Henüz indirilmedi', 'Nothing downloaded yet'), '');
+    $('tel-bar').hidden = true;
     this.info.textContent = t('Yalnız bu bağlantıyı bilen indirebilir', 'Only someone with this link can download');
+    this.ask(false);
     $('tel-close').disabled = false;
     Panel.size(this, TEL.w, TEL.content, false); // no keyboard focus: Esc arrives through the hook
   },
 
+  status(text, cls) {
+    const el = $('tel-count');
+    el.textContent = text;
+    el.classList.remove('got', 'going', 'cut');
+    if (cls) el.classList.add(cls);
+  },
+
   count(n) {
     this.downloads = n;
-    $('tel-count').textContent = t(`${n} kez indirildi`, `Downloaded ${n} time${n === 1 ? '' : 's'}`);
-    $('tel-count').classList.add('got');
+    if (!this.going) this.status(t(`${n} kez indirildi`, `Downloaded ${n} time${n === 1 ? '' : 's'}`), 'got');
     panelEl.classList.add('done');
     sfx.done();
+  },
+
+  // Live state of the downloads running now (the host sends it a few times a second while any runs).
+  progress(m) {
+    this.going = m.count > 0;
+    $('tel-bar').hidden = !this.going;
+    if (!this.going) {
+      this.ask(false);
+      if (this.downloads > 0) this.status(t(`${this.downloads} kez indirildi`, `Downloaded ${this.downloads} time${this.downloads === 1 ? '' : 's'}`), 'got');
+      return;
+    }
+    const pct = m.total > 0 ? Math.floor(m.sent * 100 / m.total) : 0;
+    const what = m.count > 1 ? t(`${m.count} dosya`, `${m.count} files`) : t('Telefona gidiyor', 'Sending to phone');
+    this.status(`${what} · ${t(`%${pct}`, `${pct}%`)} · ${m.sentText} / ${m.totalText}`, 'going');
+    $('tel-bar-fill').style.width = pct + '%';
+  },
+
+  // A download stopped before the whole file arrived (phone left the Wi-Fi, stopped reading, ...).
+  ended(m) {
+    if (!m.ok) this.status(t(`${m.name} yarıda kaldı, telefonda yeniden indir`, `${m.name} stopped halfway, download it again on the phone`), 'cut');
+  },
+
+  // Time is up while a download still runs: no new downloads, the panel closes once it is done.
+  expired() {
+    this.minutes = t('Süre doldu · yeni indirme alınmıyor, bu aktarım bitince panel kapanır', 'Time is up · no new downloads, the panel closes when this one is done');
+    $('tel-minutes').textContent = this.minutes;
+  },
+
+  // Closing while a download runs: the user decides, nothing goes on unseen.
+  ask(on) {
+    $('tel-buttons').hidden = on;
+    $('tel-ask').hidden = !on;
+    this.info.textContent = on ? t('Gönderim sürüyor', 'Still sending') : t('Yalnız bu bağlantıyı bilen indirebilir', 'Only someone with this link can download');
+    $('tel-minutes').textContent = on
+      ? t('Kapatırsan arka planda biter, bitince bildirim gelir. Tepsiden durdurabilirsin.', 'If you close, it finishes in the background and you get a notice. You can stop it from the tray.')
+      : this.minutes || '';
   },
 
   close() { if (Panel.open) post({ type: 'cancel' }); },
   key(k) { if (k === 'esc') this.close(); }
 };
 $('tel-close').addEventListener('click', () => Tel.close());
+$('tel-later').addEventListener('click', () => { if (Panel.open) post({ type: 'tel-close', mode: 'later' }); });
+$('tel-now').addEventListener('click', () => { if (Panel.open) post({ type: 'tel-close', mode: 'now' }); });
 
 // Fixed text in index.html carries both languages: data-tr / data-en (and data-tr-label / data-en-label for aria-label).
 function applyStaticText() {

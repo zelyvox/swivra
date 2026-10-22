@@ -85,13 +85,18 @@
         <span class="tel-note" data-tr="Telefonun aynı Wi-Fi'da olmalı" data-en="Your phone must be on the same Wi-Fi">Telefonun aynı Wi-Fi'da olmalı</span>
         <span id="tel-url" class="tel-url"></span>
         <span id="tel-count" class="tel-count"></span>
+        <div id="tel-bar" class="tel-bar" hidden><i id="tel-bar-fill"></i></div>
         <span id="tel-minutes" class="tel-note"></span>
       </div>
     </div>
     <div class="panel-foot">
       <span id="tel-info" class="panel-info"></span>
-      <div class="buttons">
+      <div id="tel-buttons" class="buttons">
         <button id="tel-close" class="btn primary" data-tr="Kapat" data-en="Close">Kapat</button>
+      </div>
+      <div id="tel-ask" class="buttons" hidden>
+        <button id="tel-now" class="btn" data-tr="Şimdi durdur" data-en="Stop now">Şimdi durdur</button>
+        <button id="tel-later" class="btn primary" data-tr="Bitince kapat" data-en="Close when done">Bitince kapat</button>
       </div>
     </div>
   </div>

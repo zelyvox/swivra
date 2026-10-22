@@ -24,6 +24,14 @@ internal sealed class SwivraContext : ApplicationContext
     private string[] _files = [];
     private PhoneShare? _share;
 
+    // "Close when done": the panel is gone, a phone download still runs. Never invisible: the tray
+    // tooltip shows its progress, the tray menu can stop it, and a notice says how it ended.
+    private PhoneShare? _draining;
+    private readonly List<(string Name, bool Whole)> _drainResults = [];
+    private bool _closeWhenIdle; // time ran out while a download ran: close the panel once it is done
+    private readonly System.Windows.Forms.Timer _shareTimer = new() { Interval = 250 };
+    private PhoneShare.Activity _lastActivity;
+
     public SwivraContext(string[] args)
     {
         _args = args;
@@ -36,6 +44,7 @@ internal sealed class SwivraContext : ApplicationContext
             Visible = true,
         };
         BuildTrayMenu();
+        _shareTimer.Tick += (_, _) => ShowShareActivity();
 
         _hideTimer.Tick += (_, _) =>
         {
@@ -101,6 +110,11 @@ internal sealed class SwivraContext : ApplicationContext
         _tray.Text = Lang.T("Swivra: dosyayı sürüklerken Shift, Ctrl ya da Alt'a bas", "Swivra: press Shift, Ctrl or Alt while dragging a file");
         var menu = _tray.ContextMenuStrip!;
         menu.Items.Clear();
+        if (_draining is not null)
+        {
+            menu.Items.Add(Lang.T("Telefona gönderimi durdur", "Stop sending to phone"), null, (_, _) => StopDraining());
+            menu.Items.Add(new ToolStripSeparator());
+        }
         menu.Items.Add(Lang.T("Çarkı göster (demo)", "Show the wheel (demo)"), null, (_, _) => RunDemo(null));
         var lang = new ToolStripMenuItem("Dil / Language");
         lang.DropDownItems.Add(new ToolStripMenuItem("Türkçe", null, (_, _) => SetLanguage("tr")) { Checked = Lang.IsTurkish });
@@ -212,6 +226,12 @@ internal sealed class SwivraContext : ApplicationContext
 
     private void CancelWheel()
     {
+        // Closing the phone panel (Close, Esc, a click outside) while a download runs: ask, don't cut it or hide it.
+        if (_share is { } share && share.Current.Count > 0)
+        {
+            _overlay.Post(new { type = "tel-ask" });
+            return;
+        }
         _dropping = false;
         CloseWheel();
     }
@@ -223,7 +243,9 @@ internal sealed class SwivraContext : ApplicationContext
         _panel = false;
         _overlay.DropFocus();
         _overlay.Post(new { type = "close" });
-        StopShare();
+        // Whatever closed the panel, a running download never goes on unseen: it moves to the tray.
+        if (_share is { } share && share.Current.Count > 0) DrainShare();
+        else StopShare();
         _catcher.Hide();
         var t = new System.Windows.Forms.Timer { Interval = 180 };
         t.Tick += (_, _) =>
@@ -303,6 +325,13 @@ internal sealed class SwivraContext : ApplicationContext
             case "cancel":
                 CancelWheel();
                 break;
+            case "tel-close":
+                // The user's answer to "still sending": finish in the background (shown in the tray) or stop now.
+                if (msg.TryGetProperty("mode", out var md) && md.GetString() == "later") DrainShare();
+                else StopShare(hard: true);
+                _dropping = false;
+                CloseWheel();
+                break;
             case "log":
                 Log.Write("web: " + (msg.TryGetProperty("text", out var x) ? x.GetString() : ""));
                 break;
@@ -366,7 +395,17 @@ internal sealed class SwivraContext : ApplicationContext
         // The link carries a one-off token, so it is only logged for dev demo runs.
         Log.Write($"phone share started: {files.Length} file(s){(_args.Contains("--demo-tool") ? " url=" + share.Url : "")}");
         share.Downloaded += n => _overlay.BeginInvoke(() => { if (_share == share) _overlay.Post(new { type = "tel-count", n }); });
-        share.Expired += () => _overlay.BeginInvoke(() => { if (_share == share) CancelWheel(); });
+        share.TransferEnded += (name, whole) => _overlay.BeginInvoke(() => OnTransferEnded(share, name, whole));
+        share.Expired += () => _overlay.BeginInvoke(() =>
+        {
+            if (_share != share) return;
+            if (share.Current.Count == 0) { CancelWheel(); return; }
+            _closeWhenIdle = true; // a download is still running: the panel stays and says why
+            _overlay.Post(new { type = "tel-expired" });
+        });
+        _closeWhenIdle = false;
+        _lastActivity = default;
+        _shareTimer.Start();
         _overlay.Post(new
         {
             type = "tel-form",
@@ -387,6 +426,85 @@ internal sealed class SwivraContext : ApplicationContext
         if (hard) _share?.Dispose();
         else _share?.Stop();
         _share = null;
+        _closeWhenIdle = false;
+    }
+
+    /// <summary>"Close when done": the panel closes, the running download goes on and is shown in the tray.</summary>
+    private void DrainShare()
+    {
+        if (_share is not { } share) return;
+        _share = null;
+        StopDraining(); // at most one at a time; an older one is cut (it was shown in the tray already)
+        share.Stop();
+        _draining = share;
+        _drainResults.Clear();
+        BuildTrayMenu();
+        _shareTimer.Start();
+        ShowShareActivity();
+    }
+
+    /// <summary>"Stop sending to phone" in the tray: the user cut it, so no notice follows.</summary>
+    private void StopDraining()
+    {
+        if (_draining is not { } share) return;
+        _draining = null;
+        share.Dispose();
+        BuildTrayMenu();
+    }
+
+    private void OnTransferEnded(PhoneShare share, string name, bool whole)
+    {
+        if (share == _share)
+        {
+            if (!whole) _overlay.Post(new { type = "tel-ended", ok = false, name });
+            if (_closeWhenIdle && share.Current.Count == 0) { _closeWhenIdle = false; CancelWheel(); }
+            return;
+        }
+        if (share != _draining) return; // stopped by the user: they know
+        _drainResults.Add((name, whole));
+        if (share.Current.Count > 0) return;
+
+        // Everything that was running has ended: say how, in words, then let the share go.
+        _draining = null;
+        share.Dispose();
+        BuildTrayMenu();
+        var cut = _drainResults.Where(r => !r.Whole).Select(r => r.Name).Distinct().ToList();
+        int sent = _drainResults.Count(r => r.Whole);
+        string title = cut.Count == 0 ? Lang.T("Telefona gönderildi", "Sent to phone") : Lang.T("Telefona gönderim yarıda kaldı", "Sending to phone stopped halfway");
+        string text = cut.Count == 0
+            ? (sent == 1 ? _drainResults[0].Name : Lang.T($"{sent} dosya", $"{sent} files"))
+            : Lang.T($"{string.Join(", ", cut)} tamamlanmadı. Telefonda yeniden indirmek için dosyayı tekrar paylaş.",
+                     $"{string.Join(", ", cut)} did not finish. Share the file again to download it on the phone.");
+        _tray.ShowBalloonTip(8000, title, text, cut.Count == 0 ? ToolTipIcon.Info : ToolTipIcon.Warning);
+        Log.Write($"phone share notice: {sent} sent, {cut.Count} cut");
+    }
+
+    /// <summary>
+    /// A few times a second while a share exists: live progress for the panel, or for the tray tooltip once
+    /// the panel is closed ("Close when done"). Stops itself when there is nothing left to show.
+    /// </summary>
+    private void ShowShareActivity()
+    {
+        if (_share is null && _draining is null)
+        {
+            _shareTimer.Stop();
+            return;
+        }
+        if (_share is { } share)
+        {
+            var a = share.Current;
+            if (a == _lastActivity) return;
+            _lastActivity = a;
+            _overlay.Post(new { type = "tel-progress", count = a.Count, sent = a.Sent, total = a.Total, sentText = FileKinds.HumanSize(a.Sent), totalText = FileKinds.HumanSize(a.Total) });
+        }
+        else if (_draining is { } d)
+        {
+            var a = d.Current;
+            int pct = a.Total > 0 ? (int)(a.Sent * 100 / a.Total) : 0;
+            string what = a.Name ?? Lang.T($"{a.Count} dosya", $"{a.Count} files");
+            string tip = Lang.T($"Swivra: telefona gönderiliyor %{pct} · {what}", $"Swivra: sending to phone {pct}% · {what}");
+            _tray.Text = tip.Length > 127 ? tip[..127] : tip; // NotifyIcon refuses longer texts
+        }
     }
 
     /// <summary>
@@ -518,16 +636,40 @@ internal sealed class SwivraContext : ApplicationContext
         if (shotPath is null) return;
         After(tool == "tel" ? 6000 : 1800, () =>
         {
-            var b = _overlay.Bounds;
-            b.Inflate(40, 40);
-            using var bmp = new Bitmap(b.Width, b.Height);
-            using (var g = Graphics.FromImage(bmp))
-                g.CopyFromScreen(b.Location, Point.Empty, b.Size, CopyPixelOperation.SourceCopy);
-            bmp.Save(shotPath, ImageFormat.Png);
-            Log.Write($"tool demo shot saved {shotPath}");
+            Shot(shotPath);
             CancelWheel();
-            After(400, ExitThread);
+            if (!_visible) { After(400, ExitThread); return; }
+            // The phone panel stayed because a download runs: show the question, answer "close when done",
+            // and leave once the download has ended (its notice shown) or after a minute at most.
+            After(1200, () =>
+            {
+                Shot(Path.ChangeExtension(shotPath, null) + "-ask.png");
+                DrainShare();
+                _dropping = false;
+                CloseWheel();
+                var until = DateTime.UtcNow.AddMinutes(1);
+                var wait = new System.Windows.Forms.Timer { Interval = 250 };
+                wait.Tick += (_, _) =>
+                {
+                    if (_draining is not null && DateTime.UtcNow < until) return;
+                    wait.Dispose();
+                    Log.Write($"tool demo drain done={_draining is null}");
+                    After(2500, ExitThread); // long enough for the notice to appear
+                };
+                wait.Start();
+            });
         });
+    }
+
+    private void Shot(string path)
+    {
+        var b = _overlay.Bounds;
+        b.Inflate(40, 40);
+        using var bmp = new Bitmap(b.Width, b.Height);
+        using (var g = Graphics.FromImage(bmp))
+            g.CopyFromScreen(b.Location, Point.Empty, b.Size, CopyPixelOperation.SourceCopy);
+        bmp.Save(path, ImageFormat.Png);
+        Log.Write($"tool demo shot saved {path}");
     }
 
     private static void After(int ms, Action action)
@@ -546,6 +688,8 @@ internal sealed class SwivraContext : ApplicationContext
     protected override void ExitThreadCore()
     {
         StopShare(hard: true);
+        StopDraining();
+        _shareTimer.Dispose();
         SendActions.CleanTemp(all: true);
         _hook.Dispose();
         _tray.Visible = false;

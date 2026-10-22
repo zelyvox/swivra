@@ -32,15 +32,45 @@ internal sealed class PhoneShare : IDisposable
     private readonly CancellationTokenSource _accept = new();   // new connections
     private readonly CancellationTokenSource _transfers = new(); // running downloads
     private readonly Dictionary<IPAddress, int> _perClient = new();
+    private readonly List<Transfer> _running = [];
     private int _downloads, _active, _stopped, _disposed;
+
+    /// <summary>One file on its way to a phone.</summary>
+    private sealed class Transfer(string name, long total)
+    {
+        public string Name { get; } = name;
+        public long Total { get; } = total;
+        public long Sent;
+    }
+
+    /// <summary>What is being sent right now, summed over all phones: shown to the user while it runs.</summary>
+    public readonly record struct Activity(int Count, long Sent, long Total, string? Name);
 
     /// <summary>The address to show: the file itself for one file, the index page for several.</summary>
     public string Url { get; }
     public int Downloads => _downloads;
     /// <summary>Raised (on a pool thread) after a file was sent completely, with the running total.</summary>
     public event Action<int>? Downloaded;
+    /// <summary>Raised (on a pool thread) when a started download ended: the file name and whether it arrived whole.</summary>
+    public event Action<string, bool>? TransferEnded;
     /// <summary>Raised (on a pool thread) when the lifetime ran out; the server no longer accepts connections.</summary>
     public event Action? Expired;
+
+    /// <summary>A snapshot of the downloads in progress (the UI polls it a few times a second).</summary>
+    public Activity Current
+    {
+        get
+        {
+            lock (_running)
+            {
+                if (_running.Count == 0) return default;
+                long sent = 0, total = 0;
+                foreach (var t in _running) { sent += Interlocked.Read(ref t.Sent); total += t.Total; }
+                string? name = _running.Select(t => t.Name).Distinct().Count() == 1 ? _running[0].Name : null;
+                return new Activity(_running.Count, sent, total, name);
+            }
+        }
+    }
 
     private PhoneShare(IPAddress ip, IReadOnlyList<string> files)
     {
@@ -207,21 +237,39 @@ internal sealed class PhoneShare : IDisposable
             await WriteStalling(stream, Encoding.ASCII.GetBytes(h), cts.Token);
             if (headOnly) return;
 
-            // Send exactly the announced length, even if another program is writing the file meanwhile.
-            var buf = new byte[81920];
-            long left = length;
-            while (left > 0)
+            // From here on the user sees the download in the panel (or the tray, once the panel is closed).
+            var transfer = new Transfer(file.Name, length);
+            lock (_running) _running.Add(transfer);
+            bool whole = false;
+            try
             {
-                int n = await fs.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, left)), cts.Token);
-                if (n == 0) return; // the file shrank: the phone sees a short download, not counted
-                await WriteStalling(stream, buf.AsMemory(0, n), cts.Token);
-                left -= n;
+                // Send exactly the announced length, even if another program is writing the file meanwhile.
+                var buf = new byte[81920];
+                long left = length;
+                while (left > 0)
+                {
+                    int n = await fs.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, left)), cts.Token);
+                    if (n == 0) return; // the file shrank: the phone sees a short download, not counted
+                    await WriteStalling(stream, buf.AsMemory(0, n), cts.Token);
+                    left -= n;
+                    Interlocked.Add(ref transfer.Sent, n);
+                }
+                await stream.FlushAsync(cts.Token);
+                whole = true;
             }
-            await stream.FlushAsync(cts.Token);
+            finally
+            {
+                lock (_running) _running.Remove(transfer);
+                if (whole)
+                {
+                    int total = Interlocked.Increment(ref _downloads);
+                    Log.Write($"phone share: file sent ({total} total)");
+                    Downloaded?.Invoke(total);
+                }
+                else Log.Write("phone share: download ended early");
+                TransferEnded?.Invoke(transfer.Name, whole);
+            }
         }
-        int total = Interlocked.Increment(ref _downloads);
-        Log.Write($"phone share: file sent ({total} total)");
-        Downloaded?.Invoke(total);
     }
 
     /// <summary>One write that gives up when the phone takes no data for <see cref="StallTimeout"/>.</summary>
@@ -274,7 +322,7 @@ internal sealed class PhoneShare : IDisposable
         Log.Write($"phone share stopped ({_downloads} downloads)");
     }
 
-    /// <summary>Hard stop, at app exit: running downloads are cut as well.</summary>
+    /// <summary>Hard stop ("stop now" in the panel or tray, app exit): running downloads are cut as well.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;

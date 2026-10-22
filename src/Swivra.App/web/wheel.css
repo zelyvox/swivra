@@ -189,7 +189,9 @@ html, body {
 .panel-foot { height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .panel-info { font-size: 12.5px; color: rgba(238, 242, 255, .7); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .panel.done .panel-info { color: #BFF3D6; font-weight: 600; }
-.buttons { display: flex; gap: 8px; }
+.buttons { display: flex; gap: 8px; flex: none; }
+.buttons[hidden] { display: none; }
+.buttons .btn { white-space: nowrap; }
 .btn {
   height: 44px; padding: 0 18px; border-radius: 12px; font: inherit; font-size: 13.5px; color: var(--ink); cursor: pointer;
   border: 1px solid rgba(255, 255, 255, .2); background: rgba(255, 255, 255, .06); transition: background .15s;
@@ -231,3 +233,7 @@ html, body {
 .tel-url { font: 11px/1.35 ui-monospace, Consolas, monospace; color: rgba(238, 242, 255, .6); word-break: break-all; user-select: text; max-height: 62px; overflow: hidden; }
 .tel-count { margin-top: auto; font-size: 13px; color: rgba(238, 242, 255, .7); font-variant-numeric: tabular-nums; }
 .tel-count.got { color: #BFF3D6; font-weight: 600; }
+.tel-count.going { color: #EEF2FF; font-weight: 600; }
+.tel-count.cut { color: #FFD3A8; font-weight: 600; }
+.tel-bar { height: 6px; flex: none; border-radius: 3px; background: rgba(255, 255, 255, .12); overflow: hidden; }
+.tel-bar i { display: block; height: 100%; width: 0; border-radius: 3px; background: rgba(150, 185, 255, .85); transition: width .25s linear; }
