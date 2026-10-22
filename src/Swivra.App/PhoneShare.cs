@@ -230,19 +230,25 @@ internal sealed class PhoneShare : IDisposable
         {
             long length = fs.Length;
             string ascii = new string(file.Name.Select(c => c is < ' ' or > '~' or '"' or '\\' or '%' ? '_' : c).ToArray());
-            string h = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
+            byte[] h = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
                        $"Content-Length: {length}\r\n" +
                        $"Content-Disposition: attachment; filename=\"{ascii}\"; filename*=UTF-8''{Uri.EscapeDataString(file.Name)}\r\n" +
-                       "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n";
-            await WriteStalling(stream, Encoding.ASCII.GetBytes(h), cts.Token);
-            if (headOnly) return;
+                       "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n");
 
             // From here on the user sees the download in the panel (or the tray, once the panel is closed).
+            // A request still reading its head when the share stopped gets nothing: Stop() could not have
+            // reported it, so it would run unseen.
             var transfer = new Transfer(file.Name, length);
-            lock (_running) _running.Add(transfer);
+            lock (_running)
+            {
+                if (_stopped == 1) return;
+                if (!headOnly) _running.Add(transfer);
+            }
+            if (headOnly) { await WriteStalling(stream, h, cts.Token); return; }
             bool whole = false;
             try
             {
+                await WriteStalling(stream, h, cts.Token);
                 // Send exactly the announced length, even if another program is writing the file meanwhile.
                 var buf = new byte[81920];
                 long left = length;
@@ -310,16 +316,24 @@ internal sealed class PhoneShare : IDisposable
 
     /// <summary>
     /// Stops taking new connections (panel closed, time is up). Downloads already running may
-    /// finish, within <see cref="AfterClose"/> (and <see cref="StallTimeout"/> as always).
+    /// finish, within <see cref="AfterClose"/> (and <see cref="StallTimeout"/> as always). Returns whether
+    /// any is running; decided under the same lock that admits a download, so none can start after it.
     /// </summary>
-    public void Stop()
+    public bool Stop()
     {
-        if (Interlocked.Exchange(ref _stopped, 1) == 1) return;
+        bool running;
+        lock (_running)
+        {
+            if (_stopped == 1) return _running.Count > 0;
+            _stopped = 1;
+            running = _running.Count > 0;
+        }
         _expiry.Dispose();
         _accept.Cancel();
         try { _listener.Stop(); } catch { /* already closed */ }
         _transfers.CancelAfter(AfterClose);
         Log.Write($"phone share stopped ({_downloads} downloads)");
+        return running;
     }
 
     /// <summary>Hard stop ("stop now" in the panel or tray, app exit): running downloads are cut as well.</summary>

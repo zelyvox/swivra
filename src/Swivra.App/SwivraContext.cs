@@ -243,9 +243,8 @@ internal sealed class SwivraContext : ApplicationContext
         _panel = false;
         _overlay.DropFocus();
         _overlay.Post(new { type = "close" });
-        // Whatever closed the panel, a running download never goes on unseen: it moves to the tray.
-        if (_share is { } share && share.Current.Count > 0) DrainShare();
-        else StopShare();
+        // Whatever closed the panel, a running download never goes on unseen: it moves to the tray (see StopShare).
+        StopShare();
         _catcher.Hide();
         var t = new System.Windows.Forms.Timer { Interval = 180 };
         t.Tick += (_, _) =>
@@ -418,15 +417,18 @@ internal sealed class SwivraContext : ApplicationContext
     }
 
     /// <summary>
-    /// Closes the share for new connections; a download already running may finish (see PhoneShare.Stop).
-    /// At exit (<paramref name="hard"/>) running downloads are cut too.
+    /// Closes the share for new connections; a download already running may finish (see PhoneShare.Stop)
+    /// and is then shown in the tray. Stop() answers atomically, so a download that started a moment
+    /// before is not missed. At exit (<paramref name="hard"/>) running downloads are cut too.
     /// </summary>
     private void StopShare(bool hard = false)
     {
-        if (hard) _share?.Dispose();
-        else _share?.Stop();
+        var share = _share;
         _share = null;
         _closeWhenIdle = false;
+        if (share is null) return;
+        if (hard) share.Dispose();
+        else if (share.Stop()) Drain(share);
     }
 
     /// <summary>"Close when done": the panel closes, the running download goes on and is shown in the tray.</summary>
@@ -434,8 +436,13 @@ internal sealed class SwivraContext : ApplicationContext
     {
         if (_share is not { } share) return;
         _share = null;
-        StopDraining(); // at most one at a time; an older one is cut (it was shown in the tray already)
         share.Stop();
+        Drain(share);
+    }
+
+    private void Drain(PhoneShare share)
+    {
+        StopDraining(); // at most one at a time; an older one is cut (it was shown in the tray already)
         _draining = share;
         _drainResults.Clear();
         BuildTrayMenu();
