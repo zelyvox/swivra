@@ -51,6 +51,8 @@ internal static partial class OfficeConvert
                     SafeFile.CopyWritable(input, safe);
                     if (Sniff(safe) == Kind.Rtf) report.Links += CutRtfReferences(safe);
                     else if (IsOdfPackage(safe)) CleanOdf(safe, report); // by the bytes: Word imports ODF under any name
+                    // A ZIP named .odt that is no OpenDocument package: LibreOffice gets it first and would try to repair it.
+                    else if (inExt == ".odt") throw new UnsafeDocumentException("an .odt that is not an OpenDocument package");
                     else CutExternalReferences(safe, report);
                     break;
                 case Kind.Pdf when inExt == ".pdf":

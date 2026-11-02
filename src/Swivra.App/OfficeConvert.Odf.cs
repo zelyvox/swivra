@@ -47,6 +47,13 @@ internal static partial class OfficeConvert
     // trusted signature is what could let macros run).
     private static readonly string[] CodeStorages = ["Basic/", "Scripts/", "Dialogs/", "Configurations2/"];
 
+    private static bool IsCodeStorage(string path) => CodeStorages.Any(c => path.StartsWith(c, StringComparison.OrdinalIgnoreCase));
+
+    // "" is a plain folder (older OpenOffice lists "Pictures/" that way).
+    private static bool SubDocumentOk(string mediaType) => mediaType is "" or
+        "application/vnd.oasis.opendocument.chart" or "application/vnd.oasis.opendocument.formula" or
+        "application/vnd.oasis.opendocument.graphics" or "application/vnd.oasis.opendocument.text";
+
     /// <summary>True for a ZIP that is an OpenDocument package (mimetype entry or ODF manifest).</summary>
     private static bool IsOdfPackage(string path)
     {
@@ -77,9 +84,40 @@ internal static partial class OfficeConvert
         string mime = OdfMime(zip) ?? throw new UnsafeDocumentException("no ODF mimetype");
         if (!OdfTextTypes.Contains(mime)) throw new UnsafeDocumentException($"ODF type {mime} not handled");
 
+        // Entry names are matched as written below: a "./Basic/…", "/Scripts/…" or "a\b" spelling would slip past
+        // those matches while a reader may still resolve it. No real package needs one.
+        foreach (var e in zip.Entries)
+        {
+            string n = e.FullName;
+            if (n.StartsWith('/') || n.StartsWith("./", StringComparison.Ordinal) || n.Contains('\\') || n.Split('/').Any(s => s is ".." or "."))
+                throw new UnsafeDocumentException($"entry name {n}");
+        }
+
         var manifestEntry = zip.GetEntry("META-INF/manifest.xml") ?? throw new UnsafeDocumentException("no manifest");
         XDocument manifest = ParseOdfPart(manifestEntry);
         if (manifest.Descendants(OdfManifest + "encryption-data").Any()) throw new UnsafeDocumentException("encrypted ODF");
+        foreach (var fe in manifest.Descendants(OdfManifest + "file-entry"))
+        {
+            string full = (string?)fe.Attribute(OdfManifest + "full-path") ?? "";
+            string type = (string?)fe.Attribute(OdfManifest + "media-type") ?? "";
+            // LibreOffice reads the type from the manifest too: it must agree with mimetype.
+            if (full == "/" && type != mime) throw new UnsafeDocumentException($"manifest type {type} differs from mimetype {mime}");
+            // A sub-document loads its own module: a spreadsheet brings formulas that fetch, a presentation
+            // its sounds. Charts, formulas, drawings and text are what a text document embeds.
+            if (full.EndsWith('/') && full != "/" && !SubDocumentOk(type) && !IsCodeStorage(full))
+                throw new UnsafeDocumentException($"embedded {type} at {full}");
+        }
+        // An OLE object (binary storage, or inline in the XML) cannot be looked into; on Windows LibreOffice
+        // may start its server to draw it, and it can carry a link moniker to a share.
+        foreach (var e in zip.Entries.Where(e => !e.FullName.EndsWith('/')))
+        {
+            Span<byte> head = stackalloc byte[8];
+            int got;
+            using (var s = e.Open()) got = s.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+            if (got >= 8 && head.SequenceEqual(OleSignature)) throw new UnsafeDocumentException($"OLE object {e.FullName}");
+            // A gzip part (an .svgz picture) is opened by the SVG importer by its content; it is not read here.
+            if (got >= 2 && head[0] == 0x1F && head[1] == 0x8B) throw new UnsafeDocumentException($"compressed part {e.FullName}");
+        }
 
         // Code and signatures go as a whole; a storage counts once.
         foreach (string storage in CodeStorages)
@@ -113,7 +151,11 @@ internal static partial class OfficeConvert
                 throw new UnsafeDocumentException($"part {name} is not well-formed XML ({ex.Message})");
             }
             bool changed = CleanOdfXml(xml, PartDir(name), names, report);
-            if (name.Equals("settings.xml", StringComparison.Ordinal)) changed |= CleanOdfSettings(xml, report);
+            // Sub-documents have their own settings.xml.
+            if (name == "settings.xml" || name.EndsWith("/settings.xml", StringComparison.Ordinal)) changed |= CleanOdfSettings(xml, report);
+            // A DOCTYPE is dropped by the parser (never resolved here); writing the part back removes it, so an
+            // external DTD it names never reaches the office program's own parser.
+            if (bytes.AsSpan().IndexOf("<!DOCTYPE"u8) >= 0) changed = true;
             if (changed) Overwrite(entry, SaveXml(xml));
         }
 
@@ -203,10 +245,34 @@ internal static partial class OfficeConvert
             changed = true;
         }
 
+        // Processing instructions (an xml-stylesheet pulls in a sheet from anywhere) mean nothing in a package part.
+        foreach (var pi in xml.DescendantNodes().OfType<XProcessingInstruction>().ToList())
+        {
+            pi.Remove();
+            changed = true;
+        }
+
         foreach (var el in xml.Descendants().ToList())
         {
+            // A picture inline in the XML: raster images are kept, anything else (an SVG, an OLE object) is
+            // not read here, so the document is refused rather than passed on with it.
+            if (el.Name == OdfOffice + "binary-data" && !IsRasterBase64(el.Value))
+                throw new UnsafeDocumentException("inline object that is not a raster picture");
+            // CSS in SVG pictures (a <style> sheet or a style attribute) can load from an address too.
+            if (el.Name.LocalName == "style" && el.Name.Namespace.NamespaceName.Contains("svg", StringComparison.OrdinalIgnoreCase) && FetchesCss(el.Value))
+                throw new UnsafeDocumentException("style sheet that loads from an address");
+
             foreach (var attr in el.Attributes().ToList())
             {
+                // xml:base would move every relative link below it somewhere else.
+                if (attr.Name == XNamespace.Xml + "base")
+                {
+                    attr.Remove();
+                    changed = true;
+                    continue;
+                }
+                if (attr.Name.LocalName == "style" && FetchesCss(attr.Value))
+                    throw new UnsafeDocumentException("style attribute that loads from an address");
                 if (FormSourceAttributes.Contains(attr.Name))
                 {
                     attr.Remove();
@@ -218,7 +284,7 @@ internal static partial class OfficeConvert
                 if (attr.Name.LocalName != "href") continue;
                 string href = attr.Value.Trim();
                 bool click = ClickLinks.Contains(el.Name);
-                if (click ? !RunsCode(href) : IsInsidePackage(href, partDir, names)) continue;
+                if (click ? !RunsCode(href) && !LocalOrShare(href) : IsInsidePackage(href, partDir, names)) continue;
                 attr.Value = Blocked;
                 report.Links++;
                 changed = true;
@@ -227,12 +293,48 @@ internal static partial class OfficeConvert
         return changed;
     }
 
-    /// <summary>A hyperlink that starts a macro or script instead of opening an address.</summary>
+    /// <summary>A hyperlink that starts a macro, a command or a script instead of opening an address.</summary>
     private static bool RunsCode(string href) =>
         href.StartsWith("vnd.sun.star.", StringComparison.OrdinalIgnoreCase)
         || href.StartsWith("macro:", StringComparison.OrdinalIgnoreCase)
         || href.StartsWith("javascript:", StringComparison.OrdinalIgnoreCase)
-        || href.StartsWith("service:", StringComparison.OrdinalIgnoreCase);
+        || href.StartsWith("service:", StringComparison.OrdinalIgnoreCase)
+        || href.StartsWith(".uno:", StringComparison.OrdinalIgnoreCase)
+        || href.StartsWith("slot:", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A click link to a file or a network share: web addresses stay, these go (a click would reach the share).</summary>
+    private static bool LocalOrShare(string href)
+    {
+        string h = href.Replace('\\', '/');
+        return h.StartsWith("//", StringComparison.Ordinal) || h.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+            || h.StartsWith("smb:", StringComparison.OrdinalIgnoreCase) || (h.Length >= 2 && h[1] is ':' or '|');
+    }
+
+    /// <summary>CSS that imports a sheet or uses url() for anything but a place in the same picture.</summary>
+    private static bool FetchesCss(string css)
+    {
+        if (css.Contains("@import", StringComparison.OrdinalIgnoreCase)) return true;
+        foreach (System.Text.RegularExpressions.Match m in CssUrl.Matches(css))
+            if (!m.Groups[1].Value.TrimStart().StartsWith('#')) return true;
+        return false;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex CssUrl = new(
+        @"url\s*\(\s*['""]?([^'"")]*)", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>PNG, JPEG, GIF, BMP, TIFF, WMF or EMF by its first bytes; anything else is not taken as a picture.</summary>
+    private static bool IsRasterBase64(string base64)
+    {
+        string s = new(base64.Where(c => !char.IsWhiteSpace(c)).Take(64).ToArray());
+        s = s[..(s.Length / 4 * 4)];
+        byte[] h;
+        try { h = System.Convert.FromBase64String(s); }
+        catch (FormatException) { return false; }
+        if (h.Length < 4) return false;
+        return h is [0x89, (byte)'P', (byte)'N', (byte)'G', ..] or [0xFF, 0xD8, 0xFF, ..] or [(byte)'G', (byte)'I', (byte)'F', ..]
+            or [(byte)'B', (byte)'M', ..] or [(byte)'I', (byte)'I', 42, 0, ..] or [(byte)'M', (byte)'M', 0, 42, ..]
+            or [0xD7, 0xCD, 0xC6, 0x9A, ..] or [0x01, 0x00, 0x00, 0x00, ..] or [0x01, 0x00, 0x09, 0x00, ..] or [0x02, 0x00, 0x09, 0x00, ..];
+    }
 
     /// <summary>
     /// An href that names a part (or sub-storage) of this package: no scheme, no absolute or UNC path,
@@ -301,7 +403,8 @@ internal static partial class OfficeConvert
     /// <summary>
     /// LibreOffice's private profile, written before it starts: macros never run, links never update,
     /// untrusted link targets are blocked, the document's printer is not loaded, and HTTP goes to a
-    /// closed local port. Unknown names are ignored by LibreOffice, so a wrong guess fails safe.
+    /// closed local port. Link, recalculation and printer values checked against LibreOffice's officecfg
+    /// schema; the Security/Scripting names are from its documentation (unknown names are ignored).
     /// </summary>
     private static void WriteLibreOfficeProfile(string profileDir)
     {
@@ -314,11 +417,13 @@ internal static partial class OfficeConvert
         sb.Append(Item("/org.openoffice.Office.Common/Security/Scripting", "MacroSecurityLevel", "3")).Append('\n');
         sb.Append(Item("/org.openoffice.Office.Common/Security/Scripting", "DisableMacrosExecution", "true")).Append('\n');
         sb.Append(Item("/org.openoffice.Office.Common/Security/Scripting", "BlockUntrustedRefererLinks", "true")).Append('\n');
-        sb.Append(Item("/org.openoffice.Office.Writer/Content/Update", "Link", "0")).Append('\n');
+        // The enumerations differ (officecfg Writer.xcs / Calc.xcs): Writer 0 always, 1 on request, 2 never;
+        // Calc 0 always, 1 never, 2 on request. Recalculation on load: 1 never.
+        sb.Append(Item("/org.openoffice.Office.Writer/Content/Update", "Link", "2")).Append('\n');
         sb.Append(Item("/org.openoffice.Office.Calc/Content/Update", "Link", "1")).Append('\n');
-        // The name differs between sources; LibreOffice ignores the one it does not know.
+        sb.Append(Item("/org.openoffice.Office.Calc/Formula/Load", "ODFRecalcMode", "1")).Append('\n');
+        sb.Append(Item("/org.openoffice.Office.Calc/Formula/Load", "OOXMLRecalcMode", "1")).Append('\n');
         sb.Append(Item("/org.openoffice.Office.Common/Save/Document", "LoadPrinter", "false")).Append('\n');
-        sb.Append(Item("/org.openoffice.Office.Common/Save/Document", "LoadDocPrinter", "false")).Append('\n');
         sb.Append(Item("/org.openoffice.Inet/Settings", "ooInetProxyType", "2")).Append('\n');
         sb.Append(Item("/org.openoffice.Inet/Settings", "ooInetHTTPProxyName", "127.0.0.1")).Append('\n');
         sb.Append(Item("/org.openoffice.Inet/Settings", "ooInetHTTPProxyPort", "9")).Append('\n');
