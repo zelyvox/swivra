@@ -18,6 +18,10 @@ internal static class PdfWord
     public static ActionResult Convert(string input, string dir, string baseName, List<string> created)
     {
         string target = FileActions.UniquePath(dir, baseName, "docx");
+        // Word reads a damaged PDF as plain text and "succeeds" with garbage: a PDF must open as one first.
+        // Throwing lands in the caller's "password-protected or damaged" message, like every other PDF step.
+        using (var check = UglyToad.PdfPig.PdfDocument.Open(SafeFile.ReadAll(input)))
+            if (check.NumberOfPages < 1) throw new InvalidDataException("pdf has no pages");
         var office = OfficeConvert.Convert(input, target);
         if (office is not null)
         {

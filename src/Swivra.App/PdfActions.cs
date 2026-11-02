@@ -96,7 +96,7 @@ internal static class PdfActions
                             if (input == path) return new ActionResult(true, Lang.T("Zaten küçük", "Already small"), Lang.T("Daha fazla küçülmüyor", "Cannot shrink it further"));
                             // Earlier steps already produced a file (in temp); it becomes the final output.
                             string keep = FileActions.UniquePath(origDir, name + suffix, "pdf");
-                            File.Copy(input, keep);
+                            SafeFile.CopyWritable(input, keep);
                             created.Add(keep);
                             input = output = keep;
                             break;
@@ -142,7 +142,7 @@ internal static class PdfActions
                         output = ExtractTxt(input, origDir, baseName, created);
                         break;
                     default:
-                        return new ActionResult(false, Lang.T("Yakında", "Coming soon"), Lang.T($"{label(steps[i])} henüz bu sürümde yok", $"{label(steps[i])} is not in this version yet"));
+                        return new ActionResult(false, Lang.T("Bu dosyada olmaz", "Not for this file"), Lang.T($"{label(steps[i])} bu dosya türünde çalışmaz", $"{label(steps[i])} does not work on this file type"));
                 }
             }
 
@@ -181,6 +181,8 @@ internal static class PdfActions
     public static ActionResult Merge(IReadOnlyList<string> files)
     {
         string target = FileActions.UniquePath(Path.GetDirectoryName(files[0])!, Path.GetFileNameWithoutExtension(files[0]) + Lang.T("-birlesik", "-merged"), "pdf");
+        if (files.FirstOrDefault(IsEncrypted) is string locked)
+            return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T($"Şifreli PDF birleştirilemez: {Path.GetFileName(locked)}", $"Cannot merge a password-protected PDF: {Path.GetFileName(locked)}"));
         try
         {
             using var output = new PdfDocument();
@@ -344,13 +346,17 @@ internal static class PdfActions
         doc.Save(target);
     }
 
-    /// <summary>True when the PDF needs a password to open (PDFsharp refuses it without one).</summary>
-    private static bool IsEncrypted(string path)
+    /// <summary>
+    /// True when the PDF needs a password to open. PDFsharp alone is not enough: it opens an AES-256 (R6)
+    /// PDF with a user password without asking and leaves its pages encrypted, so the output came out
+    /// blank while saying "Ready". PdfPig checks the password itself. Owner-only PDFs (print or copy
+    /// restrictions, no password to open) pass both.
+    /// </summary>
+    internal static bool IsEncrypted(string path)
     {
         try
         {
             using var doc = PdfReader.Open(path, PdfDocumentOpenMode.InformationOnly);
-            return false;
         }
         catch (PdfReaderException ex) when (ex.Message.Contains("password", StringComparison.OrdinalIgnoreCase))
         {
@@ -359,6 +365,19 @@ internal static class PdfActions
         catch
         {
             return false; // other failures surface in the actual step
+        }
+        try
+        {
+            using var pig = UglyToad.PdfPig.PdfDocument.Open(SafeFile.ReadAll(path));
+            return false;
+        }
+        catch (UglyToad.PdfPig.Exceptions.PdfDocumentEncryptedException)
+        {
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -381,7 +400,7 @@ internal static class PdfActions
 
     private static (string Path, bool IsFolder) Render(string input, string dir, string baseName, string ext, List<string> created)
     {
-        byte[] bytes = File.ReadAllBytes(input);
+        byte[] bytes = SafeFile.ReadAll(input);
         int count;
         using (var ms = new MemoryStream(bytes)) count = PDFtoImage.Conversion.GetPageCount(ms);
         if (count < 1) throw new InvalidDataException("pdf has no pages");
