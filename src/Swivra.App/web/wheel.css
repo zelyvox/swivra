@@ -87,6 +87,7 @@ html, body {
 }
 .center-title { font-size: 13px; font-weight: 600; line-height: 1.2; }
 .center-sub { font-size: 10.5px; line-height: 1.3; color: var(--ink-soft); max-width: 92px; overflow-wrap: anywhere; }
+.center-sub.long { font-size: 9.5px; line-height: 1.25; max-width: 100px; }
 .wheel.sensitive .center-sub.radar-text { color: #FFD2B0; }
 .center-hint { font-size: 9.5px; line-height: 1.25; color: rgba(238, 242, 255, .55); max-width: 86px; min-height: 0; }
 .center-hint:empty { display: none; }

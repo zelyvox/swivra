@@ -137,7 +137,8 @@ internal static class DocActions
     {
         string target = OutPath(path, "", ext);
         var r = OfficeConvert.Convert(path, target);
-        return r is null ? null : Done(r.Path, r.Engine);
+        // What the cleaning changed matters more to the user than which program converted.
+        return r is null ? null : Done(r.Path, r.Note ?? r.Engine) with { Cleaned = r.Note is not null };
     }
 
     private static DocFailure NeedOffice(string ext, string target) =>

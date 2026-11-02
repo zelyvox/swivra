@@ -24,8 +24,9 @@ internal static class FileKinds
         : $"{bytes} B";
 }
 
-internal sealed record ActionResult(bool Ok, string Title, string Detail, string? OutputPath = null, string? OutputExt = null, string? ClipboardText = null, Func<bool>? OnUi = null);
+internal sealed record ActionResult(bool Ok, string Title, string Detail, string? OutputPath = null, string? OutputExt = null, string? ClipboardText = null, Func<bool>? OnUi = null, bool Cleaned = false);
 // OnUi: work that needs the STA UI thread (clipboard file list, launching an app); false turns the result into a failure.
+// Cleaned: links or embedded sections were cut from a copy before an office program opened it; Detail says what.
 
 /// <summary>
 /// Input that some steps need beyond the step id, filled in by a tool panel.
@@ -100,6 +101,8 @@ internal static class FileActions
         string detail = ok.Count == results.Count
             ? Lang.T($"{ok.Count} dosya hazır", $"{ok.Count} files ready")
             : Lang.T($"{ok.Count}/{results.Count} dosya hazır, {results.Count - ok.Count} atlandı", $"{ok.Count}/{results.Count} files ready, {results.Count - ok.Count} skipped");
+        // Each file's own note does not fit here; the count says that something was cut.
+        if (ok.Count(r => r.Cleaned) is int cleaned and > 0) detail += Lang.T($" · {cleaned} dosya temizlendi", $" · {cleaned} cleaned");
         return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, ok[0].OutputPath, ext, clip);
     }
 
@@ -115,6 +118,7 @@ internal static class FileActions
         string finalPath = path;
         string? finalExt = null;
         string? finalName = null;
+        bool cleaned = false;
         if (fileSteps.Count > 0)
         {
             try
@@ -134,6 +138,7 @@ internal static class FileActions
                     finalPath = r.OutputPath;
                     finalExt = r.OutputExt;
                     finalName = r.Detail;
+                    cleaned = r.Cleaned;
                 }
                 else
                 {
@@ -157,7 +162,7 @@ internal static class FileActions
         string name = finalName ?? Path.GetFileName(finalPath);
         if (fileSteps.Count == 0) return new ActionResult(true, Lang.T("Kopyalandı", "Copied"), Lang.T("Yol panoda", "Path copied"), ClipboardText: clip);
         string detail = copyPath ? $"{name} · {Lang.T("yolu panoda", "path copied")}" : name;
-        return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, finalPath, finalExt, clip);
+        return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, finalPath, finalExt, clip, Cleaned: cleaned);
     }
 
     private static string Label(string step) => Labels.GetValueOrDefault(step, step);

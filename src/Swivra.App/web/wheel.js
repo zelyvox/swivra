@@ -205,7 +205,7 @@ function paint() {
 
 function renderCenter() {
   const h = S.hover >= 0 ? S.acts[S.hover] : null;
-  subEl.classList.remove('radar-text');
+  subEl.classList.remove('radar-text', 'long');
   setHint('');
   if (h) {
     titleEl.textContent = h.label;
@@ -369,6 +369,8 @@ const handlers = {
     setHint('');
     subEl.textContent = m.detail || '';
     subEl.classList.remove('radar-text');
+    // A result with a note (what was cleaned) can run long; a smaller size keeps it inside the circle.
+    subEl.classList.toggle('long', subEl.textContent.length > 48);
     if (m.ok) { sfx.flip(); setTimeout(sfx.done, 160); } else sfx.fail();
   },
   'crop-src'(m) { Crop.load(m); },
