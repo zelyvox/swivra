@@ -23,6 +23,12 @@ internal static class PdfActions
     private const long CompressMinStream = 10 * 1024;   // smaller images are not worth a lossy pass
     private const double CompressMinGain = 0.05;
 
+    // Steps PDFsharp does by rewriting the file itself (Merge too, checked there).
+    private static readonly HashSet<string> RewriteSteps = new() { "rot", "split", "cmp", "lock" };
+
+    private static ActionResult EditLocked() => new(false, Lang.T("Düzenlemeye kilitli", "Locked for editing"),
+        Lang.T("PDF'in sahip parolası var · PNG, Metin ve Gizle çalışır", "The PDF has an owner password · PNG, Text and Hide still work"));
+
     /// <summary>Steps nothing can follow: the output is not a single PDF (docx included), or (lock) later steps would need the password.</summary>
     private static readonly HashSet<string> Terminal = new() { "png", "jpg", "txt", "docx", "split", "lock" };
 
@@ -44,6 +50,10 @@ internal static class PdfActions
             return new ActionResult(false, Lang.T("Şifrele", "Lock"), Lang.T("Parola gerekli", "Password required"));
         if (IsEncrypted(path))
             return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Şifreli PDF açılamadı", "Cannot open a password-protected PDF"));
+        // Hide rebuilds the PDF from page images, so steps after it work on a file that is no longer locked.
+        int firstRewrite = steps.ToList().FindIndex(s => RewriteSteps.Contains(s)), firstHide = steps.ToList().IndexOf("hide");
+        if (firstRewrite >= 0 && (firstHide < 0 || firstRewrite < firstHide) && IsEditLocked(path))
+            return EditLocked();
 
         string origDir = Path.GetDirectoryName(path)!;
         string name = Path.GetFileNameWithoutExtension(path);
@@ -183,6 +193,8 @@ internal static class PdfActions
         string target = FileActions.UniquePath(Path.GetDirectoryName(files[0])!, Path.GetFileNameWithoutExtension(files[0]) + Lang.T("-birlesik", "-merged"), "pdf");
         if (files.FirstOrDefault(IsEncrypted) is string locked)
             return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T($"Şifreli PDF birleştirilemez: {Path.GetFileName(locked)}", $"Cannot merge a password-protected PDF: {Path.GetFileName(locked)}"));
+        if (files.FirstOrDefault(IsEditLocked) is string editLocked)
+            return new ActionResult(false, Lang.T("Düzenlemeye kilitli", "Locked for editing"), Lang.T($"Sahip parolalı PDF birleştirilemez: {Path.GetFileName(editLocked)}", $"Cannot merge a PDF with an owner password: {Path.GetFileName(editLocked)}"));
         try
         {
             using var output = new PdfDocument();
@@ -352,6 +364,24 @@ internal static class PdfActions
     /// blank while saying "Ready". PdfPig checks the password itself. Owner-only PDFs (print or copy
     /// restrictions, no password to open) pass both.
     /// </summary>
+    /// <summary>
+    /// Opens without a password but is encrypted (an owner password limits printing, copying or editing).
+    /// PDFsharp writes such a file back with its content streams still encrypted, so every page comes out
+    /// blank; PDFium and PdfPig read it fine.
+    /// </summary>
+    internal static bool IsEditLocked(string path)
+    {
+        try
+        {
+            using var pig = UglyToad.PdfPig.PdfDocument.Open(SafeFile.ReadAll(path));
+            return pig.IsEncrypted;
+        }
+        catch
+        {
+            return false; // a password-protected or damaged file is reported elsewhere
+        }
+    }
+
     internal static bool IsEncrypted(string path)
     {
         try

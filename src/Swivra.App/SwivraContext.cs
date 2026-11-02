@@ -561,7 +561,7 @@ internal sealed class SwivraContext : ApplicationContext
         int session = _session;
         Task.Run(() => CropPreview(file)).ContinueWith(t => _overlay.BeginInvoke(() =>
         {
-            if (session != _session) return; // that wheel is gone
+            if (session != _session || !_visible) return; // that wheel is gone
             if (!t.IsCompletedSuccessfully)
             {
                 Log.Write($"crop preview failed {file}: {t.Exception?.InnerException}");

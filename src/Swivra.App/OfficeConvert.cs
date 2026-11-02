@@ -129,7 +129,7 @@ internal static class OfficeConvert
     {
         var head = new byte[1024];
         int n;
-        using (var f = File.OpenRead(path)) n = f.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+        using (var f = SafeFile.OpenRead(path)) n = f.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
         return SniffBytes(head.AsSpan(0, n));
     }
 
@@ -873,7 +873,16 @@ internal static class OfficeConvert
     /// (the dropped file is not trusted), prompts are suppressed, and a Word process that hangs past
     /// the timeout is killed.
     /// </summary>
+    // One Word conversion at a time: two wheels can run at once, and overlapping runs would read each
+    // other's DisableConvertPdfWarning as "the user's value" and leave it changed for good.
+    private static readonly object WordGate = new();
+
     private static bool TryWord(string input, string target, string ext)
+    {
+        lock (WordGate) return TryWordOnce(input, target, ext);
+    }
+
+    private static bool TryWordOnce(string input, string target, string ext)
     {
         // An earlier crash or kill may have left this file on Word's list; its prompt would hang us.
         ForgetCrash(input);
@@ -991,11 +1000,12 @@ internal static class OfficeConvert
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey($@"Software\Microsoft\Office\{version}\Word\Options");
-            object? old = key.GetValue(PdfWarningName);
+            object? old = key.GetValue(PdfWarningName, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+            var kind = old is null ? RegistryValueKind.Unknown : key.GetValueKind(PdfWarningName);
             // Noted first: if Swivra is closed mid-conversion, the next start puts the user's value back.
-            Settings.Set(PdfWarningPending, $"{version}|{(old is int v ? v.ToString() : "")}");
+            Settings.Set(PdfWarningPending, $"{version}|{(int)kind}|{Encode(old)}");
             key.SetValue(PdfWarningName, 1, RegistryValueKind.DWord);
-            return () => RestorePdfWarning(version, old as int?);
+            return () => RestorePdfWarning(version, old, kind);
         }
         catch (Exception ex)
         {
@@ -1007,26 +1017,56 @@ internal static class OfficeConvert
     private const string PdfWarningName = "DisableConvertPdfWarning";
     private const string PdfWarningPending = "wordPdfWarningRestore";
 
-    private static void RestorePdfWarning(string version, int? old)
+    /// <summary>Puts the user's value back exactly as it was, type included; no value before means none after.</summary>
+    private static void RestorePdfWarning(string version, object? old, RegistryValueKind kind)
     {
         try
         {
             using var k = Registry.CurrentUser.CreateSubKey($@"Software\Microsoft\Office\{version}\Word\Options");
             if (old is null) k.DeleteValue(PdfWarningName, false);
-            else k.SetValue(PdfWarningName, old.Value, RegistryValueKind.DWord);
+            else k.SetValue(PdfWarningName, old, kind);
             Settings.Set(PdfWarningPending, null);
         }
         catch (Exception ex) { Log.Write($"word option restore failed: {ex.Message}"); }
     }
 
+    // The old value as text for settings.json, and back. Binary as base64, a multi-string joined by NUL.
+    private static string Encode(object? value) => value switch
+    {
+        null => "",
+        byte[] b => System.Convert.ToBase64String(b),
+        string[] m => string.Join('\0', m),
+        IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+        _ => value.ToString() ?? "",
+    };
+
+    private static object? Decode(RegistryValueKind kind, string text) => kind switch
+    {
+        RegistryValueKind.Unknown => null,
+        RegistryValueKind.DWord => int.Parse(text, System.Globalization.CultureInfo.InvariantCulture), // GetValue gives a DWORD as int
+        RegistryValueKind.QWord => long.Parse(text, System.Globalization.CultureInfo.InvariantCulture),
+        RegistryValueKind.Binary => System.Convert.FromBase64String(text),
+        RegistryValueKind.MultiString => text.Split('\0'),
+        _ => text,
+    };
+
     /// <summary>At start-up: a PDF conversion cut short by closing Swivra left Word's option changed; put it back.</summary>
     public static void RestoreLeftovers()
     {
         if (Settings.GetString(PdfWarningPending) is not { } pending) return;
-        var parts = pending.Split('|');
-        if (parts.Length != 2 || parts[0].Length == 0) { Settings.Set(PdfWarningPending, null); return; }
-        RestorePdfWarning(parts[0], int.TryParse(parts[1], out int v) ? v : null);
-        Log.Write("word option restored after an interrupted conversion");
+        var parts = pending.Split('|', 3);
+        try
+        {
+            if (parts.Length != 3 || parts[0].Length == 0) throw new FormatException(pending);
+            var kind = (RegistryValueKind)int.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+            RestorePdfWarning(parts[0], Decode(kind, parts[2]), kind);
+            Log.Write("word option restored after an interrupted conversion");
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"word option note unreadable, dropped: {ex.Message}");
+            Settings.Set(PdfWarningPending, null);
+        }
     }
 
     // ---------- LibreOffice (headless) ----------

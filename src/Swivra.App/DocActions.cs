@@ -335,23 +335,31 @@ internal static class DocActions
         string suffix = Lang.T("-gizli", "-hidden");
         string output = OutPath(path, suffix, ext.TrimStart('.'));
         int count, skipped = 0;
+        bool made = false; // on failure only a file this run created is removed, never one that was already there
         try
         {
             if (ext == ".docx")
             {
                 SafeFile.CopyWritable(path, output);
+                made = true;
                 count = MaskDocx(output, out skipped);
             }
             else
             {
                 string text = ReadText(path, out Encoding enc);
                 string masked = MaskText(text, out count);
-                if (count > 0) File.WriteAllBytes(output, enc.GetPreamble().Concat(enc.GetBytes(masked)).ToArray());
+                if (count > 0)
+                {
+                    using var fs = new FileStream(output, FileMode.CreateNew, FileAccess.Write);
+                    made = true;
+                    fs.Write(enc.GetPreamble());
+                    fs.Write(enc.GetBytes(masked));
+                }
             }
         }
         catch
         {
-            TryDelete(output);
+            if (made) TryDelete(output);
             throw;
         }
         // Binary embedded objects cannot be looked into; say so rather than suggest the file is clean.
@@ -867,15 +875,19 @@ internal static class DocActions
         var entries = ZipEntries(files);
         if (entries.Count == 0) return new ActionResult(false, Lang.T("Sıkıştır", "Compress"), Lang.T("Sıkıştırılacak dosya yok", "No files to compress"));
         string target = ZipName(files, "");
+        FileStream? file = null; // the zip this run created; on failure nothing else is removed
         try
         {
-            using (var zip = System.IO.Compression.ZipFile.Open(target, ZipArchiveMode.Create))
+            file = new FileStream(target, FileMode.CreateNew, FileAccess.ReadWrite);
+            using (var zip = new ZipArchive(file, ZipArchiveMode.Create))
             {
                 foreach (var (p, entry) in entries)
                 {
                     // Not CreateEntryFromFile: it refuses a file that is open in Word or Excel.
                     var ze = zip.CreateEntry(entry, CompressionLevel.Optimal);
-                    ze.LastWriteTime = File.GetLastWriteTime(p);
+                    // A zip date runs from 1980 to 2107; CreateEntryFromFile clamped, so do the same.
+                    var when = File.GetLastWriteTime(p);
+                    ze.LastWriteTime = when.Year is < 1980 or > 2107 ? new DateTime(1980, 1, 1, 0, 0, 0) : when;
                     using var src = SafeFile.OpenRead(p);
                     using var dst = ze.Open();
                     src.CopyTo(dst);
@@ -885,7 +897,8 @@ internal static class DocActions
         catch (Exception ex)
         {
             Log.Write($"zip failed {target}: {ex}");
-            TryDelete(target);
+            file?.Dispose();
+            if (file is not null) TryDelete(target);
             return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Zip oluşturulamadı", "Could not create the zip"));
         }
         long before = entries.Sum(e => new FileInfo(e.Path).Length), after = new FileInfo(target).Length;
@@ -901,11 +914,13 @@ internal static class DocActions
         var entries = ZipEntries(files);
         if (entries.Count == 0) return new ActionResult(false, Lang.T("Şifrele", "Lock"), Lang.T("Şifrelenecek dosya yok", "No files to lock"));
         string target = ZipName(files, Lang.T("-sifreli", "-locked"));
+        bool made = false;
         try
         {
-            using (var fs = File.Create(target))
+            using (var fs = new FileStream(target, FileMode.CreateNew, FileAccess.Write)) // never over an existing file
             using (var zs = new ZipOutputStream(fs) { Password = password })
             {
+                made = true;
                 zs.SetLevel(9);
                 foreach (var (p, entry) in entries)
                 {
@@ -926,7 +941,7 @@ internal static class DocActions
         catch (Exception ex)
         {
             Log.Write($"zip lock failed {target}: {ex}");
-            TryDelete(target);
+            if (made) TryDelete(target);
             return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Şifreli zip oluşturulamadı", "Could not create the locked zip"));
         }
         string count = entries.Count > 1 ? Lang.T($"{entries.Count} dosya · ", $"{entries.Count} files · ") : "";

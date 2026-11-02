@@ -44,6 +44,10 @@ internal static class SafeFile
         }
     }
 
+    // What Directory.CreateTempSubdirectory makes from Swivra's prefixes ("swivra-word-32yrhzy0.g1o").
+    private static readonly System.Text.RegularExpressions.Regex OwnWorkFolder =
+        new(@"^swivra-(word-|lo-)?[a-z0-9]{8}\.[a-z0-9]{3}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
     /// <summary>
     /// Work folders (%TEMP%\swivra-*) hold copies of the user's documents. Each run deletes its own;
     /// one left by a crash or a forced exit is removed at the next start, once it is an hour old.
@@ -54,6 +58,8 @@ internal static class SafeFile
         {
             foreach (string d in Directory.GetDirectories(Path.GetTempPath(), "swivra-*"))
             {
+                // Only names Directory.CreateTempSubdirectory gave Swivra's own prefixes, never a folder someone named "swivra-…".
+                if (!OwnWorkFolder.IsMatch(Path.GetFileName(d))) continue;
                 if (DateTime.UtcNow - Directory.GetCreationTimeUtc(d) < TimeSpan.FromHours(1)) continue;
                 try
                 {
