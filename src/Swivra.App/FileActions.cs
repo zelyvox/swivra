@@ -19,7 +19,8 @@ internal static class FileKinds
         : "other";
 
     public static string HumanSize(long bytes) =>
-        bytes >= 1024 * 1024 ? $"{bytes / 1024d / 1024d:0.#} MB".Replace('.', Lang.IsTurkish ? ',' : '.')
+        // Invariant first: the Windows culture would put its own decimal mark in the English UI too.
+        bytes >= 1024 * 1024 ? (bytes / 1024d / 1024d).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture).Replace('.', Lang.IsTurkish ? ',' : '.') + " MB"
         : bytes >= 1024 ? $"{bytes / 1024d:0} KB"
         : $"{bytes} B";
 }
@@ -68,6 +69,9 @@ internal static class FileActions
             var pdfs = files.Where(f => FileKinds.KindOf(Path.GetExtension(f)) == "pdf").ToList();
             if (pdfs.Count < 2) return new ActionResult(false, Lang.T("Birleştir", "Merge"), Lang.T("Birden fazla PDF'i birlikte sürükle", "Drag several PDFs together"));
             var merged = PdfActions.Merge(pdfs);
+            // Files that are not PDFs are left out; say so rather than drop them unseen.
+            int left = files.Count - pdfs.Count;
+            if (merged.Ok && left > 0) merged = merged with { Detail = $"{merged.Detail} · {Lang.T($"{left} PDF olmayan dosya eklenmedi", left == 1 ? "1 non-PDF file left out" : $"{left} non-PDF files left out")}" };
             if (!merged.Ok || !copyPath) return merged;
             return merged with { Detail = $"{merged.Detail} · {Lang.T("yolu panoda", "path copied")}", ClipboardText = merged.OutputPath };
         }
@@ -113,7 +117,7 @@ internal static class FileActions
 
         string? missing = fileSteps.FirstOrDefault(s => kind == "other" || !supported.Contains(s));
         if (missing is not null)
-            return new ActionResult(false, Lang.T("Yakında", "Coming soon"), Lang.T($"{Label(missing)} henüz bu sürümde yok", $"{Label(missing)} is not in this version yet"));
+            return new ActionResult(false, Lang.T("Bu dosyada olmaz", "Not for this file"), Lang.T($"{Label(missing)} bu dosya türünde çalışmaz", $"{Label(missing)} does not work on this file type"));
 
         string finalPath = path;
         string? finalExt = null;
@@ -144,6 +148,12 @@ internal static class FileActions
                 {
                     finalPath = RunImage(path, fileSteps, options);
                     finalExt = Path.GetExtension(finalPath).TrimStart('.').ToLowerInvariant();
+                    // Say what the file name does not: a format kept for transparency, frames or pages left out.
+                    var notes = new List<string>();
+                    if (fileSteps.Contains("bg") && finalExt == "png" && fileSteps.Any(s => s is "jpg" or "bmp" or "cmp"))
+                        notes.Add(Lang.T("saydamlık için PNG", "PNG, to keep transparency"));
+                    if (ExtraFrames(path) is string frames) notes.Add(frames);
+                    if (notes.Count > 0) finalName = $"{Path.GetFileName(finalPath)} · {string.Join(" · ", notes)}";
                 }
             }
             catch (MissingCodecException ex)
@@ -166,6 +176,22 @@ internal static class FileActions
     }
 
     private static string Label(string step) => Labels.GetValueOrDefault(step, step);
+
+    /// <summary>An animated GIF or a multi-page TIFF: only the first frame or page is converted, and the note says so.</summary>
+    private static string? ExtraFrames(string path)
+    {
+        string ext = Path.GetExtension(path).ToLowerInvariant();
+        if (ext is not (".gif" or ".tif" or ".tiff")) return null;
+        try
+        {
+            using var s = SafeFile.OpenRead(path);
+            using var img = Image.FromStream(s, false, false);
+            var dim = ext == ".gif" ? FrameDimension.Time : FrameDimension.Page;
+            if (!img.FrameDimensionsList.Contains(dim.Guid) || img.GetFrameCount(dim) < 2) return null;
+            return ext == ".gif" ? Lang.T("yalnız ilk kare", "first frame only") : Lang.T("yalnız ilk sayfa", "first page only");
+        }
+        catch { return null; }
+    }
 
     private static string RunImage(string path, List<string> steps, StepOptions options)
     {
@@ -282,6 +308,19 @@ internal static class FileActions
     internal static Bitmap LoadOriented(string path, out PropertyItem[] props) => ImageIO.Load(path, out props);
 
     private static void Save(Bitmap bmp, string target, string ext, long jpegQuality)
+    {
+        // Through a stream: GDI+ cannot write to a path longer than 260 characters. CreateNew: never over a file.
+        using var fs = new FileStream(target, FileMode.CreateNew, FileAccess.Write);
+        try { SaveTo(bmp, fs, ext, jpegQuality); }
+        catch
+        {
+            fs.Dispose();
+            SafeFile.TryDelete(target);
+            throw;
+        }
+    }
+
+    private static void SaveTo(Bitmap bmp, Stream target, string ext, long jpegQuality)
     {
         if (ext == "jpg")
         {

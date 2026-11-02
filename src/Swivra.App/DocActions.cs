@@ -54,7 +54,7 @@ internal static class DocActions
                 "txt" => ToText(path),
                 "docx" => ToDocx(path),
                 "hide" => Hide(path),
-                _ => new ActionResult(false, Lang.T("Yakında", "Coming soon"), Lang.T($"{label(step)} henüz bu sürümde yok", $"{label(step)} is not in this version yet")),
+                _ => new ActionResult(false, Lang.T("Bu dosyada olmaz", "Not for this file"), Lang.T($"{label(step)} bu dosya türünde çalışmaz", $"{label(step)} does not work on this file type")),
             };
         }
         catch (DocFailure f)
@@ -150,7 +150,7 @@ internal static class DocActions
     /// <summary>Reads a text file: BOM first, then strict UTF-8, then Windows-1254 (older Turkish files).</summary>
     internal static string ReadText(string path, out Encoding encoding)
     {
-        byte[] b = File.ReadAllBytes(path);
+        byte[] b = SafeFile.ReadAll(path);
         if (b.Length >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF) { encoding = new UTF8Encoding(true); return Encoding.UTF8.GetString(b, 3, b.Length - 3); }
         if (b.Length >= 2 && b[0] == 0xFF && b[1] == 0xFE) { encoding = new UnicodeEncoding(false, true); return Encoding.Unicode.GetString(b, 2, b.Length - 2); }
         if (b.Length >= 2 && b[0] == 0xFE && b[1] == 0xFF) { encoding = new UnicodeEncoding(true, true); return Encoding.BigEndianUnicode.GetString(b, 2, b.Length - 2); }
@@ -339,7 +339,7 @@ internal static class DocActions
         {
             if (ext == ".docx")
             {
-                File.Copy(path, output);
+                SafeFile.CopyWritable(path, output);
                 count = MaskDocx(output, out skipped);
             }
             else
@@ -872,7 +872,14 @@ internal static class DocActions
             using (var zip = System.IO.Compression.ZipFile.Open(target, ZipArchiveMode.Create))
             {
                 foreach (var (p, entry) in entries)
-                    zip.CreateEntryFromFile(p, entry, CompressionLevel.Optimal);
+                {
+                    // Not CreateEntryFromFile: it refuses a file that is open in Word or Excel.
+                    var ze = zip.CreateEntry(entry, CompressionLevel.Optimal);
+                    ze.LastWriteTime = File.GetLastWriteTime(p);
+                    using var src = SafeFile.OpenRead(p);
+                    using var dst = ze.Open();
+                    src.CopyTo(dst);
+                }
             }
         }
         catch (Exception ex)
@@ -928,6 +935,6 @@ internal static class DocActions
 
     private static void TryDelete(string path)
     {
-        try { if (File.Exists(path)) File.Delete(path); } catch { /* leftover is harmless */ }
+        SafeFile.TryDelete(path);
     }
 }

@@ -24,7 +24,10 @@ internal static class Settings
                 var root = Read();
                 root[key] = value;
                 Directory.CreateDirectory(Log.Dir);
-                File.WriteAllText(Path_, root.ToJsonString());
+                // Written aside and moved in, so a cut-off write cannot leave a half file that reads as empty.
+                string tmp = Path_ + ".tmp";
+                File.WriteAllText(tmp, root.ToJsonString());
+                File.Move(tmp, Path_, overwrite: true);
             }
             catch (Exception ex)
             {

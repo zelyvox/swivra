@@ -32,7 +32,7 @@ internal static class PdfRedact
     /// </summary>
     public static Outcome Hide(string input, string target)
     {
-        byte[] bytes = File.ReadAllBytes(input);
+        byte[] bytes = SafeFile.ReadAll(input);
         var crops = StripCropBoxes(ref bytes);   // PdfPig and PDFium disagree on CropBox offsets: both see the full MediaBox, we crop the pixels ourselves
 
         var perPage = new List<PageBoxes>();

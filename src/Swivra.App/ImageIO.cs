@@ -31,7 +31,7 @@ internal static class ImageIO
     /// </summary>
     public static Bitmap Load(string path, out PropertyItem[] props)
     {
-        byte[] data = File.ReadAllBytes(path); // in memory, so the file is not locked while we work
+        byte[] data = SafeFile.ReadAll(path); // in memory, so the file is not locked while we work
         try
         {
             using var ms = new MemoryStream(data);
@@ -232,6 +232,10 @@ internal static class ImageIO
         private const uint ExifSrgb = 1;
         private const int ContextProfile = 1; // WICColorContextProfile
 
+        /// <summary>WIC opens the file by name; past 260 characters only the \\?\ form works.</summary>
+        private static string LongPath(string path) =>
+            path.Length >= 260 && !path.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\" + Path.GetFullPath(path) : path;
+
         /// <param name="converted">True when a colour transform to sRGB was applied.</param>
         public static Bitmap Load(string path, out bool converted)
         {
@@ -242,7 +246,7 @@ internal static class ImageIO
             IWICColorTransform? transform = null;
             try
             {
-                Check(factory.CreateDecoderFromFilename(path, IntPtr.Zero, GenericRead, CacheOnLoad, out decoder));
+                Check(factory.CreateDecoderFromFilename(LongPath(path), IntPtr.Zero, GenericRead, CacheOnLoad, out decoder));
                 Check(decoder.GetFrame(0, out frame));
                 Check(factory.CreateFormatConverter(out converter));
                 Guid bgra = PixelFormatBgra;
@@ -330,7 +334,7 @@ internal static class ImageIO
             IWICMetadataQueryReader? reader = null;
             try
             {
-                Check(factory.CreateDecoderFromFilename(path, IntPtr.Zero, GenericRead, CacheOnLoad, out decoder));
+                Check(factory.CreateDecoderFromFilename(LongPath(path), IntPtr.Zero, GenericRead, CacheOnLoad, out decoder));
                 Check(decoder.GetFrame(0, out frame));
                 if (frame.GetMetadataQueryReader(out reader) < 0 || reader is null) return (false, null);
                 // The rational-array names can come back empty even when the GPS block is there; the Ref tags

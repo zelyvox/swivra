@@ -48,7 +48,7 @@ internal static class OfficeConvert
                 case Kind.Zip or Kind.Rtf:
                     work = Directory.CreateTempSubdirectory("swivra-word-").FullName;
                     safe = Path.Combine(work, Path.GetFileName(input));
-                    File.Copy(input, safe);
+                    SafeFile.CopyWritable(input, safe);
                     if (Sniff(safe) == Kind.Rtf) report.Links += CutRtfReferences(safe);
                     else CutExternalReferences(safe, report);
                     break;
@@ -148,7 +148,7 @@ internal static class OfficeConvert
     private static byte[]? ReadAllCapped(string path, long cap)
     {
         if (new FileInfo(path).Length > cap) return null;
-        return File.ReadAllBytes(path);
+        return SafeFile.ReadAll(path);
     }
 
     private static readonly XNamespace W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -988,28 +988,45 @@ internal static class OfficeConvert
     /// </summary>
     private static Action? SuppressPdfWarning(string version)
     {
-        const string Name = "DisableConvertPdfWarning";
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey($@"Software\Microsoft\Office\{version}\Word\Options");
-            object? old = key.GetValue(Name);
-            key.SetValue(Name, 1, RegistryValueKind.DWord);
-            return () =>
-            {
-                try
-                {
-                    using var k = Registry.CurrentUser.CreateSubKey($@"Software\Microsoft\Office\{version}\Word\Options");
-                    if (old is null) k.DeleteValue(Name, false);
-                    else k.SetValue(Name, old, RegistryValueKind.DWord);
-                }
-                catch (Exception ex) { Log.Write($"word option restore failed: {ex.Message}"); }
-            };
+            object? old = key.GetValue(PdfWarningName);
+            // Noted first: if Swivra is closed mid-conversion, the next start puts the user's value back.
+            Settings.Set(PdfWarningPending, $"{version}|{(old is int v ? v.ToString() : "")}");
+            key.SetValue(PdfWarningName, 1, RegistryValueKind.DWord);
+            return () => RestorePdfWarning(version, old as int?);
         }
         catch (Exception ex)
         {
             Log.Write($"word option set failed: {ex.Message}");
             return null;
         }
+    }
+
+    private const string PdfWarningName = "DisableConvertPdfWarning";
+    private const string PdfWarningPending = "wordPdfWarningRestore";
+
+    private static void RestorePdfWarning(string version, int? old)
+    {
+        try
+        {
+            using var k = Registry.CurrentUser.CreateSubKey($@"Software\Microsoft\Office\{version}\Word\Options");
+            if (old is null) k.DeleteValue(PdfWarningName, false);
+            else k.SetValue(PdfWarningName, old.Value, RegistryValueKind.DWord);
+            Settings.Set(PdfWarningPending, null);
+        }
+        catch (Exception ex) { Log.Write($"word option restore failed: {ex.Message}"); }
+    }
+
+    /// <summary>At start-up: a PDF conversion cut short by closing Swivra left Word's option changed; put it back.</summary>
+    public static void RestoreLeftovers()
+    {
+        if (Settings.GetString(PdfWarningPending) is not { } pending) return;
+        var parts = pending.Split('|');
+        if (parts.Length != 2 || parts[0].Length == 0) { Settings.Set(PdfWarningPending, null); return; }
+        RestorePdfWarning(parts[0], int.TryParse(parts[1], out int v) ? v : null);
+        Log.Write("word option restored after an interrupted conversion");
     }
 
     // ---------- LibreOffice (headless) ----------
@@ -1081,6 +1098,6 @@ internal static class OfficeConvert
 
     private static void TryDelete(string path)
     {
-        try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
+        SafeFile.TryDelete(path);
     }
 }
