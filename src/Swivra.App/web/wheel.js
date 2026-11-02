@@ -470,7 +470,7 @@ const stageEl = $('stage'), rectEl = $('crop-rect'), cropImg = $('crop-img');
 
 const Crop = {
   id: 'crop', bodyId: 'crop-body', info: $('crop-info'),
-  busy: false, W: 0, H: 0, k: 1, R: null, preset: 'free', drag: null,
+  busy: false, W: 0, H: 0, k: 1, R: null, preset: 'free', drag: null, focused: false,
 
   load(m) {
     Object.assign(this, { W: m.w, H: m.h, busy: false, preset: 'free', drag: null });
@@ -483,10 +483,13 @@ const Crop = {
     this.R = { x: m.w * inset, y: m.h * inset, w: m.w * (1 - 2 * inset), h: m.h * (1 - 2 * inset) };
     $('crop-apply').disabled = false; $('crop-cancel').disabled = false;
     this.renderPresets(); this.render();
-    Panel.size(this, CROP.w, sh, false);
+    // Focus, so Enter lands here and not in Explorer, where the same image is still selected and would open.
+    Panel.size(this, CROP.w, sh, true);
   },
 
-  closed() { this.drag = null; },
+  shown(m) { this.focused = !!m.focused; },
+
+  closed() { this.drag = null; this.focused = false; },
 
   ratio() { return PRESETS.find(p => p[0] === this.preset)[2]; },
 
@@ -588,10 +591,11 @@ const Crop = {
     post({ type: 'cancel' });
   },
 
-  // keys come from the host hook: the crop panel never has focus
+  // Keys come from the host hook. Enter only counts when the panel holds the focus: otherwise the key
+  // also reached Explorer, which opens the selected image. The button still works.
   key(k) {
     if (k === 'esc') this.cancel();
-    else if (k === 'enter') this.apply();
+    else if (k === 'enter' && this.focused) this.apply();
   }
 };
 

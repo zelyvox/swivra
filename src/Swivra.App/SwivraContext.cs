@@ -21,6 +21,9 @@ internal sealed class SwivraContext : ApplicationContext
     private bool _visible;
     private bool _dropping;
     private bool _panel;
+    // Counts wheels. A timer or a slow result from an earlier wheel checks it, so it cannot close or
+    // write into a wheel the user opened since.
+    private int _session;
     private string[] _files = [];
     private PhoneShare? _share;
 
@@ -36,6 +39,8 @@ internal sealed class SwivraContext : ApplicationContext
     {
         _args = args;
         SendActions.CleanTemp(all: false);
+        SafeFile.SweepTemp();
+        OfficeConvert.RestoreLeftovers();
 
         _tray = new NotifyIcon
         {
@@ -62,6 +67,7 @@ internal sealed class SwivraContext : ApplicationContext
         _catcher.DragDrop += OnDragDrop;
 
         _overlay.Message += OnWebMessage;
+        _overlay.PageReloaded += OnPageReloaded;
         _ = StartAsync();
     }
 
@@ -196,6 +202,7 @@ internal sealed class SwivraContext : ApplicationContext
     private void ShowWheel(WheelMode mode, Point pt)
     {
         _hideTimer.Stop();
+        _session++;
         _dropping = false;
         _files = [];
         _overlay.ShowAt(pt);
@@ -298,11 +305,35 @@ internal sealed class SwivraContext : ApplicationContext
         _hideTimer.Stop();
         _catcher.Hide();
         _overlay.Post(new { type = "drop" });
+        // The page answers a drop at once (run, tool or cancel). If it never does (its renderer died),
+        // the wheel would stay on screen with nothing able to close it.
+        int session = _session;
+        _awaitingPage = session;
+        After(5000, () =>
+        {
+            if (_awaitingPage != session || _session != session || !_visible) return;
+            Log.Write("no answer from the page after a drop: closing the wheel");
+            _awaitingPage = 0;
+            _dropping = false;
+            CloseWheel();
+        });
+    }
+
+    private int _awaitingPage;
+
+    /// <summary>The page was reloaded after its renderer died: whatever the wheel was doing is gone.</summary>
+    private void OnPageReloaded()
+    {
+        _overlay.Post(new { type = "lang", lang = Lang.Current });
+        _awaitingPage = 0;
+        _dropping = false;
+        if (_visible) CloseWheel();
     }
 
     private void OnWebMessage(JsonElement msg)
     {
         string type = msg.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "";
+        if (type is "run" or "tool" or "cancel") _awaitingPage = 0;
         switch (type)
         {
             case "run":
@@ -527,8 +558,10 @@ internal sealed class SwivraContext : ApplicationContext
             return;
         }
         string file = _files[0];
+        int session = _session;
         Task.Run(() => CropPreview(file)).ContinueWith(t => _overlay.BeginInvoke(() =>
         {
+            if (session != _session) return; // that wheel is gone
             if (!t.IsCompletedSuccessfully)
             {
                 Log.Write($"crop preview failed {file}: {t.Exception?.InnerException}");
@@ -574,15 +607,33 @@ internal sealed class SwivraContext : ApplicationContext
             return;
         }
         string[] files = _files;
+        int session = _session;
         Log.Write($"run {string.Join(">", steps)} on {string.Join(" | ", files)}");
         Task.Run(() => FileActions.Run(files, steps, options)).ContinueWith(t =>
         {
             _overlay.BeginInvoke(() =>
             {
                 var r = t.IsCompletedSuccessfully ? t.Result : new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Beklenmeyen hata", "Unexpected error"));
-                if (r.ClipboardText is not null) Clipboard.SetText(r.ClipboardText);
-                if (r.Ok && r.OnUi is not null && !r.OnUi())
-                    r = new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Pano kullanılamadı", "Could not use the clipboard"));
+                if (!t.IsCompletedSuccessfully) Log.Write($"run crashed: {t.Exception?.InnerException}");
+                try
+                {
+                    if (r.ClipboardText is not null) Clipboard.SetText(r.ClipboardText);
+                    if (r.Ok && r.OnUi is not null && !r.OnUi())
+                        r = new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Pano kullanılamadı", "Could not use the clipboard"));
+                }
+                catch (Exception ex) // another program holds the clipboard
+                {
+                    Log.Write($"clipboard failed: {ex.Message}");
+                    r = new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Pano başka bir programda meşgul", "The clipboard is busy in another program"));
+                }
+                // The user may have closed this wheel and opened another meanwhile: the file is written, the new wheel is left alone.
+                if (session != _session || !_visible)
+                {
+                    // The work went on after the wheel closed; say how it ended rather than finish unseen.
+                    Log.Write($"result for a closed wheel: ok={r.Ok} {r.Title}");
+                    _tray.ShowBalloonTip(5000, "Swivra · " + r.Title, string.IsNullOrEmpty(r.Detail) ? r.Title : r.Detail, r.Ok ? ToolTipIcon.Info : ToolTipIcon.Warning);
+                    return;
+                }
                 _overlay.Post(new { type = "result", ok = r.Ok, title = r.Title, detail = r.Detail, ext = r.OutputExt });
                 FinishSoon();
             });
@@ -591,14 +642,13 @@ internal sealed class SwivraContext : ApplicationContext
 
     private void FinishSoon()
     {
-        var t = new System.Windows.Forms.Timer { Interval = 1500 };
-        t.Tick += (_, _) =>
+        int session = _session;
+        After(1500, () =>
         {
-            t.Dispose();
+            if (session != _session) return; // a newer wheel is open: not this timer's to close
             _dropping = false;
             CloseWheel();
-        };
-        t.Start();
+        });
     }
 
     /// <summary>Shows the wheel at screen center with a fake file, for checking the look.</summary>

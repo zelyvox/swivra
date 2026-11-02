@@ -89,7 +89,28 @@ internal sealed class OverlayForm : Form
 
         Hide();
         Ready = ok;
+
+        // A tray app runs for days; if the page's renderer dies, reload it instead of posting into a dead page.
+        core.ProcessFailed += (_, e) =>
+        {
+            Log.Write($"webview process failed: {e.ProcessFailedKind} {e.Reason}");
+            if (e.ProcessFailedKind is CoreWebView2ProcessFailedKind.BrowserProcessExited) { Ready = false; return; }
+            if (e.ProcessFailedKind is not (CoreWebView2ProcessFailedKind.RenderProcessExited or CoreWebView2ProcessFailedKind.RenderProcessUnresponsive)) return;
+            Ready = false;
+            Hide();
+            try { core.Reload(); } catch (Exception ex) { Log.Write($"webview reload failed: {ex.Message}"); }
+        };
+        core.NavigationCompleted += (_, args) =>
+        {
+            if (Ready || !args.IsSuccess) return;
+            Ready = true;
+            Log.Write("webview page reloaded");
+            PageReloaded?.Invoke();
+        };
     }
+
+    /// <summary>The page came back after its renderer died; the host resets the wheel and resends the language.</summary>
+    public event Action? PageReloaded;
 
     /// <summary>Centers the wheel on a physical screen point and shows it without stealing focus.</summary>
     public void ShowAt(Point center)
