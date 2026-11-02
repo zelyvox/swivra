@@ -61,6 +61,11 @@ internal static class DocActions
         {
             return new ActionResult(false, f.Title, f.Message);
         }
+        catch (UnsafeDocumentException)
+        {
+            return new ActionResult(false, Lang.T("Açılamadı", "Could not open"),
+                Lang.T("Belge güvenle okunamadı, Word'e ya da LibreOffice'e verilmedi", "The document could not be read safely and was not opened in Word or LibreOffice"));
+        }
     }
 
     private static string Ext(string path) => Path.GetExtension(path).ToLowerInvariant();

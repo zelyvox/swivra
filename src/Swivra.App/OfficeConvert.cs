@@ -11,7 +11,7 @@ namespace Swivra.App;
 /// already has: Microsoft Word first, then LibreOffice. Neither is shipped with Swivra; callers fall
 /// back to their own text-only route when this returns null.
 /// </summary>
-internal static class OfficeConvert
+internal static partial class OfficeConvert
 {
     /// <summary>Note: what the cleaning changed in the user's document, null when nothing.</summary>
     internal sealed record Result(string Path, string Engine, string? Note = null);
@@ -50,6 +50,7 @@ internal static class OfficeConvert
                     safe = Path.Combine(work, Path.GetFileName(input));
                     SafeFile.CopyWritable(input, safe);
                     if (Sniff(safe) == Kind.Rtf) report.Links += CutRtfReferences(safe);
+                    else if (IsOdfPackage(safe)) CleanOdf(safe, report); // by the bytes: Word imports ODF under any name
                     else CutExternalReferences(safe, report);
                     break;
                 case Kind.Pdf when inExt == ".pdf":
@@ -100,6 +101,12 @@ internal static class OfficeConvert
             if (WordInstalled && TryWord(safe, target, ext)) return new Result(target, "Word", note);
             if (inExt is not (".doc" or ".odt") && soffice is not null && TryLibreOffice(soffice, safe, target, ext)) return new Result(target, "LibreOffice", note);
             return null;
+        }
+        catch (UnsafeDocumentException ex)
+        {
+            // Not "no engine": the caller says the document could not be read safely.
+            Log.Write($"office input refused: {ex.Message}");
+            throw;
         }
         catch (Exception ex)
         {
@@ -190,6 +197,7 @@ internal static class OfficeConvert
         public int Links;   // external relationships and fetching fields cut
         public int AsText;  // embedded HTML/MHT/text sections kept as plain paragraphs
         public int Removed; // embedded sections that could not be read safely
+        public int Macros;  // macros, scripts and event handlers removed (ODF)
 
         public string? Note()
         {
@@ -198,6 +206,7 @@ internal static class OfficeConvert
             if (Links > 0) parts.Add(Lang.T($"{Links} bağlantı kesildi", $"{Links} link{(Links == 1 ? "" : "s")} cut"));
             if (AsText > 0) parts.Add(Lang.T($"{AsText} bölüm düz metin oldu", $"{AsText} section{(AsText == 1 ? "" : "s")} as plain text"));
             if (Removed > 0) parts.Add(Lang.T($"{Removed} bölüm çıkarıldı", $"{Removed} section{(Removed == 1 ? "" : "s")} removed"));
+            if (Macros > 0) parts.Add(Lang.T($"{Macros} makro çıkarıldı", $"{Macros} macro{(Macros == 1 ? "" : "s")} removed"));
             return parts.Count == 0 ? null : string.Join(", ", parts);
         }
     }
@@ -1101,6 +1110,7 @@ internal static class OfficeConvert
             Directory.CreateDirectory(outDir);
             // Private profile so a running LibreOffice window or a locked default profile cannot block us.
             var psi = new ProcessStartInfo(soffice) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            WriteLibreOfficeProfile(Path.Combine(work, "profile")); // hardened: no macros, no link updates, see there
             psi.ArgumentList.Add("-env:UserInstallation=" + new Uri(Path.Combine(work, "profile")).AbsoluteUri);
             psi.ArgumentList.Add("--headless");
             psi.ArgumentList.Add("--norestore");
