@@ -13,11 +13,17 @@ internal sealed class MissingCodecException(string message, Exception inner) : E
 /// only when the free HEIF (and HEVC or AV1) extensions from the Microsoft Store are installed.
 /// Pixels come back in sRGB whenever the file embeds a colour profile: phones embed Display P3, and every
 /// output path (JPG/PNG without metadata, WebP, PDF) would otherwise show those numbers as sRGB, duller and
-/// shifted. Files without a profile are taken as sRGB as they are (PNG gAMA/cHRM alone is not applied).
+/// shifted. A PNG without a profile but with a gAMA chunk is converted the way Chromium shows it (gAMA,
+/// with cHRM when present); cHRM alone is ignored, as Chromium does. Other files are taken as sRGB.
 /// </summary>
 internal static class ImageIO
 {
     private const int IccTag = 0x8773;
+    // PNG colour chunks as GDI+ reports them: gAMA, cHRM (white point, primaries), sRGB.
+    private const int GammaTag = 0x0301;
+    private const int WhitePointTag = 0x013E;
+    private const int PrimariesTag = 0x013F;
+    private const int SrgbIntentTag = 0x0303;
 
     /// <summary>
     /// Decodes upright (orientation applied) and in sRGB. <paramref name="props"/> are the GDI+ EXIF items;
@@ -68,6 +74,26 @@ internal static class ImageIO
                     Log.Write($"colour conversion failed {path}: {ex.Message}");
                 }
             }
+            // gAMA without a profile or an sRGB chunk: GDI+ hands back the stored numbers, while browsers
+            // show them through the gamma, so a converted copy would look lighter or darker than the original.
+            // Skia's codec applies gAMA (and cHRM with it) like Chromium. An sRGB chunk or a profile wins.
+            else if (props.Any(p => p.Id == GammaTag) && !props.Any(p => p.Id == SrgbIntentTag) && !IsSrgbGamma(props))
+            {
+                try
+                {
+                    Bitmap? srgb = LoadSkia(data, out bool skiaApplied);
+                    if (srgb is not null && skiaApplied)
+                    {
+                        props = AsSrgb(props);
+                        return srgb;
+                    }
+                    srgb?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Log.Write($"gamma conversion failed {path}: {ex.Message}");
+                }
+            }
             var bmp = new Bitmap(img);
             var o = props.FirstOrDefault(p => p.Id == 0x0112);
             if (o?.Value is { Length: >= 2 } v) Orient(bmp, BitConverter.ToUInt16(v, 0));
@@ -105,12 +131,12 @@ internal static class ImageIO
     }
 
     /// <summary>
-    /// Metadata for pixels that were converted to sRGB: the old profile would recolour them, and EXIF ColorSpace
-    /// (iPhones write 0xFFFF, "uncalibrated") now really is 1 = sRGB.
+    /// Metadata for pixels that were converted to sRGB: the old profile, gamma or primaries would recolour them
+    /// (a PNG output keeps gAMA/cHRM), and EXIF ColorSpace (iPhones write 0xFFFF, "uncalibrated") now really is 1 = sRGB.
     /// </summary>
     private static PropertyItem[] AsSrgb(PropertyItem[] props)
     {
-        var kept = props.Where(p => p.Id != IccTag).ToArray();
+        var kept = props.Where(p => p.Id is not (IccTag or GammaTag or WhitePointTag or PrimariesTag)).ToArray();
         foreach (var p in kept.Where(p => p.Id == 0xA001))
         {
             p.Type = 3; // SHORT
@@ -118,6 +144,22 @@ internal static class ImageIO
             p.Value = BitConverter.GetBytes((ushort)1);
         }
         return kept;
+    }
+
+    /// <summary>
+    /// gAMA 1/2.2 without cHRM: Chromium shows it as plain sRGB, while a strict 2.2 curve would shift the
+    /// darkest tones slightly. It is the gAMA most PNGs carry, so it is left as it is.
+    /// </summary>
+    private static bool IsSrgbGamma(PropertyItem[] props)
+    {
+        if (props.Any(p => p.Id is WhitePointTag or PrimariesTag)) return false;
+        var g = props.FirstOrDefault(p => p.Id == GammaTag);
+        if (g?.Value is not { Length: >= 8 } v) return false;
+        uint num = BitConverter.ToUInt32(v, 0), den = BitConverter.ToUInt32(v, 4);
+        if (num == 0 || den == 0) return false;
+        double gamma = (double)num / den;
+        if (gamma > 1) gamma = 1 / gamma; // stored either way round
+        return Math.Abs(gamma - 1 / 2.2) < 0.005;
     }
 
     /// <summary>GDI+ reports an unknown or broken format as ArgumentException, sometimes as OutOfMemory or a generic error.</summary>
