@@ -146,8 +146,11 @@ internal static class DocActions
         return r is null ? null : Done(r.Path, r.Note ?? r.Engine) with { Cleaned = r.Note is not null };
     }
 
-    private static DocFailure NeedOffice(string ext, string target) =>
-        new(Lang.T("Word ya da LibreOffice gerekli", "Word or LibreOffice required"),
+    // Installed but failed is not the same as missing: the user should not go looking for a program they have.
+    private static DocFailure NeedOffice(string ext, string target) => OfficeConvert.Available
+        ? new(Lang.T("Dönüştürülemedi", "Could not convert"),
+            Lang.T($"Word/LibreOffice bu {ext} dosyasını açamadı", $"Word/LibreOffice could not open this {ext} file"))
+        : new(Lang.T("Word ya da LibreOffice gerekli", "Word or LibreOffice required"),
             Lang.T($"{ext} dosyasını {target} yapmak için Word ya da LibreOffice kurulu olmalı", $"Converting {ext} to {target} needs Word or LibreOffice installed"));
 
     // ---------- text helpers ----------

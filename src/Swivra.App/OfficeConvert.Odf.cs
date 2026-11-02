@@ -32,6 +32,7 @@ internal static partial class OfficeConvert
     private static readonly XNamespace OdfConfig = "urn:oasis:names:tc:opendocument:xmlns:config:1.0";
     private static readonly XNamespace OdfPresentation = "urn:oasis:names:tc:opendocument:xmlns:presentation:1.0";
     private static readonly XNamespace OdfManifest = "urn:oasis:names:tc:opendocument:xmlns:manifest:1.0";
+    private static readonly XNamespace OdfStyle = "urn:oasis:names:tc:opendocument:xmlns:style:1.0";
 
     private const string OdfPrefix = "application/vnd.oasis.opendocument.";
 
@@ -60,6 +61,13 @@ internal static partial class OfficeConvert
         using var f = SafeFile.OpenRead(path);
         using var zip = new ZipArchive(f, ZipArchiveMode.Read);
         return OdfMime(zip) is not null || zip.GetEntry("META-INF/manifest.xml") is not null;
+    }
+
+    private static bool HasContentTypes(string path)
+    {
+        using var f = SafeFile.OpenRead(path);
+        using var zip = new ZipArchive(f, ZipArchiveMode.Read);
+        return zip.GetEntry("[Content_Types].xml") is not null;
     }
 
     private static string? OdfMime(ZipArchive zip)
@@ -96,17 +104,33 @@ internal static partial class OfficeConvert
         var manifestEntry = zip.GetEntry("META-INF/manifest.xml") ?? throw new UnsafeDocumentException("no manifest");
         XDocument manifest = ParseOdfPart(manifestEntry);
         if (manifest.Descendants(OdfManifest + "encryption-data").Any()) throw new UnsafeDocumentException("encrypted ODF");
+        // A sub-document loads its own module: a spreadsheet brings formulas that fetch, a presentation its
+        // sounds. Charts, formulas, drawings and text are what a text document embeds. The manifest may name
+        // a folder with or without its trailing slash; a folder it does not name at all is not trusted.
+        var folderTypes = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var fe in manifest.Descendants(OdfManifest + "file-entry"))
         {
             string full = (string?)fe.Attribute(OdfManifest + "full-path") ?? "";
             string type = (string?)fe.Attribute(OdfManifest + "media-type") ?? "";
             // LibreOffice reads the type from the manifest too: it must agree with mimetype.
-            if (full == "/" && type != mime) throw new UnsafeDocumentException($"manifest type {type} differs from mimetype {mime}");
-            // A sub-document loads its own module: a spreadsheet brings formulas that fetch, a presentation
-            // its sounds. Charts, formulas, drawings and text are what a text document embeds.
-            if (full.EndsWith('/') && full != "/" && !SubDocumentOk(type) && !IsCodeStorage(full))
-                throw new UnsafeDocumentException($"embedded {type} at {full}");
+            if (full == "/") { if (type != mime) throw new UnsafeDocumentException($"manifest type {type} differs from mimetype {mime}"); continue; }
+            folderTypes[full.TrimEnd('/')] = type;
         }
+        var folders = zip.Entries.Select(e => e.FullName).Where(n => n.Contains('/'))
+            .SelectMany(n => { var segs = n.Split('/'); return Enumerable.Range(1, segs.Length - 1).Select(i => string.Join('/', segs.Take(i))); })
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (string folder in folders)
+        {
+            if (IsCodeStorage(folder + "/") || folder.Equals("META-INF", StringComparison.OrdinalIgnoreCase)) continue;
+            bool isDocument = zip.GetEntry(folder + "/content.xml") is not null;
+            folderTypes.TryGetValue(folder, out string? type);
+            if (type is not null && !SubDocumentOk(type)) throw new UnsafeDocumentException($"embedded {type} at {folder}");
+            if (isDocument && string.IsNullOrEmpty(type)) throw new UnsafeDocumentException($"sub-document {folder} without a known type");
+        }
+        // Also by name without a folder: an entry "Object 1" typed as a document but stored as one stream.
+        foreach (var (entryPath, type) in folderTypes)
+            if (!folders.Contains(entryPath) && type.StartsWith(OdfPrefix, StringComparison.Ordinal) && !SubDocumentOk(type))
+                throw new UnsafeDocumentException($"embedded {type} at {entryPath}");
         // An OLE object (binary storage, or inline in the XML) cannot be looked into; on Windows LibreOffice
         // may start its server to draw it, and it can carry a link moniker to a share.
         foreach (var e in zip.Entries.Where(e => !e.FullName.EndsWith('/')))
@@ -117,6 +141,8 @@ internal static partial class OfficeConvert
             if (got >= 8 && head.SequenceEqual(OleSignature)) throw new UnsafeDocumentException($"OLE object {e.FullName}");
             // A gzip part (an .svgz picture) is opened by the SVG importer by its content; it is not read here.
             if (got >= 2 && head[0] == 0x1F && head[1] == 0x8B) throw new UnsafeDocumentException($"compressed part {e.FullName}");
+            // A package inside the package: real ODF stores sub-documents as folders, never as a nested ZIP.
+            if (got >= 4 && head[0] == 'P' && head[1] == 'K' && head[2] == 3 && head[3] == 4) throw new UnsafeDocumentException($"nested package {e.FullName}");
         }
 
         // Code and signatures go as a whole; a storage counts once.
@@ -147,7 +173,8 @@ internal static partial class OfficeConvert
             }
             catch (System.Xml.XmlException ex)
             {
-                if (!xmlByName) continue; // looked like markup but is not XML (a text file, say): nobody parses it as a part
+                // Markup this parser rejects (an internal DTD entity, XML 1.1) may still be read by another
+                // parser, an SVG importer say, with whatever it hides: refused, never passed on uncleaned.
                 throw new UnsafeDocumentException($"part {name} is not well-formed XML ({ex.Message})");
             }
             bool changed = CleanOdfXml(xml, PartDir(name), names, report);
@@ -258,8 +285,8 @@ internal static partial class OfficeConvert
             // not read here, so the document is refused rather than passed on with it.
             if (el.Name == OdfOffice + "binary-data" && !IsRasterBase64(el.Value))
                 throw new UnsafeDocumentException("inline object that is not a raster picture");
-            // CSS in SVG pictures (a <style> sheet or a style attribute) can load from an address too.
-            if (el.Name.LocalName == "style" && el.Name.Namespace.NamespaceName.Contains("svg", StringComparison.OrdinalIgnoreCase) && FetchesCss(el.Value))
+            // CSS in SVG pictures (a <style> sheet in any namespace but ODF's own style elements) can load from an address too.
+            if (el.Name.LocalName == "style" && el.Name.Namespace != OdfStyle && FetchesCss(el.Value))
                 throw new UnsafeDocumentException("style sheet that loads from an address");
 
             foreach (var attr in el.Attributes().ToList())
@@ -271,8 +298,9 @@ internal static partial class OfficeConvert
                     changed = true;
                     continue;
                 }
-                if (attr.Name.LocalName == "style" && FetchesCss(attr.Value))
-                    throw new UnsafeDocumentException("style attribute that loads from an address");
+                // style="", and presentation attributes (fill, filter, mask, clip-path, marker-*) that take url().
+                if (FetchesCss(attr.Value))
+                    throw new UnsafeDocumentException($"attribute {attr.Name.LocalName} that loads from an address");
                 if (FormSourceAttributes.Contains(attr.Name))
                 {
                     attr.Remove();
@@ -310,14 +338,27 @@ internal static partial class OfficeConvert
             || h.StartsWith("smb:", StringComparison.OrdinalIgnoreCase) || (h.Length >= 2 && h[1] is ':' or '|');
     }
 
-    /// <summary>CSS that imports a sheet or uses url() for anything but a place in the same picture.</summary>
+    /// <summary>
+    /// CSS that imports a sheet or uses url() for anything but a place in the same picture or inline data.
+    /// Escapes ("\75 rl(") and comments are undone first, so they cannot hide either.
+    /// </summary>
     private static bool FetchesCss(string css)
     {
+        if (css.IndexOf('\\') >= 0) css = CssEscape.Replace(css, m => m.Groups[1].Success
+            ? char.ConvertFromUtf32(Math.Min(0x10FFFF, System.Convert.ToInt32(m.Groups[1].Value, 16)))
+            : m.Groups[2].Value);
+        if (css.Contains("/*", StringComparison.Ordinal)) css = CssComment.Replace(css, "");
         if (css.Contains("@import", StringComparison.OrdinalIgnoreCase)) return true;
         foreach (System.Text.RegularExpressions.Match m in CssUrl.Matches(css))
-            if (!m.Groups[1].Value.TrimStart().StartsWith('#')) return true;
+        {
+            string target = m.Groups[1].Value.TrimStart();
+            if (!target.StartsWith('#') && !target.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return true;
+        }
         return false;
     }
+
+    private static readonly System.Text.RegularExpressions.Regex CssEscape = new(@"\\(?:([0-9a-fA-F]{1,6})\s?|(.))", System.Text.RegularExpressions.RegexOptions.Singleline);
+    private static readonly System.Text.RegularExpressions.Regex CssComment = new(@"/\*.*?\*/", System.Text.RegularExpressions.RegexOptions.Singleline);
 
     private static readonly System.Text.RegularExpressions.Regex CssUrl = new(
         @"url\s*\(\s*['""]?([^'"")]*)", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
