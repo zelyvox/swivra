@@ -254,12 +254,9 @@ internal static class PdfActions
     private static List<string> HideWarnings(PdfRedact.Outcome o)
     {
         var w = new List<string>();
-        if (o.OcrImagePages > 0)
-            w.Add(Lang.T($"{o.OcrImagePages} sayfadaki görseller otomatik okundu; el yazısı, çok küçük ya da bulanık yazı kaçabilir, gözle kontrol et",
-                         $"images on {o.OcrImagePages} page(s) were read automatically; handwriting, very small or blurry text can be missed, check them by eye"));
-        if (o.OcrTextPages > 0)
-            w.Add(Lang.T($"{o.OcrTextPages} sayfada okunamayan metin görüntüden otomatik okundu; kaçan olabilir, gözle kontrol et",
-                         $"unreadable text on {o.OcrTextPages} page(s) was read automatically from the page image; some can be missed, check it by eye"));
+        if (o.OcrPages > 0)
+            w.Add(Lang.T($"{o.OcrPages} sayfa görüntüden otomatik okundu; el yazısı, çok küçük ya da bulanık yazı kaçabilir, gözle kontrol et",
+                         $"{o.OcrPages} page(s) were read automatically from the page image; handwriting, very small or blurry text can be missed, check them by eye"));
         if (o.ImagePages > 0)
             w.Add(Lang.T($"{o.ImagePages} sayfadaki görseller okunamadı, gözle kontrol et", $"images on {o.ImagePages} page(s) could not be read, check them by eye"));
         if (o.UnreadPages > 0)

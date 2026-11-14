@@ -43,12 +43,11 @@ internal static class PdfRedact
     /// <param name="Items">Number of matches covered (page text, notes and form fields, text read by OCR).</param>
     /// <param name="Written">True when the redacted file was written: there were matches, or notes had to be left out.</param>
     /// <param name="ImagePages">Pages with images large enough to hold text that OCR could not read: not checked at all.</param>
-    /// <param name="UnreadPages">Pages with text that is drawn but not searchable, and that OCR could not read either: letters without a usable Unicode value (Type 3, broken or unmapped fonts), text or images inside a pattern, a Type 3 glyph or a soft mask, or a page whose PDFium text layer could not be loaded.</param>
+    /// <param name="UnreadPages">Pages with text that is drawn but not searchable, and that OCR could not read either: letters without a usable Unicode value (Type 3, broken or unmapped fonts), text or images inside a pattern, a Type 3 glyph or a soft mask, a page whose PDFium text layer could not be loaded, or a page without letters or images (text drawn as shapes) that OCR was sent and could not read.</param>
     /// <param name="LeftOutPages">The file could not be flattened: pages whose visible notes and form fields were left out of the output.</param>
     /// <param name="NoLookPages">Pages with visible notes or form fields that have no appearance of their own: flattening drops them.</param>
-    /// <param name="OcrImagePages">Pages whose images (or, on a page without letters, whose drawing) OCR read: what it found is hidden, but it can miss text.</param>
-    /// <param name="OcrTextPages">Pages whose unsearchable text OCR read from the drawn page instead: the same, for text.</param>
-    public sealed record Outcome(int Items, bool Written, int ImagePages, int UnreadPages, int LeftOutPages, int NoLookPages, int OcrImagePages = 0, int OcrTextPages = 0);
+    /// <param name="OcrPages">Pages OCR read from the drawn page (their images, their unsearchable text, or a page without letters that it saw text on): what it found is hidden, but it can miss text.</param>
+    public sealed record Outcome(int Items, bool Written, int ImagePages, int UnreadPages, int LeftOutPages, int NoLookPages, int OcrPages = 0);
 
     /// <summary>PDFium drew a page at a different size than the page box the boxes were measured in: painting would miss.</summary>
     public sealed class AlignmentException(int page) : Exception($"rendered size of page {page} does not match its page box")
@@ -134,27 +133,22 @@ internal static class PdfRedact
         var (ocrItems, sight) = ReadPictures(bytes, perPage, foundPerPage, targets);
         items += ocrItems;
 
-        int imagePages = 0, unreadPages = 0, ocrImagePages = 0, ocrTextPages = 0;
+        int imagePages = 0, unreadPages = 0, ocrPages = 0;
         for (int i = 0; i < perPage.Count; i++)
         {
-            // Read by OCR, which can still miss text: a look by eye stays asked for. Images partly outside the drawn
-            // page were not read whole and keep the plain warning. A page without letters or images that OCR found
-            // blank (or saw only shapes on) had nothing to read, as before.
-            bool read = sight[i] is Sight.Read or Sight.ReadText;
-            if (pictures[i])
-            {
-                if (read && !unseen[i]) ocrImagePages++;
-                else imagePages++;
-            }
-            if (unread[i])
-            {
-                if (!read) unreadPages++;
-                else if (!pictures[i] || unseen[i]) ocrTextPages++;
-            }
-            else if (!pictures[i] && textless[i] && sight[i] == Sight.ReadText) ocrImagePages++;
+            // Read by OCR, which can still miss text: a look by eye stays asked for, once per page whatever was read
+            // there. Images partly outside the drawn page were not read whole and keep the plain warning. Every page
+            // sent to OCR and not read gets a "could not be read" warning: its images, its text, or (a page without
+            // letters or images, text drawn as shapes) its drawing. A page OCR found blank or saw only shapes on had
+            // nothing to read, as before.
+            bool sent = targets[i] is not null, read = sight[i] is Sight.Read or Sight.ReadText;
+            if (pictures[i] && !(read && !unseen[i])) imagePages++;
+            if (unread[i] && !read) unreadPages++;
+            else if (sent && !read && !pictures[i]) unreadPages++;
+            if (read && ((pictures[i] && !unseen[i]) || unread[i] || (!pictures[i] && textless[i] && sight[i] == Sight.ReadText))) ocrPages++;
         }
         bool written = items > 0 || leftOutPages > 0 || perPage.Any(p => p.Shapes.Count > 0);
-        if (!written) return new Outcome(0, false, imagePages, unreadPages, 0, noLookPages, ocrImagePages, ocrTextPages);
+        if (!written) return new Outcome(0, false, imagePages, unreadPages, 0, noLookPages, ocrPages);
 
         using var output = new PdfSharp.Pdf.PdfDocument();
         output.Info.Creator = "Swivra";
@@ -190,7 +184,7 @@ internal static class PdfRedact
             gfx.DrawImage(xi, 0, 0, pb.W, pb.H);
         }
         output.Save(target);
-        return new Outcome(items, true, imagePages, unreadPages, leftOutPages, noLookPages, ocrImagePages, ocrTextPages);
+        return new Outcome(items, true, imagePages, unreadPages, leftOutPages, noLookPages, ocrPages);
     }
 
     /// <summary>The flattened copy for PdfPig, or null (notes and fields are then left out) when it does not read back whole.</summary>
