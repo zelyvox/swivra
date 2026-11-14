@@ -469,7 +469,7 @@ internal static class DocActions
 
     /// <summary>
     /// Masks every place a .docx keeps text, not only what Word shows: all story parts (body, headers, footers,
-    /// footnotes, endnotes, comments, building blocks), tracked deletions, field codes and equations, legacy
+    /// footnotes, endnotes, comments, building blocks with their own notes, comments and settings), tracked deletions, field codes and equations, legacy
     /// form-field texts, alt text, link targets, document variables and mail-merge settings, document
     /// properties, the custom XML that content controls are bound to (Word refills a bound control from it on
     /// open), SmartArt and chart text, and embedded Word, Excel and PowerPoint files. Photos lose their EXIF/XMP
@@ -496,6 +496,9 @@ internal static class DocActions
         private readonly HashSet<string> _values = new(StringComparer.OrdinalIgnoreCase);
         public int Unchecked;
         public readonly HashSet<OpenXmlPart> Seen = new(); // embedded sections already masked or counted
+        public readonly HashSet<OpenXmlPart> Handled = new(); // story, settings and property parts actually masked
+        // altChunk part -> its text as paragraphs (null: masked in place as a package, or counted), shared by every story that imports it
+        public readonly Dictionary<AlternativeFormatImportPart, List<string>?> Chunks = new();
         public int Depth; // embedded packages currently open, one inside the other
         public int Count => _values.Count;
 
@@ -521,13 +524,21 @@ internal static class DocActions
     {
         var main = doc.MainDocumentPart ?? throw new DocFailure(Lang.T("Olmadı", "Failed"), Lang.T("Word dosyası açılamadı", "Could not open the Word file"));
 
+        var glossary = main.GlossaryDocumentPart;
         var stories = new List<OpenXmlPart> { main };
         stories.AddRange(main.HeaderParts);
         stories.AddRange(main.FooterParts);
         if (main.FootnotesPart is { } fn) stories.Add(fn);
         if (main.EndnotesPart is { } en) stories.Add(en);
         if (main.WordprocessingCommentsPart is { } cm) stories.Add(cm);
-        if (main.GlossaryDocumentPart is { } gl) stories.Add(gl);
+        if (glossary is not null)
+        {
+            // The building blocks are a document of their own, with their own notes and comments.
+            stories.Add(glossary);
+            if (glossary.FootnotesPart is { } gfn) stories.Add(gfn);
+            if (glossary.EndnotesPart is { } gen) stories.Add(gen);
+            if (glossary.WordprocessingCommentsPart is { } gcm) stories.Add(gcm);
+        }
         foreach (var part in stories) FlattenAltChunks(part, c); // their text then gets masked with the story
         foreach (var part in stories)
         {
@@ -549,37 +560,44 @@ internal static class DocActions
             MaskAttributes(root, name => name is "descr" or "title" or "alt", c);
             MaskHyperlinks(part, c);
             root.Save();
+            c.Handled.Add(part);
         }
 
         // Document variables and the mail-merge connection (query, data source) live in settings.xml.
-        if (main.DocumentSettingsPart?.Settings is { } settings)
+        foreach (var settingsPart in new[] { main.DocumentSettingsPart, glossary?.DocumentSettingsPart })
         {
+            if (settingsPart?.Settings is not { } settings) continue;
             foreach (var e in settings.Elements().Where(e => e is DocumentVariables or MailMerge))
                 MaskAttributes(e, name => name == "val", c);
             settings.Save();
+            c.Handled.Add(settingsPart);
         }
         // Co-authors signed in with a work account are stored as "S::name@company.com::guid".
-        if (main.WordprocessingPeoplePart?.RootElement is OpenXmlPartRootElement people)
+        foreach (var peoplePart in new[] { main.WordprocessingPeoplePart, glossary?.WordprocessingPeoplePart })
         {
+            if (peoplePart?.RootElement is not OpenXmlPartRootElement people) continue;
             MaskAttributes(people, _ => true, c);
             people.Save();
+            c.Handled.Add(peoplePart);
         }
         foreach (var part in main.CustomXmlParts)
             MaskXmlPart(part, c);
 
         MaskProperties(doc, c);
-        MaskInnerParts(doc, c);
         if (doc.ThumbnailPart is { } thumb) doc.DeletePart(thumb);
+        MaskInnerParts(doc, c);
     }
 
     /// <summary>Excel embedded in a document (or behind a chart): shared strings, cells, comments, properties.</summary>
     private static void MaskExcel(SpreadsheetDocument doc, Covered c)
     {
         if (doc.WorkbookPart is not { } wb) return;
+        c.Handled.Add(wb); // read for its sheets; sheet and range names stay (formulas and charts point at them)
         if (wb.SharedStringTablePart?.SharedStringTable is { } sst)
         {
             foreach (var item in sst.Elements<SharedStringItem>()) MaskRuns<SText>(item, c, preserveSpace: true);
             sst.Save();
+            c.Handled.Add(wb.SharedStringTablePart);
         }
         foreach (var ws in wb.WorksheetParts)
         {
@@ -598,13 +616,16 @@ internal static class DocActions
                 cell.InlineString = new InlineString(new SText(masked));
             }
             ws.Worksheet.Save();
+            c.Handled.Add(ws);
             if (ws.WorksheetCommentsPart?.Comments is { } comments)
             {
                 foreach (var ct in comments.Descendants<CommentText>()) MaskRuns<SText>(ct, c, preserveSpace: true);
                 comments.Save();
+                c.Handled.Add(ws.WorksheetCommentsPart);
             }
         }
         MaskProperties(doc, c);
+        if (doc.ThumbnailPart is { } thumb) doc.DeletePart(thumb); // a picture of the unmasked sheet
         MaskInnerParts(doc, c);
     }
 
@@ -612,6 +633,7 @@ internal static class DocActions
     private static void MaskPowerPoint(PresentationDocument doc, Covered c)
     {
         if (doc.PresentationPart is not { } pres) return;
+        c.Handled.Add(pres); // read for its slides
         var parts = new List<OpenXmlPart>();
         foreach (var slide in pres.SlideParts)
         {
@@ -625,8 +647,10 @@ internal static class DocActions
             MaskAttributes(root, name => name is "descr" or "title", c);
             MaskHyperlinks(part, c);
             root.Save();
+            c.Handled.Add(part);
         }
         MaskProperties(doc, c);
+        if (doc.ThumbnailPart is { } thumb) doc.DeletePart(thumb); // a picture of the unmasked first slide
         MaskInnerParts(doc, c);
     }
 
@@ -648,8 +672,12 @@ internal static class DocActions
                 case ChartPart or ChartDrawingPart or DiagramDataPart or DiagramPersistLayoutPart or DrawingsPart
                     or SlideLayoutPart or SlideMasterPart or NotesMasterPart or HandoutMasterPart: MaskDrawingText(part, c); break;
                 case ExtendedChartPart chartEx: MaskChartEx(chartEx, c); break;
-                // An embedded section no story points at (or one in a package this code does not flatten).
-                case AlternativeFormatImportPart chunk: if (c.Seen.Add(chunk)) c.Unchecked++; break;
+                // An embedded section still here after every story was flattened: some other part points at
+                // it. Its text is masked in place when it was read; one never read is counted.
+                case AlternativeFormatImportPart chunk:
+                    if (c.Chunks.TryGetValue(chunk, out var chunkLines) && chunkLines is not null) MaskChunkInPlace(chunk, chunkLines, c);
+                    else if (c.Seen.Add(chunk)) c.Unchecked++;
+                    break;
                 case CustomXmlPart xmlPart: MaskXmlPart(xmlPart, c); break; // also those outside the main document
                 case NumberingDefinitionsPart numbering when numbering.Numbering is { } list:
                     // A list label can hold literal text ("ID %1:").
@@ -661,11 +689,15 @@ internal static class DocActions
                     MaskAttributes(t, name => name is "name" or "displayName", c);
                     t.Save();
                     break;
-                // Handled where the document, workbook or presentation is read.
+                // Masked where the document, workbook or presentation is read; one of these that was not
+                // reached there (a story below a part this code does not read, say) is counted, not passed.
                 case MainDocumentPart or HeaderPart or FooterPart or FootnotesPart or EndnotesPart or WordprocessingCommentsPart
                     or GlossaryDocumentPart or DocumentSettingsPart or WordprocessingPeoplePart or CoreFilePropertiesPart
                     or ExtendedFilePropertiesPart or CustomFilePropertiesPart or ThumbnailPart or WorkbookPart or WorksheetPart
                     or SharedStringTablePart or WorksheetCommentsPart or PresentationPart or SlidePart or NotesSlidePart:
+                    if (c.Handled.Contains(part)) break;
+                    Log.Write($"hide: part {part.Uri} ({part.ContentType}) not reached");
+                    c.Unchecked++;
                     break;
                 // Formatting, ids and settings: no text of the user's.
                 case StyleDefinitionsPart or StylesWithEffectsPart or FontTablePart or FontPart or ThemePart or ThemeOverridePart
@@ -690,50 +722,59 @@ internal static class DocActions
     /// A .docx is masked in place like an embedded file. HTML, MHT and text become plain paragraphs in
     /// place of the chunk, which the story's own masking then covers (their formatting goes; their text
     /// cannot be masked inside the markup with confidence). Anything else (RTF) counts as not checked.
+    /// A part several stories import (the body and a header, say) is read once and flattened in each of
+    /// them; once no story points at it any more it leaves the package.
     /// </summary>
     private static void FlattenAltChunks(OpenXmlPart story, Covered c)
     {
         if (story.RootElement is not OpenXmlPartRootElement root) return;
-        var lines = new Dictionary<AlternativeFormatImportPart, List<string>>();
+        var flattened = new HashSet<AlternativeFormatImportPart>();
         foreach (var chunk in root.Descendants<AltChunk>().ToList())
         {
             if (chunk.Id?.Value is not string id || !story.TryGetPartById(id, out var target) || target is not AlternativeFormatImportPart part) continue; // imports nothing
-            if (!lines.TryGetValue(part, out var text))
-            {
-                if (c.Seen.Contains(part)) continue; // a package masked in place, or counted already
-                text = ChunkLines(part, c);
-                if (text is null) continue;
-                lines[part] = text;
-            }
+            if (!c.Chunks.TryGetValue(part, out var text)) c.Chunks[part] = text = ChunkLines(part, c);
+            if (text is null) continue; // a package masked in place, or counted once
             if (text.Count == 0) chunk.InsertBeforeSelf(new Paragraph()); // a table cell must keep a paragraph
             foreach (string line in text) chunk.InsertBeforeSelf(new Paragraph(new Run(new Text(line) { Space = SpaceProcessingModeValues.Preserve })));
             chunk.Remove();
+            flattened.Add(part);
         }
-        foreach (var part in lines.Keys) story.DeletePart(part);
+        foreach (var part in flattened) story.DeletePart(part);
     }
 
     /// <summary>The text of an altChunk as lines; null when it was masked in place as a package or could not be read (then counted).</summary>
     private static List<string>? ChunkLines(AlternativeFormatImportPart part, Covered c)
     {
-        c.Seen.Add(part);
         byte[] data;
         using (var s = part.GetStream(FileMode.Open, FileAccess.Read))
         {
-            if (s.Length > MaxChunkBytes) { c.Unchecked++; return null; }
+            if (s.Length > MaxChunkBytes) { c.Seen.Add(part); c.Unchecked++; return null; }
             using var ms = new MemoryStream();
             s.CopyTo(ms);
             data = ms.ToArray();
         }
         if (data.Length >= 4 && data[0] == 'P' && data[1] == 'K' && data[2] == 3 && data[3] == 4)
         {
+            c.Seen.Add(part);
             MaskEmbedded(part, c);
             return null;
         }
         // RTF would come out as its own control words.
         string head = Encoding.Latin1.GetString(data, 0, Math.Min(data.Length, 64)).TrimStart('﻿', 'ï', '»', '¿', ' ', '\t', '\r', '\n');
         var text = head.StartsWith(@"{\rt", StringComparison.Ordinal) ? null : ChunkText.Lines(data);
-        if (text is null) c.Unchecked++;
+        if (text is null) { c.Seen.Add(part); c.Unchecked++; }
         return text;
+    }
+
+    /// <summary>
+    /// A flattened section some part other than a story still points at: its markup is replaced by its
+    /// text, masked, so no copy of what it held stays in the file.
+    /// </summary>
+    private static void MaskChunkInPlace(AlternativeFormatImportPart part, List<string> lines, Covered c)
+    {
+        string text = string.Join("\r\n", lines.Select(line => c.Mask(line)));
+        using var ms = new MemoryStream(Encoding.UTF8.GetBytes(text));
+        part.FeedData(ms);
     }
 
     /// <summary>
@@ -843,16 +884,19 @@ internal static class DocActions
         pp.Description = c.Mask(pp.Description);
         pp.LastModifiedBy = c.Mask(pp.LastModifiedBy);
         pp.Category = c.Mask(pp.Category);
+        foreach (var core in package.GetPartsOfType<CoreFilePropertiesPart>()) c.Handled.Add(core);
         // Only string-typed values can take the mask; a number or date holding a value (an ID stored as
         // vt:r8, say) would make the file invalid, so that custom property is removed instead.
-        if (package.GetPartsOfType<ExtendedFilePropertiesPart>().FirstOrDefault()?.Properties is { } app)
+        if (package.GetPartsOfType<ExtendedFilePropertiesPart>().FirstOrDefault() is { Properties: { } app } appPart)
         {
             foreach (var t in app.Descendants<OpenXmlLeafTextElement>().Where(IsStringProperty))
                 t.Text = c.Mask(t.Text)!;
             app.Save();
+            c.Handled.Add(appPart);
         }
-        if (package.GetPartsOfType<CustomFilePropertiesPart>().FirstOrDefault()?.Properties is { } custom)
+        if (package.GetPartsOfType<CustomFilePropertiesPart>().FirstOrDefault() is { Properties: { } custom } customPart)
         {
+            c.Handled.Add(customPart);
             foreach (var prop in custom.Elements<DocumentFormat.OpenXml.CustomProperties.CustomDocumentProperty>().ToList())
             {
                 if (prop.FirstChild is not OpenXmlLeafTextElement value) continue;
