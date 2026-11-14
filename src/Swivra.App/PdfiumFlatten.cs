@@ -26,6 +26,11 @@ internal static class Pdfium
         return default;
     }
 
+    /// <summary>Takes the gate only if it is free within <paramref name="wait"/> (for work that must not keep anyone waiting); release it with <see cref="Exit"/>.</summary>
+    public static bool TryEnter(TimeSpan wait) => Monitor.TryEnter(Gate, wait);
+
+    public static void Exit() => Monitor.Exit(Gate);
+
     public readonly struct Held : IDisposable
     {
         public void Dispose() => Monitor.Exit(Gate);

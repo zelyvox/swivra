@@ -246,8 +246,13 @@ internal static partial class Radar
     {
         try
         {
+            byte[] bytes = SafeFile.ReadAll(path);
+            using var doc = UglyToad.PdfPig.PdfDocument.Open(bytes);
+            PdfTree.Check(doc);   // before any page content is read: a looping tree would end the app, not throw
+            var pages = doc.GetPages().Take(MaxPdfPages).ToList();
             // Symbol-font characters folded back, as Hide searches them: digits in such a font are found too.
-            ScanText(PdfRedact.Fold(string.Join("\n", PdfActions.ExtractPages(path, MaxPdfPages))), found);
+            ScanText(PdfRedact.Fold(string.Join("\n", pages.Select(p => UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor.ContentOrderTextExtractor.GetText(p)))), found);
+            ScanPdfImageText(path, bytes, doc, pages, found);
         }
         catch (PdfTree.TreeException ex)
         {
@@ -259,6 +264,58 @@ internal static partial class Radar
         {
             Log.Write($"radar pdf skipped {path}: {ex.Message}"); // password or corrupt: no findings
         }
+    }
+
+    // Text in a PDF's images and on its pages without letters (scans), read while the file is dragged: the first few
+    // such pages only, drawn small, all within this time; whatever does not fit adds no findings.
+    private static readonly TimeSpan PdfImageTextBudget = TimeSpan.FromSeconds(3);
+    private const int PdfImageTextPages = 3;
+    private const int PdfImageTextDpi = 150;
+    private const int PdfImageTextMaxPixels = 2_000_000;
+    // The radar never waits behind another PDF job for the engine.
+    private static readonly TimeSpan PdfEngineWait = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>OCR over the image areas (or the whole page, without letters) of the first pages that have some.</summary>
+    private static void ScanPdfImageText(string path, byte[] bytes, UglyToad.PdfPig.PdfDocument doc, List<UglyToad.PdfPig.Content.Page> pages, List<string> found)
+    {
+        if (found.Count >= 4) return;   // every kind already found: OCR cannot add one
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        int done = 0;
+        var kinds = new List<HitKind>();
+        var options = new PDFtoImage.RenderOptions(Dpi: PdfImageTextDpi, WithAnnotations: false, WithFormFill: false);
+        try
+        {
+            foreach (var page in pages)
+            {
+                if (done >= PdfImageTextPages || clock.Elapsed >= PdfImageTextBudget || kinds.Distinct().Count() == 4) break;
+                var areas = PdfRedact.OcrAreas(doc, page);
+                if (areas.Count == 0) continue;
+                done++;
+                SkiaSharp.SKBitmap bmp;
+                using (var ms = new MemoryStream(bytes))
+                {
+                    if (!Pdfium.TryEnter(PdfEngineWait)) { Log.Write($"radar pdf image text skipped {path}: PDF engine busy"); return; }
+                    try { bmp = PDFtoImage.Conversion.ToImage(ms, page.Number - 1, options: options); }
+                    finally { Pdfium.Exit(); }
+                }
+                using (bmp)
+                {
+                    foreach (var a in areas)
+                    {
+                        TimeSpan left = PdfImageTextBudget - clock.Elapsed;
+                        if (left <= TimeSpan.Zero) break;
+                        var seen = PdfRedact.ReadArea(bmp, a, left, PdfImageTextMaxPixels, out _);
+                        if (seen is not null) kinds.AddRange(seen.Select(f => f.Kind));
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            Log.Write($"radar pdf image text skipped {path}: {ex.GetType().Name}: {ex.Message}");
+        }
+        Log.Write($"radar pdf image text: {done} page(s) in {clock.ElapsedMilliseconds} ms");
+        AddKinds(kinds, found);
     }
 
     public enum HitKind { Tc, Iban, Email, Phone }
