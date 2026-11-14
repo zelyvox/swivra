@@ -541,60 +541,153 @@ internal static class PdfRedact
     /// <summary>
     /// Boxes to paint for one page, in the drawn page (points, origin top-left).
     /// The text is rebuilt from the letters in drawing order (a space wherever the letters are not neighbours),
-    /// so it works for rotated pages and for IBANs or phone numbers written with spaces; each matched character maps back to its letter box.
+    /// so it works for rotated pages and for IBANs or phone numbers written with spaces; each matched character maps
+    /// back to its letter box. Then once more in reading order (<see cref="ReadingText"/>), for numbers whose digits
+    /// were drawn out of order; a match there counts only when drawing order had not matched all of its letters.
     /// </summary>
     /// <param name="grow">Distance (page units) by which PDFium may draw a letter away from where PdfPig puts it: see <see cref="RiseDrift"/>.</param>
     private static (List<XRect> Boxes, int Count, HashSet<string> Found) Locate(Page page, PageMap map, double grow)
     {
-        var rects = new List<PdfRectangle?>();   // one entry per character of the text; null for separators
-        string text = PageText(page, rects, grow);
+        var letters = page.Letters;
+        var cover = new Dictionary<int, XRect>();
+        XRect Box(int i)
+        {
+            if (cover.TryGetValue(i, out XRect b)) return b;
+            var r = CoverBox(letters[i]);
+            if (grow > 0) r = new PdfRectangle(r.Left - grow, r.Bottom - grow, r.Right + grow, r.Top + grow);
+            return cover[i] = map.Map(r);
+        }
 
         var boxes = new List<XRect>();
-        var hits = Radar.FindAll(text);
         var found = new HashSet<string>();
-        foreach (var hit in hits)
+        var matched = new HashSet<int>();   // letters inside a match in drawing order
+        int count = 0;
+        for (int pass = 0; pass < 2; pass++)
         {
-            found.Add(Key(text, hit));
-            XRect? run = null;
-            for (int i = hit.Index; i < hit.Index + hit.Length; i++)
+            var at = new List<int>();   // letter of each character of the text; -1 for separators
+            string text = Fold(pass == 0 ? Spell(letters, at) : ReadingText(letters, at));
+            foreach (var hit in Radar.FindAll(text))
             {
-                if (rects[i] is not PdfRectangle r) continue;
-                XRect cur = map.Map(r);
-                if (run is XRect p && Overlaps(p, cur)) run = Union(p, cur);
-                else
+                var mine = Enumerable.Range(hit.Index, hit.Length).Select(c => at[c]).Where(i => i >= 0).ToList();
+                if (pass == 0) matched.UnionWith(mine);
+                else if (mine.All(matched.Contains)) continue;
+                found.Add(Key(text, hit));
+                count++;
+                XRect? run = null;
+                foreach (int i in mine)
                 {
-                    if (run is XRect done) AddPadded(boxes, done, map.Width, map.Height);
-                    run = cur;
+                    XRect cur = Box(i);
+                    if (run is XRect p && Overlaps(p, cur)) run = Union(p, cur);
+                    else
+                    {
+                        if (run is XRect done) AddPadded(boxes, done, map.Width, map.Height);
+                        run = cur;
+                    }
                 }
+                if (run is XRect last) AddPadded(boxes, last, map.Width, map.Height);
             }
-            if (run is XRect last) AddPadded(boxes, last, map.Width, map.Height);
         }
-        return (boxes, hits.Count, found);
+        return (boxes, count, found);
     }
 
     /// <summary>Page text rebuilt from the letters in drawing order (also used for the text-only Word export of rotated pages); <paramref name="rects"/> gets one box per character.</summary>
     internal static string PageText(Page page, List<PdfRectangle?>? rects = null, double grow = 0)
     {
-        rects ??= [];
+        var at = new List<int>();
+        string text = Spell(page.Letters, at);
+        if (rects is not null)
+            foreach (int i in at)
+            {
+                if (i < 0) { rects.Add(null); continue; }
+                var box = CoverBox(page.Letters[i]);
+                rects.Add(grow > 0 ? new PdfRectangle(box.Left - grow, box.Bottom - grow, box.Right + grow, box.Top + grow) : box);
+            }
+        return text;
+    }
+
+    /// <summary>Text from the letters in drawing order, a space wherever two are not neighbours; <paramref name="at"/> gets each character's letter, -1 for a space.</summary>
+    private static string Spell(IReadOnlyList<Letter> letters, List<int> at)
+    {
         var sb = new StringBuilder();
         Letter? prev = null;
-        foreach (Letter l in page.Letters)
+        for (int i = 0; i < letters.Count; i++)
         {
+            Letter l = letters[i];
             if (string.IsNullOrWhiteSpace(l.Value))
             {
-                if (sb.Length > 0 && rects[^1] is not null) { sb.Append(' '); rects.Add(null); }
+                if (sb.Length > 0 && at[^1] >= 0) { sb.Append(' '); at.Add(-1); }
                 prev = null;
                 continue;
             }
             if (prev is not null)
             {
                 double gap = Math.Sqrt(Math.Pow(l.StartBaseLine.X - prev.EndBaseLine.X, 2) + Math.Pow(l.StartBaseLine.Y - prev.EndBaseLine.Y, 2));
-                if (gap > 0.15 * Math.Max(prev.PointSize, l.PointSize)) { sb.Append(' '); rects.Add(null); }
+                if (gap > 0.15 * Math.Max(prev.PointSize, l.PointSize)) { sb.Append(' '); at.Add(-1); }
             }
-            var box = CoverBox(l);
-            if (grow > 0) box = new PdfRectangle(box.Left - grow, box.Bottom - grow, box.Right + grow, box.Top + grow);
-            foreach (char ch in l.Value) { sb.Append(ch); rects.Add(box); }
+            foreach (char ch in l.Value) { sb.Append(ch); at.Add(i); }
             prev = l;
+        }
+        return sb.ToString();
+    }
+
+    // Letters on one line: their baselines lie closer than this share of the font size.
+    private const double SameLine = 0.3;
+
+    /// <summary>
+    /// Text from the letters as a reader sees them, whatever order they were drawn in (right to left, odd places then
+    /// even ones, a label drawn between the two halves of a number): letters running the same way are grouped into
+    /// lines by their baseline and sorted along it. A space where two are not neighbours, a line break at a wide gap
+    /// (columns) and between lines; a letter drawn twice on the same spot (fake bold) is read once.
+    /// <paramref name="at"/> gets each character's letter, -1 for a separator.
+    /// </summary>
+    private static string ReadingText(IReadOnlyList<Letter> letters, List<int> at)
+    {
+        var byDirection = new SortedDictionary<int, List<(int I, double U0, double U1, double V, double Size)>>();
+        for (int i = 0; i < letters.Count; i++)
+        {
+            Letter l = letters[i];
+            if (string.IsNullOrWhiteSpace(l.Value)) continue;
+            double dx = l.EndBaseLine.X - l.StartBaseLine.X, dy = l.EndBaseLine.Y - l.StartBaseLine.Y;
+            int deg = dx * dx + dy * dy < 1e-12 ? 0 : (((int)Math.Round(Math.Atan2(dy, dx) * 180 / Math.PI)) % 360 + 360) % 360;
+            double a = deg * Math.PI / 180, cos = Math.Cos(a), sin = Math.Sin(a);
+            double u0 = l.StartBaseLine.X * cos + l.StartBaseLine.Y * sin, u1 = l.EndBaseLine.X * cos + l.EndBaseLine.Y * sin;
+            double v = -l.StartBaseLine.X * sin + l.StartBaseLine.Y * cos;
+            if (!byDirection.TryGetValue(deg, out var list)) byDirection[deg] = list = [];
+            list.Add((i, u0, Math.Max(u0, u1), v, l.PointSize > 0 ? l.PointSize : 10));
+        }
+
+        var sb = new StringBuilder();
+        void Break(char c)
+        {
+            if (sb.Length > 0 && at[^1] >= 0) { sb.Append(c); at.Add(-1); }
+            else if (sb.Length > 0 && c == '\n') sb[^1] = '\n';
+        }
+        foreach (var list in byDirection.Values)
+        {
+            list.Sort((p, q) => q.V.CompareTo(p.V));
+            for (int start = 0; start < list.Count;)
+            {
+                int end = start + 1;
+                while (end < list.Count && list[start].V - list[end].V <= SameLine * Math.Max(list[start].Size, list[end].Size)) end++;
+                var line = list.GetRange(start, end - start);
+                line.Sort((p, q) => p.U0.CompareTo(q.U0));
+                (int I, double U0, double U1, double V, double Size)? prev = null;
+                foreach (var cur in line)
+                {
+                    if (prev is { } p)
+                    {
+                        double size = Math.Max(p.Size, cur.Size);
+                        if (letters[p.I].Value == letters[cur.I].Value && Math.Abs(cur.U0 - p.U0) < 0.15 * size && Math.Abs(cur.V - p.V) < 0.15 * size) continue;
+                        double gap = cur.U0 - p.U1;
+                        if (gap > NeighbourReach * size) Break('\n');
+                        else if (gap > 0.15 * size) Break(' ');
+                    }
+                    foreach (char ch in letters[cur.I].Value) { sb.Append(ch); at.Add(cur.I); }
+                    prev = cur;
+                }
+                Break('\n');
+                start = end;
+            }
         }
         return sb.ToString();
     }
