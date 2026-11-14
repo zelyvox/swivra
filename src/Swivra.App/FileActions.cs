@@ -159,7 +159,7 @@ internal static class FileActions
 
     /// <summary>Word's and text files' Hide reports "nothing found" as a failure; in a summary it is a file with nothing to hide.</summary>
     private static bool NothingInDocument(ActionResult r) =>
-        !r.Ok && r.OutputPath is null && r.Title == Lang.T("Gizle", "Hide") && r.Detail.StartsWith(Lang.T("Kapatılacak hassas veri bulunamadı", "No sensitive data found to cover"), StringComparison.Ordinal);
+        !r.Ok && r.OutputPath is null && r.Hidden == 0;
 
     private static ActionResult RunOne(string path, List<string> fileSteps, bool copyPath, StepOptions options)
     {
@@ -197,6 +197,7 @@ internal static class FileActions
                     finalExt = r.OutputExt;
                     finalName = r.Detail;
                     cleaned = r.Cleaned;
+                    hiddenCount = r.Hidden;
                 }
                 else
                 {

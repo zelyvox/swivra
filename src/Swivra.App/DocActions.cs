@@ -431,9 +431,9 @@ internal static class DocActions
         if (count == 0)
         {
             if (made) TryDelete(output);
-            return new ActionResult(false, Lang.T("Gizle", "Hide"), Lang.T("Kapatılacak hassas veri bulunamadı", "No sensitive data found to cover") + skippedNote);
+            return new ActionResult(false, Lang.T("Gizle", "Hide"), Lang.T("Kapatılacak hassas veri bulunamadı", "No sensitive data found to cover") + skippedNote, Hidden: 0);
         }
-        return Done(output, Lang.T($"{count} alan kapatıldı", count == 1 ? "1 item covered" : $"{count} items covered") + skippedNote);
+        return Done(output, Lang.T($"{count} alan kapatıldı", count == 1 ? "1 item covered" : $"{count} items covered") + skippedNote) with { Hidden = count };
     }
 
     /// <summary>Merges overlapping spans and replaces each with the mask.</summary>
