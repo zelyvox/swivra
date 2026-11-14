@@ -124,18 +124,35 @@ internal static class PdfActions
                     case "hide":
                         string hideTarget = StepTarget(i, last, suffix + Lang.T("-gizli", "-redacted"));
                         var hidden = PdfRedact.Hide(input, hideTarget);
+                        var unread = HideWarnings(hidden);
                         if (hidden.Items == 0)
                         {
-                            // Nothing to hide: no file, and the rest of the chain has nothing to work on.
+                            // Nothing found: no redacted file. "Nothing to hide" only when everything could be read.
                             Cleanup([hideTarget]);
                             created.Remove(hideTarget);
-                            string scanNote = hidden.ScanPages > 0 ? " " + Lang.T("Taranmış sayfalar (görsel) okunamadı: OCR yok.", "Scanned pages (images) could not be read: no OCR.") : "";
-                            return new ActionResult(true, Lang.T("Gizle", "Hide"), Lang.T("Gizlenecek bir şey yok.", "Nothing to hide.") + scanNote);
+                            string nothing = unread.Count == 0
+                                ? Lang.T("Gizlenecek bir şey yok", "Nothing to hide")
+                                : Lang.T("Metinde, notlarda ve form alanlarında gizlenecek bir şey bulunamadı", "Nothing to hide found in the text, notes and form fields");
+                            if (steps.Count == 1 || (last && input == path))
+                                return new ActionResult(true, Lang.T("Gizle", "Hide"), JoinNotes(nothing, [.. notes, .. unread]));
+                            // Other steps in the chain still run, on the unredacted file, and the result says so.
+                            notes.Add(unread.Count == 0 ? Lang.T("gizlenecek bir şey yoktu", "there was nothing to hide") : Lang.T("gizlenecek bir şey bulunamadı", "nothing to hide was found"));
+                            notes.AddRange(unread);
+                            // Steps after Hide were allowed on an owner-locked file because Hide rebuilds it; without a rebuild they would blank the pages.
+                            if (steps.Skip(i + 1).Any(RewriteSteps.Contains) && IsEditLocked(input))
+                                return EditLocked() with { Detail = JoinNotes(EditLocked().Detail, notes) };
+                            if (!last) break;
+                            // Earlier steps already produced a file (in temp); it becomes the final output.
+                            string keepHide = FileActions.UniquePath(origDir, name + suffix, "pdf");
+                            SafeFile.CopyWritable(input, keepHide);
+                            created.Add(keepHide);
+                            input = output = keepHide;
+                            break;
                         }
                         suffix += Lang.T("-gizli", "-redacted");
                         input = output = hideTarget;
-                        notes.Add(Lang.T($"{hidden.Items} öğe gizlendi · metin artık seçilemez", $"{hidden.Items} item(s) hidden · text is no longer selectable")
-                            + (hidden.ScanPages > 0 ? " · " + Lang.T($"{hidden.ScanPages} taranmış sayfa okunamadı (OCR yok)", $"{hidden.ScanPages} scanned page(s) not checked (no OCR)") : ""));
+                        notes.Add(Lang.T($"{hidden.Items} öğe gizlendi · metin artık seçilemez", $"{hidden.Items} item(s) hidden · text is no longer selectable"));
+                        notes.AddRange(unread);
                         break;
                     case "docx":
                         var word = PdfWord.Convert(input, origDir, baseName, created);
@@ -170,6 +187,14 @@ internal static class PdfActions
             Log.Write($"pdf io failed {path}: {ex}");
             return new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Dosya işlenemedi", "Could not process the file"));
         }
+        catch (PdfRedact.AlignmentException ex)
+        {
+            Cleanup(created);
+            Log.Write($"pdf hide refused {path}: {ex.Message}");
+            return new ActionResult(false, Lang.T("Gizlenmedi", "Not redacted"),
+                Lang.T($"{ex.Page}. sayfa beklenen boyutta çizilmedi; kutular yanlış yere düşebileceği için gizlenmiş dosya verilmedi",
+                       $"Page {ex.Page} was not drawn at its expected size; no redacted file was made because the boxes could miss"));
+        }
         catch (Exception ex)
         {
             Cleanup(created);
@@ -186,6 +211,17 @@ internal static class PdfActions
     }
 
     private static string JoinNotes(string detail, List<string> notes) => notes.Count == 0 ? detail : $"{detail} · {string.Join(" · ", notes)}";
+
+    /// <summary>What Hide could not read, for the result: images (no OCR) and notes drawn from an appearance only.</summary>
+    private static List<string> HideWarnings(PdfRedact.Outcome o)
+    {
+        var w = new List<string>();
+        if (o.ImagePages > 0)
+            w.Add(Lang.T($"{o.ImagePages} sayfadaki görseller okunmadı (OCR yok), gözle kontrol et", $"images on {o.ImagePages} page(s) were not read (no OCR), check them by eye"));
+        if (o.NotePages > 0)
+            w.Add(Lang.T($"{o.NotePages} sayfadaki notlar okunamadı, gözle kontrol et", $"notes on {o.NotePages} page(s) could not be read, check them by eye"));
+        return w;
+    }
 
     /// <summary>Merges the PDFs in the given order into one file next to the first.</summary>
     public static ActionResult Merge(IReadOnlyList<string> files)

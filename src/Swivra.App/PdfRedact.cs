@@ -1,17 +1,26 @@
 using PdfSharp.Drawing;
 using PdfSharp.Pdf;
-using PdfSharp.Pdf.IO;
 using SkiaSharp;
+using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
+using PigDocument = UglyToad.PdfPig.PdfDocument;
+using PdfRectangle = UglyToad.PdfPig.Core.PdfRectangle;
+using UglyToad.PdfPig.Annotations;
 using UglyToad.PdfPig.Content;
+using UglyToad.PdfPig.Core;
+using UglyToad.PdfPig.Tokens;
 
 namespace Swivra.App;
 
 /// <summary>
-/// Real redaction of what the radar finds. PdfPig locates the matches (letter boxes), PDFium renders every page,
-/// opaque boxes are painted into the pixels and the pages are written as images into a brand-new PDF (PDFsharp).
+/// Real redaction of what the radar finds. PdfPig locates the matches (letter boxes, note texts, form field values),
+/// PDFium renders every page as it is displayed (crop, rotation, notes and filled-in fields included), opaque boxes are
+/// painted into the pixels and the pages are written as images into a brand-new PDF (PDFsharp).
 /// Nothing of the original text, metadata, annotations or form fields survives, so there is nothing to extract.
-/// Embedded images are not read (no OCR): sensitive data inside a scan is NOT found.
+/// Embedded images are not read (no OCR): the outcome counts those pages so the user is told to check them.
+/// A note whose text cannot be read (a stamp, ink or signature that is only a drawing) is left out of the output
+/// and counted too: drawing it could show a number nobody searched.
 /// </summary>
 internal static class PdfRedact
 {
@@ -19,12 +28,24 @@ internal static class PdfRedact
     private const int JpegQuality = 90;
     private const double PadPoints = 1.5;   // box padding around the glyph boxes, in PDF points
 
-    /// <param name="Items">Number of matches covered.</param>
-    /// <param name="ScanPages">Pages that have no text but contain images: they cannot be checked without OCR.</param>
-    public sealed record Outcome(int Items, int ScanPages);
+    // An image smaller than this on the page cannot hold legible text: eleven digits at a barely readable 6 pt
+    // are about 30 pt long and 6 pt tall, and need at least as many pixels. Rules, bullets and spacers stay out;
+    // logos and photos are counted, which only adds a warning.
+    private const double MinImageLong = 30, MinImageShort = 6;
 
-    /// <summary>Everything needed to paint one page: displayed size in points and the boxes (origin top-left), plus the visible (crop) area.</summary>
-    private sealed record PageBoxes(double W, double H, List<XRect> Boxes, XRect Visible);
+    /// <param name="Items">Number of matches covered (page text, notes and form fields).</param>
+    /// <param name="ImagePages">Pages with images large enough to hold text: they cannot be checked without OCR.</param>
+    /// <param name="NotePages">Pages with notes whose text could not be read (stamp, ink, signature...): left out of the output.</param>
+    public sealed record Outcome(int Items, int ImagePages, int NotePages);
+
+    /// <summary>PDFium drew a page at a different size than the page box the boxes were measured in: painting would miss.</summary>
+    public sealed class AlignmentException(int page) : Exception($"rendered size of page {page} does not match its page box")
+    {
+        public int Page { get; } = page;
+    }
+
+    /// <summary>Everything needed to paint one page: displayed size in points, the boxes to black out and the unread notes to leave out (origin top-left).</summary>
+    private sealed record PageBoxes(double W, double H, List<XRect> Boxes, List<XRect> LeaveOut);
 
     /// <summary>
     /// Finds matches on every page; when there are any, writes the redacted image-only PDF to <paramref name="target"/>.
@@ -33,113 +54,307 @@ internal static class PdfRedact
     public static Outcome Hide(string input, string target)
     {
         byte[] bytes = SafeFile.ReadAll(input);
-        var crops = StripCropBoxes(ref bytes);   // PdfPig and PDFium disagree on CropBox offsets: both see the full MediaBox, we crop the pixels ourselves
 
         var perPage = new List<PageBoxes>();
-        int items = 0, scanPages = 0;
-        using (var doc = UglyToad.PdfPig.PdfDocument.Open(bytes))
+        int items = 0, imagePages = 0, notePages = 0;
+        using (var doc = PigDocument.Open(bytes))
         {
             foreach (Page page in doc.GetPages())
             {
-                var (boxes, count) = Locate(page);
-                items += count;
-                if (page.Letters.Count == 0 && page.GetImages().Any()) scanPages++;
-                double w = page.Width, h = page.Height;
-                XRect visible = crops.TryGetValue(page.Number - 1, out var c) ? DisplayCrop(c, page.Rotation.Value, w, h) : new XRect(0, 0, w, h);
-                perPage.Add(new PageBoxes(w, h, boxes, visible));
+                var map = PageMap.For(doc, page);
+                var (boxes, count) = Locate(page, map);
+                var leaveOut = new List<XRect>();
+                int noteCount = LocateNotes(doc, page, map, boxes, leaveOut);
+                items += count + noteCount;
+                if (leaveOut.Count > 0) notePages++;
+                if (page.GetImages().Any(CanHoldText)) imagePages++;
+                perPage.Add(new PageBoxes(map.Width, map.Height, boxes, leaveOut));
             }
         }
-        if (items == 0) return new Outcome(0, scanPages);
+        if (items == 0) return new Outcome(0, imagePages, notePages);
 
-        using var output = new PdfDocument();
+        using var output = new PdfSharp.Pdf.PdfDocument();
         output.Info.Creator = "Swivra";
-        var options = new PDFtoImage.RenderOptions(Dpi: Dpi);
+        // Notes and filled-in fields are drawn: they were searched above, and dropping them would lose real content.
+        var withNotes = new PDFtoImage.RenderOptions(Dpi: Dpi, WithAnnotations: true, WithFormFill: true);
+        var pageOnly = new PDFtoImage.RenderOptions(Dpi: Dpi);
         for (int i = 0; i < perPage.Count; i++)
         {
-            using var ms = new MemoryStream(bytes);
-            using SKBitmap full = PDFtoImage.Conversion.ToImage(ms, i, options: options);
             var pb = perPage[i];
-            double sx = full.Width / pb.W, sy = full.Height / pb.H;
-            using (var canvas = new SKCanvas(full))
+            using SKBitmap bmp = Render(bytes, i, withNotes, pb);
+            double sx = bmp.Width / pb.W, sy = bmp.Height / pb.H;
+            SKRect Px(XRect r) => SKRect.Create((float)(r.X * sx), (float)(r.Y * sy), (float)(r.Width * sx), (float)(r.Height * sy));
+            using (var canvas = new SKCanvas(bmp))
             using (var paint = new SKPaint { Color = SKColors.Black, Style = SKPaintStyle.Fill, IsAntialias = false })
             {
+                if (pb.LeaveOut.Count > 0)
+                {
+                    // Unread notes: their area comes from a render without any notes, as if they were not there.
+                    using SKBitmap plain = Render(bytes, i, pageOnly, pb);
+                    using SKImage plainImage = SKImage.FromBitmap(plain);
+                    foreach (XRect r in pb.LeaveOut)
+                    {
+                        canvas.Save();
+                        canvas.ClipRect(Px(r));
+                        canvas.DrawImage(plainImage, 0, 0, SKSamplingOptions.Default);
+                        canvas.Restore();
+                    }
+                }
                 foreach (XRect b in pb.Boxes)
-                    canvas.DrawRect(SKRect.Create((float)(b.X * sx), (float)(b.Y * sy), (float)(b.Width * sx), (float)(b.Height * sy)), paint);
+                    canvas.DrawRect(Px(b), paint);
             }
 
-            var area = new SKRectI(
-                Math.Max(0, (int)Math.Round(pb.Visible.X * sx)), Math.Max(0, (int)Math.Round(pb.Visible.Y * sy)),
-                Math.Min(full.Width, (int)Math.Round((pb.Visible.X + pb.Visible.Width) * sx)), Math.Min(full.Height, (int)Math.Round((pb.Visible.Y + pb.Visible.Height) * sy)));
-            using var bmp = new SKBitmap();
-            if (!full.ExtractSubset(bmp, area)) throw new InvalidOperationException("crop area outside the page");
             using var image = SKImage.FromBitmap(bmp);
             using var data = image.Encode(SKEncodedImageFormat.Jpeg, JpegQuality);
             using var jpg = new MemoryStream(data.ToArray());
 
             PdfPage outPage = output.AddPage();
-            outPage.Width = XUnit.FromPoint(pb.Visible.Width);
-            outPage.Height = XUnit.FromPoint(pb.Visible.Height);
+            outPage.Width = XUnit.FromPoint(pb.W);
+            outPage.Height = XUnit.FromPoint(pb.H);
             using var gfx = XGraphics.FromPdfPage(outPage);
             using XImage xi = XImage.FromStream(jpg);
-            gfx.DrawImage(xi, 0, 0, pb.Visible.Width, pb.Visible.Height);
+            gfx.DrawImage(xi, 0, 0, pb.W, pb.H);
         }
         output.Save(target);
-        return new Outcome(items, scanPages);
+        return new Outcome(items, imagePages, notePages);
     }
 
     /// <summary>
-    /// When a page has a CropBox different from its MediaBox, returns the box (user space, 0-based page index) and
-    /// replaces <paramref name="bytes"/> by a copy without those CropBoxes. Files without crops are left untouched.
+    /// One page as PDFium draws it: its crop area with /Rotate applied, where the boxes were measured. If the size
+    /// disagrees, PDFium saw another page box and every box would land in the wrong place, so the work stops.
     /// </summary>
-    private static Dictionary<int, (double X0, double Y0, double X1, double Y1, double MX, double MY, double MW, double MH)> StripCropBoxes(ref byte[] bytes)
+    private static SKBitmap Render(byte[] bytes, int index, PDFtoImage.RenderOptions options, PageBoxes pb)
     {
-        var result = new Dictionary<int, (double, double, double, double, double, double, double, double)>();
-        bool any;
-        using (var doc = UglyToad.PdfPig.PdfDocument.Open(bytes))
-            any = doc.GetPages().Any(p => p.CropBox.Bounds.Left != p.MediaBox.Bounds.Left || p.CropBox.Bounds.Bottom != p.MediaBox.Bounds.Bottom
-                                          || p.CropBox.Bounds.Width != p.MediaBox.Bounds.Width || p.CropBox.Bounds.Height != p.MediaBox.Bounds.Height);
-        if (!any) return result;
-
         using var ms = new MemoryStream(bytes);
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Modify);
-        for (int i = 0; i < pdf.PageCount; i++)
+        SKBitmap bmp = PDFtoImage.Conversion.ToImage(ms, index, options: options);
+        double ew = pb.W * Dpi / 72, eh = pb.H * Dpi / 72;
+        if (Math.Abs(bmp.Width - ew) > Math.Max(2, ew * 0.005) || Math.Abs(bmp.Height - eh) > Math.Max(2, eh * 0.005))
         {
-            var page = pdf.Pages[i];
-            if (!page.Elements.ContainsKey("/CropBox")) continue;
-            var c = page.CropBox; var m = page.MediaBox;
-            result[i] = (c.X1, c.Y1, c.X2, c.Y2, m.X1, m.Y1, m.Width, m.Height);
-            page.Elements.Remove("/CropBox");
+            bmp.Dispose();
+            throw new AlignmentException(index + 1);
         }
-        using var outMs = new MemoryStream();
-        pdf.Save(outMs, false);
-        bytes = outMs.ToArray();
-        return result;
-    }
-
-    /// <summary>The crop rectangle in the displayed page (points, origin top-left, /Rotate applied).</summary>
-    private static XRect DisplayCrop((double X0, double Y0, double X1, double Y1, double MX, double MY, double MW, double MH) c, int rotation, double dispW, double dispH)
-    {
-        int rot = ((rotation % 360) + 360) % 360;
-        (double X, double Y) Map(double x, double y)
-        {
-            double u = x - c.MX, v = c.MY + c.MH - y;
-            return rot switch { 90 => (c.MH - v, u), 180 => (c.MW - u, c.MH - v), 270 => (v, c.MW - u), _ => (u, v) };
-        }
-        var a = Map(c.X0, c.Y0); var b = Map(c.X1, c.Y1);
-        double x0 = Math.Max(0, Math.Min(a.X, b.X)), y0 = Math.Max(0, Math.Min(a.Y, b.Y));
-        double x1 = Math.Min(dispW, Math.Max(a.X, b.X)), y1 = Math.Min(dispH, Math.Max(a.Y, b.Y));
-        return new XRect(x0, y0, x1 - x0, y1 - y0);
+        return bmp;
     }
 
     /// <summary>
-    /// Boxes to paint for one page, in the displayed page (points, origin top-left); PdfPig already applies /Rotate.
+    /// Maps PdfPig's page coordinates to the area PDFium draws: the effective crop box (inherited or not, clipped to
+    /// the media box) with /Rotate applied, in points with the origin top-left. PdfPig measures letters and notes
+    /// from the crop box it found, rotated, origin bottom-left; it does not see a CropBox inherited from /Pages, so
+    /// its points go back to user space first and from there into the box PDFium uses.
+    /// </summary>
+    private sealed class PageMap
+    {
+        private readonly PdfRectangle pig, crop;   // normalised boxes in user space
+        private readonly int rot;
+
+        public double Width => rot is 90 or 270 ? crop.Height : crop.Width;
+        public double Height => rot is 90 or 270 ? crop.Width : crop.Height;
+
+        private PageMap(PdfRectangle pig, PdfRectangle crop, int rot) => (this.pig, this.crop, this.rot) = (pig, crop, rot);
+
+        public static PageMap For(PigDocument doc, Page page)
+        {
+            PdfRectangle media = Normal(page.MediaBox.Bounds);
+            PdfRectangle crop = InheritedBox(doc, page.Dictionary, NameToken.CropBox) is PdfRectangle c ? Clip(Normal(c), media) ?? media : media;
+            return new PageMap(Normal(page.CropBox.Bounds), crop, ((page.Rotation.Value % 360) + 360) % 360);
+        }
+
+        /// <summary>A PdfPig rectangle (any corner order, possibly rotated) as an axis-aligned box in the drawn page.</summary>
+        public XRect Map(PdfRectangle r)
+        {
+            double x0 = double.MaxValue, y0 = double.MaxValue, x1 = double.MinValue, y1 = double.MinValue;
+            foreach (PdfPoint p in new[] { r.TopLeft, r.TopRight, r.BottomLeft, r.BottomRight })
+            {
+                var (x, y) = Map(p.X, p.Y);
+                x0 = Math.Min(x0, x); y0 = Math.Min(y0, y); x1 = Math.Max(x1, x); y1 = Math.Max(y1, y);
+            }
+            return new XRect(x0, y0, x1 - x0, y1 - y0);
+        }
+
+        private (double X, double Y) Map(double x, double y)
+        {
+            // PdfPig display -> user space
+            double w = pig.Width, h = pig.Height;
+            var (u, v) = rot switch { 90 => (w - y, x), 180 => (w - x, h - y), 270 => (y, h - x), _ => (x, y) };
+            double ux = pig.Left + u, uy = pig.Bottom + v;
+            // user space -> PDFium's drawn page, origin top-left
+            w = crop.Width; h = crop.Height;
+            u = ux - crop.Left; v = uy - crop.Bottom;
+            var (dx, dy) = rot switch { 90 => (v, w - u), 180 => (w - u, h - v), 270 => (h - v, u), _ => (u, v) };
+            return (dx, Height - dy);
+        }
+
+        private static PdfRectangle Normal(PdfRectangle r) =>
+            new(Math.Min(r.Left, r.Right), Math.Min(r.Bottom, r.Top), Math.Max(r.Left, r.Right), Math.Max(r.Bottom, r.Top));
+
+        private static PdfRectangle? Clip(PdfRectangle a, PdfRectangle b)
+        {
+            double l = Math.Max(a.Left, b.Left), btm = Math.Max(a.Bottom, b.Bottom), r = Math.Min(a.Right, b.Right), t = Math.Min(a.Top, b.Top);
+            return r - l > 0 && t - btm > 0 ? new PdfRectangle(l, btm, r, t) : null;
+        }
+
+        /// <summary>A page box from the page or, failing that, from its /Pages ancestors.</summary>
+        private static PdfRectangle? InheritedBox(PigDocument doc, DictionaryToken dict, NameToken key)
+        {
+            DictionaryToken? d = dict;
+            for (int depth = 0; d is not null && depth < 64; depth++)
+            {
+                if (d.TryGet(key, out IToken? box))
+                {
+                    if (Resolve(doc, box) is ArrayToken { Length: 4 } a)
+                    {
+                        var n = a.Data.Select(t => Resolve(doc, t)).OfType<NumericToken>().Select(t => t.Double).ToArray();
+                        if (n.Length == 4) return new PdfRectangle(n[0], n[1], n[2], n[3]);
+                    }
+                    return null;   // malformed: PDFium falls back to the media box too, the size check catches a disagreement
+                }
+                d = d.TryGet(NameToken.Parent, out IToken? parent) ? Resolve(doc, parent) as DictionaryToken : null;
+            }
+            return null;
+        }
+    }
+
+    private static IToken? Resolve(PigDocument doc, IToken? token)
+    {
+        for (int i = 0; token is IndirectReferenceToken r && i < 16; i++)
+            token = doc.Structure.GetObject(r.Data)?.Data;
+        return token is IndirectReferenceToken ? null : token;
+    }
+
+    private static bool CanHoldText(IPdfImage img)
+    {
+        var b = img.BoundingBox;
+        double w = Math.Sqrt(Math.Pow(b.TopRight.X - b.TopLeft.X, 2) + Math.Pow(b.TopRight.Y - b.TopLeft.Y, 2));
+        double h = Math.Sqrt(Math.Pow(b.TopLeft.X - b.BottomLeft.X, 2) + Math.Pow(b.TopLeft.Y - b.BottomLeft.Y, 2));
+        int pw = img.WidthInSamples, ph = img.HeightInSamples;
+        return Math.Max(w, h) >= MinImageLong && Math.Min(w, h) >= MinImageShort
+            && Math.Max(pw, ph) >= MinImageLong && Math.Min(pw, ph) >= MinImageShort;
+    }
+
+    // Notes whose look comes only from their own text (searched below) or carries no text at all.
+    private static readonly HashSet<AnnotationType> TextOrPlainNotes = new()
+    {
+        AnnotationType.Text, AnnotationType.FreeText, AnnotationType.Link, AnnotationType.Popup, AnnotationType.Widget,
+        AnnotationType.Highlight, AnnotationType.Underline, AnnotationType.Squiggly, AnnotationType.StrikeOut,
+    };
+
+    /// <summary>
+    /// Searches the notes and form fields of a page: note text (/Contents, rich text /RC) and field values (/V, inherited from
+    /// parent fields, list options, button captions). A note or field with a match is blacked out whole and counts its matches.
+    /// A visible note drawn from an appearance whose text is not known (stamp, ink, shape, signature) goes to
+    /// <paramref name="leaveOut"/>: it is not drawn, since what it shows was never searched.
+    /// </summary>
+    private static int LocateNotes(PigDocument doc, Page page, PageMap map, List<XRect> boxes, List<XRect> leaveOut)
+    {
+        int count = 0;
+        foreach (Annotation a in page.GetAnnotations())
+        {
+            var dict = a.AnnotationDictionary;
+            var texts = new List<string>();
+            bool unread = false;
+            if (!string.IsNullOrEmpty(a.Content)) texts.Add(a.Content);
+            if (TextOf(doc, Get(doc, dict, "RC"), out string? rich)) texts.Add(StripMarkup(rich!));
+            else if (Get(doc, dict, "RC") is not null) unread = true;
+
+            bool signature = false;
+            if (a.Type == AnnotationType.Widget)
+            {
+                signature = Inherited(doc, dict, "FT") is NameToken { Data: "Sig" };
+                foreach (string key in new[] { "V", "RV", "Opt" })
+                {
+                    var value = Inherited(doc, dict, key);
+                    if (value is null) continue;
+                    if (TextOf(doc, value, out string? v)) texts.Add(key == "RV" ? StripMarkup(v!) : v!);
+                    else unread = true;
+                }
+                if (Resolve(doc, Get(doc, dict, "MK")) is DictionaryToken mk)
+                    foreach (string key in new[] { "CA", "RC", "AC" })
+                        if (TextOf(doc, Get(doc, mk, key), out string? caption)) texts.Add(caption!);
+            }
+
+            int hits = texts.Sum(t => Radar.FindAll(t).Count);
+            count += hits;
+            if ((a.Flags & (AnnotationFlags.Hidden | AnnotationFlags.NoView)) != 0) continue;   // not drawn
+            if (a.HasNormalAppearance && (signature || !TextOrPlainNotes.Contains(a.Type))) unread = true;
+            if (hits == 0 && !unread) continue;
+            // A NoRotate / NoZoom note is drawn from its corner at its own size and angle, not stretched over its
+            // rectangle: on a turned or scaled page it can stick out, so its area is widened by its size each way.
+            XRect r = map.Map(a.Rectangle);
+            if ((a.Flags & (AnnotationFlags.NoRotate | AnnotationFlags.NoZoom)) != 0)
+            {
+                double grow = Math.Max(r.Width, r.Height);
+                r = new XRect(r.X - grow, r.Y - grow, r.Width + 2 * grow, r.Height + 2 * grow);
+            }
+            r = Pad(r, map.Width, map.Height);
+            if (hits > 0) boxes.Add(r);
+            else leaveOut.Add(r);
+        }
+        return count;
+    }
+
+    private static IToken? Get(PigDocument doc, DictionaryToken dict, string key) =>
+        dict.TryGet(NameToken.Create(key), out IToken? t) ? Resolve(doc, t) : null;
+
+    /// <summary>A field attribute from the widget or the field above it (terminal fields inherit /V, /FT, /Opt).</summary>
+    private static IToken? Inherited(PigDocument doc, DictionaryToken dict, string key)
+    {
+        DictionaryToken? d = dict;
+        for (int depth = 0; d is not null && depth < 32; depth++)
+        {
+            if (Get(doc, d, key) is IToken t) return t;
+            d = Get(doc, d, "Parent") as DictionaryToken;
+        }
+        return null;
+    }
+
+    /// <summary>All text in a value: strings, names, arrays of them (multi-select values, option pairs) and text streams.</summary>
+    private static bool TextOf(PigDocument doc, IToken? token, out string? text)
+    {
+        var sb = new StringBuilder();
+        bool ok = Collect(doc, token, sb, 0);
+        text = ok ? sb.ToString() : null;
+        return ok && token is not null;
+    }
+
+    private static bool Collect(PigDocument doc, IToken? token, StringBuilder sb, int depth)
+    {
+        switch (Resolve(doc, token))
+        {
+            case null: return true;
+            case StringToken s: sb.Append(s.Data).Append('\n'); return true;
+            case HexToken h: sb.Append(h.Data).Append('\n'); return true;
+            case NameToken n: sb.Append(n.Data).Append('\n'); return true;
+            case NumericToken num: sb.Append(num.Data.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\n'); return true;
+            case BooleanToken or NullToken: return true;
+            case ArrayToken arr when depth < 8:
+                foreach (IToken t in arr.Data) if (!Collect(doc, t, sb, depth + 1)) return false;
+                return true;
+            case StreamToken stream:
+                try
+                {
+                    var bytes = UglyToad.PdfPig.PdfExtensions.Decode(stream, doc.Structure.FilterProvider, doc.Structure.TokenScanner).ToArray();
+                    sb.Append(bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF ? Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2) : Encoding.UTF8.GetString(bytes)).Append('\n');
+                    return true;
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    return false;
+                }
+            default: return false;
+        }
+    }
+
+    /// <summary>Rich text (XHTML) to plain text: tags become spaces, entities are decoded.</summary>
+    private static string StripMarkup(string xml) => WebUtility.HtmlDecode(Regex.Replace(xml, "<[^>]*>", " "));
+
+    /// <summary>
+    /// Boxes to paint for one page, in the drawn page (points, origin top-left).
     /// The text is rebuilt from the letters in drawing order (a space wherever the letters are not neighbours),
     /// so it works for rotated pages and for IBANs or phone numbers written with spaces; each matched character maps back to its letter box.
     /// </summary>
-    private static (List<XRect> Boxes, int Count) Locate(Page page)
+    private static (List<XRect> Boxes, int Count) Locate(Page page, PageMap map)
     {
-        double dispW = page.Width, dispH = page.Height;
-        var rects = new List<UglyToad.PdfPig.Core.PdfRectangle?>();   // one entry per character of the text; null for separators
+        var rects = new List<PdfRectangle?>();   // one entry per character of the text; null for separators
         string text = PageText(page, rects);
 
         var boxes = new List<XRect>();
@@ -149,22 +364,22 @@ internal static class PdfRedact
             XRect? run = null;
             for (int i = hit.Index; i < hit.Index + hit.Length; i++)
             {
-                if (rects[i] is not UglyToad.PdfPig.Core.PdfRectangle r) continue;
-                var cur = new XRect(Math.Min(r.Left, r.Right), dispH - Math.Max(r.Top, r.Bottom), Math.Abs(r.Right - r.Left), Math.Abs(r.Top - r.Bottom));
+                if (rects[i] is not PdfRectangle r) continue;
+                XRect cur = map.Map(r);
                 if (run is XRect p && Overlaps(p, cur)) run = Union(p, cur);
                 else
                 {
-                    if (run is XRect done) boxes.Add(Pad(done, dispW, dispH));
+                    if (run is XRect done) boxes.Add(Pad(done, map.Width, map.Height));
                     run = cur;
                 }
             }
-            if (run is XRect last) boxes.Add(Pad(last, dispW, dispH));
+            if (run is XRect last) boxes.Add(Pad(last, map.Width, map.Height));
         }
         return (boxes, hits.Count);
     }
 
     /// <summary>Page text rebuilt from the letters in drawing order (also used for the text-only Word export of rotated pages); <paramref name="rects"/> gets one box per character.</summary>
-    internal static string PageText(Page page, List<UglyToad.PdfPig.Core.PdfRectangle?>? rects = null)
+    internal static string PageText(Page page, List<PdfRectangle?>? rects = null)
     {
         rects ??= [];
         var sb = new StringBuilder();
@@ -197,7 +412,7 @@ internal static class PdfRedact
     /// The area a letter can paint, axis-aligned: its glyph bounding box joined with a box spanned along the baseline
     /// from the font size. The glyph box alone depends on font metrics and can miss accents or come out empty.
     /// </summary>
-    private static UglyToad.PdfPig.Core.PdfRectangle CoverBox(Letter l)
+    private static PdfRectangle CoverBox(Letter l)
     {
         var xs = new List<double>();
         var ys = new List<double>();
@@ -220,7 +435,7 @@ internal static class PdfRedact
             foreach (double k in new[] { -Descent * size, Ascent * size })
                 Add(bx + ux * k, by + uy * k);
 
-        return new UglyToad.PdfPig.Core.PdfRectangle(xs.Min(), ys.Min(), xs.Max(), ys.Max());
+        return new PdfRectangle(xs.Min(), ys.Min(), xs.Max(), ys.Max());
     }
 
     /// <summary>True when two consecutive letter boxes belong to the same run (same line, or same column on rotated text): they touch or nearly do.</summary>
