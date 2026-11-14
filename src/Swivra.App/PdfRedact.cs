@@ -22,8 +22,10 @@ namespace Swivra.App;
 /// Nothing of the original text, metadata, annotations or form fields survives, so there is nothing to extract.
 /// Note texts and field values that are not shown (a closed pop-up, a field without an appearance) are searched too:
 /// a match there still counts and still produces the image-only file, which cannot carry them.
-/// Embedded images are not read (no OCR) and letters without a Unicode value cannot be searched: the outcome
-/// counts those pages so the user is told to check them.
+/// Letters without a Unicode value cannot be searched. Pages with images that can hold text, pages without any
+/// readable letters (scans) and pages with such unsearchable text are read by OCR (<see cref="ReadPictures"/>) from
+/// the page as drawn: what it finds is painted too. OCR can miss handwriting, tiny or blurred print, so those pages are
+/// still counted for a look by eye; pages it could not read (no models, over time) keep the plain warning.
 /// PDFium's own text layer of the same copy is searched too (<see cref="CrossCheck"/>): the two libraries do not
 /// always read a content stream alike, and whatever PDFium reads where it draws it is covered as well.
 /// </summary>
@@ -38,13 +40,15 @@ internal static class PdfRedact
     // logos and photos are counted, which only adds a warning.
     private const double MinImageLong = 30, MinImageShort = 6;
 
-    /// <param name="Items">Number of matches covered (page text, notes and form fields).</param>
+    /// <param name="Items">Number of matches covered (page text, notes and form fields, text read by OCR).</param>
     /// <param name="Written">True when the redacted file was written: there were matches, or notes had to be left out.</param>
-    /// <param name="ImagePages">Pages with images large enough to hold text: they cannot be checked without OCR.</param>
-    /// <param name="UnreadPages">Pages with text that is drawn but not searchable: letters without a usable Unicode value (Type 3, broken or unmapped fonts), text or images inside a pattern, a Type 3 glyph or a soft mask, or a page whose PDFium text layer could not be loaded.</param>
+    /// <param name="ImagePages">Pages with images large enough to hold text that OCR could not read: not checked at all.</param>
+    /// <param name="UnreadPages">Pages with text that is drawn but not searchable, and that OCR could not read either: letters without a usable Unicode value (Type 3, broken or unmapped fonts), text or images inside a pattern, a Type 3 glyph or a soft mask, or a page whose PDFium text layer could not be loaded.</param>
     /// <param name="LeftOutPages">The file could not be flattened: pages whose visible notes and form fields were left out of the output.</param>
     /// <param name="NoLookPages">Pages with visible notes or form fields that have no appearance of their own: flattening drops them.</param>
-    public sealed record Outcome(int Items, bool Written, int ImagePages, int UnreadPages, int LeftOutPages, int NoLookPages);
+    /// <param name="OcrImagePages">Pages whose images (or, on a page without letters, whose drawing) OCR read: what it found is hidden, but it can miss text.</param>
+    /// <param name="OcrTextPages">Pages whose unsearchable text OCR read from the drawn page instead: the same, for text.</param>
+    public sealed record Outcome(int Items, bool Written, int ImagePages, int UnreadPages, int LeftOutPages, int NoLookPages, int OcrImagePages = 0, int OcrTextPages = 0);
 
     /// <summary>PDFium drew a page at a different size than the page box the boxes were measured in: painting would miss.</summary>
     public sealed class AlignmentException(int page) : Exception($"rendered size of page {page} does not match its page box")
@@ -61,8 +65,14 @@ internal static class PdfRedact
         public int Page { get; } = page;
     }
 
-    /// <summary>Everything needed to paint one page: displayed size in points and the boxes to black out (origin top-left).</summary>
-    private sealed record PageBoxes(double W, double H, List<XRect> Boxes);
+    /// <summary>
+    /// Everything needed to paint one page: displayed size in points and the boxes to black out (origin top-left), and
+    /// the polygons OCR found, as fractions of the page's width and height (so they fit any rendering of it).
+    /// </summary>
+    private sealed record PageBoxes(double W, double H, List<XRect> Boxes)
+    {
+        public List<PointF[]> Shapes { get; } = [];
+    }
 
     /// <summary>
     /// Finds matches on every page; when there are any, writes the redacted image-only PDF to <paramref name="target"/>.
@@ -81,7 +91,11 @@ internal static class PdfRedact
         var perPage = new List<PageBoxes>();
         var foundPerPage = new List<HashSet<string>>();
         var unread = new bool[orig.NumberOfPages];
-        int items = 0, imagePages = 0, leftOutPages = 0, noLookPages = 0;
+        var pictures = new bool[orig.NumberOfPages];   // images that can hold text
+        var unseen = new bool[orig.NumberOfPages];     // ... partly outside the drawn page
+        var textless = new bool[orig.NumberOfPages];   // no readable letters at all: a scan, or text drawn as shapes
+        var areas = new List<OcrArea>[orig.NumberOfPages];
+        int items = 0, leftOutPages = 0, noLookPages = 0;
         using (var copy = OpenCopy(flat, orig.NumberOfPages))
         {
             if (copy is not null) tree = PdfTree.Check(copy);
@@ -104,19 +118,46 @@ internal static class PdfRedact
                 // Letters without a usable value, and text or images shown inside a pattern, a Type 3 glyph or a
                 // soft mask, which neither text layer has: drawn, but not searched.
                 if (HasUnreadableText(page, blind) || tree.HidesText(page.Dictionary)) unread[n - 1] = true;
-                if (page.GetImages().Any(CanHoldText)) imagePages++;
+                textless[n - 1] = !HasLetters(page);
+                areas[n - 1] = OcrAreas(page, map, out pictures[n - 1], out unseen[n - 1]);
                 perPage.Add(new PageBoxes(map.Width, map.Height, boxes));
                 foundPerPage.Add(found);
             }
         }
-        items += CrossCheck(flat ?? original, perPage, foundPerPage, unread);
-        int unreadPages = unread.Count(u => u);
-        bool written = items > 0 || leftOutPages > 0;
-        if (!written) return new Outcome(0, false, imagePages, unreadPages, 0, noLookPages);
+        byte[] bytes = flat ?? original;
+        items += CrossCheck(bytes, perPage, foundPerPage, unread);
+
+        // OCR: images that can hold text, pages without letters, and drawn text no text layer has (the whole page).
+        var targets = new List<OcrArea>?[perPage.Count];
+        for (int i = 0; i < perPage.Count; i++)
+            targets[i] = unread[i] ? [OcrArea.Whole] : areas[i].Count > 0 ? areas[i] : null;
+        var (ocrItems, sight) = ReadPictures(bytes, perPage, foundPerPage, targets);
+        items += ocrItems;
+
+        int imagePages = 0, unreadPages = 0, ocrImagePages = 0, ocrTextPages = 0;
+        for (int i = 0; i < perPage.Count; i++)
+        {
+            // Read by OCR, which can still miss text: a look by eye stays asked for. Images partly outside the drawn
+            // page were not read whole and keep the plain warning. A page without letters or images that OCR found
+            // blank (or saw only shapes on) had nothing to read, as before.
+            bool read = sight[i] is Sight.Read or Sight.ReadText;
+            if (pictures[i])
+            {
+                if (read && !unseen[i]) ocrImagePages++;
+                else imagePages++;
+            }
+            if (unread[i])
+            {
+                if (!read) unreadPages++;
+                else if (!pictures[i] || unseen[i]) ocrTextPages++;
+            }
+            else if (!pictures[i] && textless[i] && sight[i] == Sight.ReadText) ocrImagePages++;
+        }
+        bool written = items > 0 || leftOutPages > 0 || perPage.Any(p => p.Shapes.Count > 0);
+        if (!written) return new Outcome(0, false, imagePages, unreadPages, 0, noLookPages, ocrImagePages, ocrTextPages);
 
         using var output = new PdfSharp.Pdf.PdfDocument();
         output.Info.Creator = "Swivra";
-        byte[] bytes = flat ?? original;
         for (int i = 0; i < perPage.Count; i++)
         {
             var pb = perPage[i];
@@ -128,6 +169,13 @@ internal static class PdfRedact
             {
                 foreach (XRect b in pb.Boxes)
                     canvas.DrawRect(Px(b), paint);
+                foreach (PointF[] shape in pb.Shapes)
+                {
+                    using var builder = new SKPathBuilder();
+                    builder.AddPoly(shape.Select(p => new SKPoint(p.X * bmp.Width, p.Y * bmp.Height)).ToArray(), true);
+                    using SKPath path = builder.Detach();
+                    canvas.DrawPath(path, paint);
+                }
             }
 
             using var image = SKImage.FromBitmap(bmp);
@@ -142,7 +190,7 @@ internal static class PdfRedact
             gfx.DrawImage(xi, 0, 0, pb.W, pb.H);
         }
         output.Save(target);
-        return new Outcome(items, true, imagePages, unreadPages, leftOutPages, noLookPages);
+        return new Outcome(items, true, imagePages, unreadPages, leftOutPages, noLookPages, ocrImagePages, ocrTextPages);
     }
 
     /// <summary>The flattened copy for PdfPig, or null (notes and fields are then left out) when it does not read back whole.</summary>
@@ -174,9 +222,7 @@ internal static class PdfRedact
     /// </summary>
     private static SKBitmap Render(byte[] bytes, int index, PageBoxes pb)
     {
-        using var ms = new MemoryStream(bytes);
-        SKBitmap bmp;
-        using (Pdfium.Enter()) bmp = PDFtoImage.Conversion.ToImage(ms, index, options: PageOnly);
+        SKBitmap bmp = Draw(bytes, index, PageOnly);
         double ew = pb.W * Dpi / 72, eh = pb.H * Dpi / 72;
         if (Math.Abs(bmp.Width - ew) > Math.Max(2, ew * 0.005) || Math.Abs(bmp.Height - eh) > Math.Max(2, eh * 0.005))
         {
@@ -184,6 +230,302 @@ internal static class PdfRedact
             throw new AlignmentException(index + 1);
         }
         return bmp;
+    }
+
+    /// <summary>One page drawn by PDFium, under the shared lock.</summary>
+    private static SKBitmap Draw(byte[] bytes, int index, PDFtoImage.RenderOptions options)
+    {
+        using var ms = new MemoryStream(bytes);
+        using (Pdfium.Enter()) return PDFtoImage.Conversion.ToImage(ms, index, options: options);
+    }
+
+    // ---------- OCR ----------
+
+    // OCR reads the page drawn exactly as it is written out (same renderer, same options), at this resolution; what it
+    // finds is kept as fractions of the page and painted onto the output rendering.
+    private const int OcrDpi = Dpi;
+    private static readonly PDFtoImage.RenderOptions OcrPageOnly = new(Dpi: OcrDpi, WithAnnotations: false, WithFormFill: false);
+    // A page reads in 1-3 s (A4, 200 DPI, measured); a busy machine makes that 2-5x slower. One page that takes longer
+    // than this is not read; the whole document stops reading once this much time has gone, and the pages left are
+    // reported as not read, never as clean.
+    private static readonly TimeSpan OcrPageBudget = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan OcrDocBudget = TimeSpan.FromMinutes(4);
+    // Margin around an image's area on the page, so text running to its edge is read whole.
+    private const double OcrAreaPad = 4;
+    // Images covering more of the page than this are read with the page as a whole.
+    private const double OcrWholeShare = 0.5;
+    // An image drawn turned by more than this (degrees) is turned upright before it is read: measured, a card drawn at
+    // 25 degrees lost the start of its lines (and both values on it) when read as it lies.
+    private const double OcrTurnAtLeast = 1;
+    // An image counts as seen when at least this share of it is on the drawn page: a scan placed a point or two over
+    // the page edge is read; one cut by the crop box has a part no drawing shows.
+    private const double VisibleEnough = 0.98;
+
+    /// <summary>
+    /// A part of the drawn page for OCR, as fractions of its width and height (origin top-left), and the angle (degrees,
+    /// clockwise on screen) at which the image there runs: it is turned back by that much before it is read.
+    /// </summary>
+    internal readonly record struct OcrArea(RectangleF Area, float Angle)
+    {
+        public static readonly OcrArea Whole = new(new RectangleF(0, 0, 1, 1), 0);
+    }
+
+    /// <summary>How OCR went on a page: not read (no OCR wanted, no models, error, over time), read and blank, read with text.</summary>
+    private enum Sight { NotRead, Read, ReadText }
+
+    private static bool HasLetters(Page page) => page.Letters.Any(l => !string.IsNullOrWhiteSpace(l.Value));
+
+    /// <summary>
+    /// Where OCR looks on a page: the whole page when it has no readable letters, otherwise the areas of the images
+    /// that can hold text, padded, overlapping ones joined, and the whole page once they cover most of it. Empty:
+    /// nothing for OCR.
+    /// </summary>
+    internal static List<OcrArea> OcrAreas(PigDocument doc, Page page) => OcrAreas(page, PageMap.For(doc, page), out _, out _);
+
+    /// <param name="pictures">The page has images that can hold text.</param>
+    /// <param name="unseen">Some of them lie partly or wholly outside the drawn page: that part is in the file but cannot be read from the drawing.</param>
+    private static List<OcrArea> OcrAreas(Page page, PageMap map, out bool pictures, out bool unseen)
+    {
+        var areas = new List<OcrArea>();
+        pictures = unseen = false;
+        foreach (IPdfImage img in page.GetImages())
+        {
+            if (!CanHoldText(img)) continue;
+            pictures = true;
+            XRect r = map.Map(img.BoundingBox);
+            double vw = Math.Min(map.Width, r.X + r.Width) - Math.Max(0, r.X), vh = Math.Min(map.Height, r.Y + r.Height) - Math.Max(0, r.Y);
+            if (vw <= 0 || vh <= 0 || vw * vh < VisibleEnough * r.Width * r.Height) unseen = true;
+            double x0 = Math.Max(0, r.X - OcrAreaPad), y0 = Math.Max(0, r.Y - OcrAreaPad);
+            double x1 = Math.Min(map.Width, r.X + r.Width + OcrAreaPad), y1 = Math.Min(map.Height, r.Y + r.Height + OcrAreaPad);
+            if (x1 <= x0 || y1 <= y0) continue;
+            // The image's top edge, left to right, as drawn: its own rows run that way.
+            var (ax, ay) = map.MapPoint(img.BoundingBox.TopLeft);
+            var (bx, by) = map.MapPoint(img.BoundingBox.TopRight);
+            float angle = (float)(Math.Atan2(by - ay, bx - ax) * 180 / Math.PI);
+            if (!(Math.Abs(angle) >= OcrTurnAtLeast)) angle = 0;
+            areas.Add(new OcrArea(new RectangleF((float)(x0 / map.Width), (float)(y0 / map.Height), (float)((x1 - x0) / map.Width), (float)((y1 - y0) / map.Height)), angle));
+        }
+        if (!HasLetters(page)) return [OcrArea.Whole];
+        for (bool joined = true; joined;)
+        {
+            joined = false;
+            for (int a = 0; a < areas.Count && !joined; a++)
+                for (int b = a + 1; b < areas.Count && !joined; b++)
+                    if (areas[a].Area.IntersectsWith(areas[b].Area))
+                    {
+                        // Two images that overlap are read together: as they lie, unless both run at the same angle.
+                        float angle = areas[a].Angle == areas[b].Angle ? areas[a].Angle : 0;
+                        areas[a] = new OcrArea(RectangleF.Union(areas[a].Area, areas[b].Area), angle);
+                        areas.RemoveAt(b);
+                        joined = true;
+                    }
+        }
+        return areas.Sum(a => a.Area.Width * a.Area.Height) > OcrWholeShare ? [OcrArea.Whole] : areas;
+    }
+
+    /// <summary>
+    /// Reads one area of a drawn page with OCR: cut out, turned upright when the image there is drawn at an angle, and
+    /// read unless it is a flat fill. The findings come back with their polygons as fractions of the whole page. Null
+    /// when OCR could not read it (no models, error, budget spent); <paramref name="text"/> says whether it saw any.
+    /// </summary>
+    internal static List<Ocr.Finding>? ReadArea(SKBitmap page, OcrArea area, TimeSpan budget, int maxPixels, out bool text)
+    {
+        text = false;
+        var px = SKRectI.Intersect(SKRectI.Round(new SKRect(area.Area.Left * page.Width, area.Area.Top * page.Height, area.Area.Right * page.Width, area.Area.Bottom * page.Height)),
+            new SKRectI(0, 0, page.Width, page.Height));
+        if (px.Width < 1 || px.Height < 1) return [];
+        SKBitmap? crop = null, upright = null;
+        try
+        {
+            if (px.Width != page.Width || px.Height != page.Height) crop = Crop(page, px);
+            SKBitmap part = crop ?? page;
+            if (Blank(part)) return [];
+            // part -> upright: turned back by the angle about its centre, onto a white sheet large enough to hold it
+            SKMatrix toUpright = SKMatrix.Identity;
+            if (area.Angle != 0)
+            {
+                double a = area.Angle * Math.PI / 180;
+                int w = (int)Math.Ceiling(Math.Abs(part.Width * Math.Cos(a)) + Math.Abs(part.Height * Math.Sin(a)));
+                int h = (int)Math.Ceiling(Math.Abs(part.Width * Math.Sin(a)) + Math.Abs(part.Height * Math.Cos(a)));
+                toUpright = SKMatrix.CreateTranslation(-part.Width / 2f, -part.Height / 2f)
+                    .PostConcat(SKMatrix.CreateRotationDegrees(-area.Angle))
+                    .PostConcat(SKMatrix.CreateTranslation(w / 2f, h / 2f));
+                upright = new SKBitmap(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Opaque));
+                using var canvas = new SKCanvas(upright);
+                canvas.Clear(SKColors.White);
+                canvas.SetMatrix(toUpright);
+                using var image = SKImage.FromBitmap(part);
+                canvas.DrawImage(image, 0, 0, new SKSamplingOptions(SKFilterMode.Linear), null);
+            }
+            Ocr.Page? seen = Ocr.Read(upright ?? part, budget, maxPixels: maxPixels);
+            if (seen is null) return null;
+            text = seen.Lines.Count > 0;
+            SKMatrix back = toUpright.Invert();
+            return Ocr.FindSensitive(seen).Select(f => f with
+            {
+                Region = f.Region.Where(p => p.Length >= 3).Select(p => p.Select(q =>
+                {
+                    SKPoint o = back.MapPoint(q.X, q.Y);
+                    return new PointF((o.X + px.Left) / page.Width, (o.Y + px.Top) / page.Height);
+                }).ToArray()).ToList(),
+            }).Where(f => f.Region.Count > 0).ToList();
+        }
+        finally
+        {
+            upright?.Dispose();
+            crop?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Reads the given areas of each page with OCR, one page at a time (a page's bitmap and OCR's memory never pile
+    /// up), and adds what it finds to the page: a finding wholly inside boxes already painted is the same text and is
+    /// left alone; any other is painted. It counts as a new item only when it lies mostly outside those boxes and its
+    /// value was not found on the page before (OCR reads again what the text layer has, and the same value can also
+    /// stand in an image). A page counts as read only when every area of it was. OCR failing never fails the work.
+    /// </summary>
+    /// <returns>New items, and per page how OCR went.</returns>
+    private static (int Items, Sight[] Sight) ReadPictures(byte[] pdf, List<PageBoxes> pages, List<HashSet<string>> found, List<OcrArea>?[] targets)
+    {
+        var sight = new Sight[pages.Count];
+        int added = 0;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        bool late = false;
+        for (int i = 0; i < pages.Count; i++)
+        {
+            if (targets[i] is not { } areas) continue;
+            if (clock.Elapsed >= OcrDocBudget)
+            {
+                if (!late) Log.Write($"pdf ocr: document time spent after {i} of {pages.Count} pages, the rest not read");
+                late = true;
+                continue;
+            }
+            SKBitmap bmp;
+            try
+            {
+                bmp = Draw(pdf, i, OcrPageOnly);
+            }
+            catch (Exception ex) when (ex is not (OutOfMemoryException or Pdfium.BusyException))
+            {
+                Log.Write($"pdf ocr: page {i + 1} could not be drawn: {ex.GetType().Name}: {ex.Message}");
+                continue;
+            }
+            var pb = pages[i];
+            bool read = true, text = false;
+            using (bmp)
+            {
+                foreach (OcrArea area in areas)
+                {
+                    TimeSpan left = OcrDocBudget - clock.Elapsed;
+                    List<Ocr.Finding>? findings;
+                    try
+                    {
+                        findings = ReadArea(bmp, area, left < OcrPageBudget ? left : OcrPageBudget, 0, out bool seen);
+                        text |= seen;
+                    }
+                    catch (Exception ex) when (ex is not OutOfMemoryException)
+                    {
+                        Log.Write($"pdf ocr: page {i + 1} not read: {ex.GetType().Name}: {ex.Message}");
+                        findings = null;
+                    }
+                    if (findings is null)
+                    {
+                        read = false;   // what other areas found is still painted, but the page is not called read
+                        continue;
+                    }
+                    foreach (Ocr.Finding f in findings)
+                    {
+                        var shapes = f.Region.ToList();
+                        double covered = Covered(shapes, pb);
+                        if (covered >= 1) continue;
+                        pb.Shapes.AddRange(shapes);
+                        if (covered < 0.5 && found[i].Add(Key(f.Kind, f.Text))) added++;
+                    }
+                }
+            }
+            sight[i] = !read ? Sight.NotRead : text ? Sight.ReadText : Sight.Read;
+        }
+        return (added, sight);
+    }
+
+    private static SKBitmap Crop(SKBitmap src, SKRectI r)
+    {
+        using var subset = new SKBitmap();
+        if (!src.ExtractSubset(subset, r)) throw new InvalidOperationException("crop failed");
+        return subset.Copy() ?? throw new InvalidOperationException("crop failed");
+    }
+
+    /// <summary>True when every pixel has the same colour (a blank page or a flat fill): there is nothing to read.</summary>
+    private static bool Blank(SKBitmap bmp)
+    {
+        if (bmp.BytesPerPixel != 4) return false;
+        ReadOnlySpan<uint> px = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bmp.GetPixelSpan());
+        int w = bmp.Width, stride = bmp.RowBytes / 4;
+        uint first = px[0];
+        for (int y = 0; y < bmp.Height; y++)
+        {
+            var row = px.Slice(y * stride, w);
+            foreach (uint p in row)
+                if (p != first && !Near(p, first)) return false;
+        }
+        return true;
+
+        static bool Near(uint a, uint b)
+        {
+            for (int s = 0; s < 32; s += 8)
+                if (Math.Abs((int)((a >> s) & 0xFF) - (int)((b >> s) & 0xFF)) > 8) return false;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Share of a finding's polygons (fractions of the page) that lies inside the boxes already painted, sampled on a
+    /// grid over each polygon less its outer margin (OCR grows a region by a fifth of the line height and more). 1 when
+    /// all of it does.
+    /// </summary>
+    private static double Covered(List<PointF[]> shapes, PageBoxes pb)
+    {
+        if (pb.Boxes.Count == 0) return 0;
+        int inside = 0, total = 0;
+        foreach (PointF[] frac in shapes)
+        {
+            var poly = frac.Select(p => (X: p.X * pb.W, Y: p.Y * pb.H)).ToArray();
+            int n = poly.Length;
+            double area2 = 0;
+            for (int k = 0; k < n; k++) area2 += poly[k].X * poly[(k + 1) % n].Y - poly[(k + 1) % n].X * poly[k].Y;
+            double sign = area2 < 0 ? -1 : 1;
+            // Narrowest width of the convex polygon: for each edge, the farthest corner from it; the least of those.
+            double width = double.MaxValue;
+            for (int k = 0; k < n; k++)
+            {
+                var (a, b) = (poly[k], poly[(k + 1) % n]);
+                double len = Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y));
+                if (len < 1e-9) continue;
+                width = Math.Min(width, poly.Max(p => Math.Abs((b.X - a.X) * (p.Y - a.Y) - (b.Y - a.Y) * (p.X - a.X)) / len));
+            }
+            if (width == double.MaxValue || width <= 0) continue;
+            double inset = 0.14 * width, step = Math.Max(width / 6, 0.25);
+            bool In(double x, double y)
+            {
+                for (int k = 0; k < n; k++)
+                {
+                    var (a, b) = (poly[k], poly[(k + 1) % n]);
+                    double len = Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y));
+                    if (len < 1e-9) continue;
+                    if (sign * ((b.X - a.X) * (y - a.Y) - (b.Y - a.Y) * (x - a.X)) / len < inset) return false;
+                }
+                return true;
+            }
+            double x0 = poly.Min(p => p.X), x1 = poly.Max(p => p.X), y0 = poly.Min(p => p.Y), y1 = poly.Max(p => p.Y);
+            for (double y = y0 + step / 2; y < y1; y += step)
+                for (double x = x0 + step / 2; x < x1; x += step)
+                {
+                    if (!In(x, y)) continue;
+                    total++;
+                    if (pb.Boxes.Any(bx => x >= bx.X - CoverSlack && x <= bx.X + bx.Width + CoverSlack && y >= bx.Y - CoverSlack && y <= bx.Y + bx.Height + CoverSlack)) inside++;
+                }
+        }
+        return total == 0 ? 0 : inside / (double)total;
     }
 
     // A PDFium glyph box may poke this far (points) out of a painted box and still count as covered.
@@ -292,6 +634,9 @@ internal static class PdfRedact
             }
             return new XRect(x0, y0, x1 - x0, y1 - y0);
         }
+
+        /// <summary>A PdfPig point in the drawn page.</summary>
+        public (double X, double Y) MapPoint(PdfPoint p) => Map(p.X, p.Y);
 
         private (double X, double Y) Map(double x, double y)
         {
@@ -402,8 +747,10 @@ internal static class PdfRedact
     }
 
     /// <summary>A match as kind plus its letters and digits only, so the same number spelled with other separators is one item.</summary>
-    private static string Key(string text, Radar.Hit h) =>
-        h.Kind + ":" + new string(text.AsSpan(h.Index, h.Length).ToArray().Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static string Key(string text, Radar.Hit h) => Key(h.Kind, text.Substring(h.Index, h.Length));
+
+    private static string Key(Radar.HitKind kind, string value) =>
+        kind + ":" + new string(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     // Unreadable letters on one page that are always worth a warning, wherever they sit: the shortest item the radar
     // looks for (a mobile number without separators) has ten characters, so ten unreadable letters could hide one
