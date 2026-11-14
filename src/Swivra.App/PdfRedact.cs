@@ -515,6 +515,10 @@ internal static class PdfRedact
     /// (and the text and CTM scale, since rise is in text space) and returns the largest distance, in page units,
     /// between the two placements of any shown text: 0 when they always agree. NaN when a form drawn while they
     /// may disagree cannot be read, so the distance is unknown.
+    /// Horizontal scaling (Tz) and leading (TL) behave the same way: PdfPig carries them into a form, PDFium starts
+    /// it at 100 and 0 (measured; character and word spacing, render mode and font are carried by both). Their
+    /// effect grows along the line and from line to line, so no single distance bounds it: text a form shows while
+    /// either disagrees (leading only once a line move has used it) also gives NaN, and the file is refused.
     /// </summary>
     private static class RiseDrift
     {
@@ -527,7 +531,11 @@ internal static class PdfRedact
             public Lin Times(Lin m) => new(A * m.A + B * m.C, A * m.B + B * m.D, C * m.A + D * m.C, C * m.B + D * m.D);
         }
 
-        private readonly record struct State(double PigRise, double DrawnRise, Lin Ctm);
+        /// <summary>Each value as PdfPig keeps it and as PDFium draws it: rise, horizontal scaling, leading.</summary>
+        private readonly record struct State(double PigRise, double DrawnRise, Lin Ctm, double PigTz = 100, double DrawnTz = 100, double PigTL = 0, double DrawnTL = 0)
+        {
+            public bool Agrees => PigRise == DrawnRise && PigTz == DrawnTz && PigTL == DrawnTL;
+        }
 
         public static double Of(PigDocument doc, Page page)
         {
@@ -548,13 +556,15 @@ internal static class PdfRedact
         private static double Walk(PigDocument doc, byte[] content, DictionaryToken? resources, State start, int depth, HashSet<IndirectReference> open)
         {
             // Nothing can disagree in a stream that starts in agreement and never sets a rise or draws a form.
-            if (start.PigRise == start.DrawnRise && !Has(content, "Ts") && !Has(content, "Do")) return 0;
-            // If reading stops part way, what was not read could only be misplaced when a rise is in play.
-            bool matters = start.PigRise != start.DrawnRise || start.PigRise != 0 || Has(content, "Ts");
+            if (start.Agrees && !Has(content, "Ts") && !Has(content, "Do")) return 0;
+            // If reading stops part way, what was not read could only be misplaced when a rise, a scaling or a leading is in play.
+            bool matters = !start.Agrees || start.PigRise != 0 || start.PigTz != 100 || start.PigTL != 0
+                || Has(content, "Ts") || Has(content, "Tz") || Has(content, "TL") || Has(content, "TD");
             double drift = 0;
             var stack = new Stack<State>();
             State s = start;
             Lin tm = Lin.Identity;
+            bool lineMoved = false;   // a line move (T*, ', ") used a leading the two disagree on: the rest of the block is off
             var operands = new List<IToken>();
             try
             {
@@ -567,12 +577,21 @@ internal static class PdfRedact
                         case "q": if (stack.Count < 4096) stack.Push(s); break;
                         case "Q": if (stack.Count > 0) s = stack.Pop(); break;
                         case "cm" when Numbers(operands, 6) is double[] m: s = s with { Ctm = new Lin(m[0], m[1], m[2], m[3]).Times(s.Ctm) }; break;
-                        case "BT": tm = Lin.Identity; break;
-                        case "Tm" when Numbers(operands, 6) is double[] m: tm = new Lin(m[0], m[1], m[2], m[3]); break;
+                        case "BT": tm = Lin.Identity; lineMoved = false; break;
+                        case "Tm" when Numbers(operands, 6) is double[] m: tm = new Lin(m[0], m[1], m[2], m[3]); lineMoved = false; break;
                         case "Ts" when operands.Count > 0 && operands[^1] is NumericToken r: s = s with { PigRise = r.Double, DrawnRise = r.Double }; break;
-                        case "Tj" or "TJ" or "'" or "\"" when s.PigRise != s.DrawnRise:
-                            Lin full = tm.Times(s.Ctm);
-                            drift = Math.Max(drift, Math.Abs(s.PigRise - s.DrawnRise) * Math.Sqrt(full.C * full.C + full.D * full.D));
+                        case "Tz" when operands.Count > 0 && operands[^1] is NumericToken z: s = s with { PigTz = z.Double, DrawnTz = z.Double }; break;
+                        case "TL" when operands.Count > 0 && operands[^1] is NumericToken l: s = s with { PigTL = l.Double, DrawnTL = l.Double }; break;
+                        case "TD" when Numbers(operands, 2) is double[] td: s = s with { PigTL = -td[1], DrawnTL = -td[1] }; break;
+                        case "T*": if (s.PigTL != s.DrawnTL) lineMoved = true; break;
+                        case "Tj" or "TJ" or "'" or "\"":
+                            if (op.Data is "'" or "\"" && s.PigTL != s.DrawnTL) lineMoved = true;
+                            if (lineMoved || s.PigTz != s.DrawnTz) return double.NaN;
+                            if (s.PigRise != s.DrawnRise)
+                            {
+                                Lin full = tm.Times(s.Ctm);
+                                drift = Math.Max(drift, Math.Abs(s.PigRise - s.DrawnRise) * Math.Sqrt(full.C * full.C + full.D * full.D));
+                            }
                             break;
                         case "Do" when operands.Count > 0 && operands[^1] is NameToken name:
                             double inner = Form(doc, resources, name, s, depth, open);
@@ -590,7 +609,7 @@ internal static class PdfRedact
             return drift;
         }
 
-        /// <summary>A form XObject drawn with state <paramref name="s"/>: PdfPig keeps the rise, PDFium starts at 0.</summary>
+        /// <summary>A form XObject drawn with state <paramref name="s"/>: PdfPig keeps the rise, scaling and leading, PDFium starts at 0, 100 and 0.</summary>
         private static double Form(PigDocument doc, DictionaryToken? resources, NameToken name, State s, int depth, HashSet<IndirectReference> open)
         {
             IToken? entry = null;
@@ -598,7 +617,7 @@ internal static class PdfRedact
             var reference = entry as IndirectReferenceToken;
             if (Resolve(doc, entry) is not StreamToken form || Get(doc, form.StreamDictionary, "Subtype") is not NameToken { Data: "Form" })
                 return 0;   // an image, or nothing: no text
-            bool matters = s.PigRise != 0;
+            bool matters = s.PigRise != 0 || s.PigTz != 100 || s.PigTL != 0;
             if (depth >= MaxDepth || (reference is not null && open.Contains(reference.Data)))
                 return matters ? double.NaN : 0;   // PdfPig does not draw past this either; refuse only when it could matter
             byte[] content;
@@ -618,7 +637,7 @@ internal static class PdfRedact
             if (reference is not null) open.Add(reference.Data);
             try
             {
-                return Walk(doc, content, own, new State(s.PigRise, 0, ctm), depth + 1, open);
+                return Walk(doc, content, own, new State(s.PigRise, 0, ctm, s.PigTz, 100, s.PigTL, 0), depth + 1, open);
             }
             finally
             {
