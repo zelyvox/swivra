@@ -126,7 +126,7 @@ internal static class PdfActions
                         string hideTarget = StepTarget(i, last, suffix + Lang.T("-gizli", "-redacted"));
                         var hidden = PdfRedact.Hide(input, hideTarget);
                         var unread = HideWarnings(hidden);
-                        if (hidden.Items == 0)
+                        if (!hidden.Written)
                         {
                             // Nothing found: no redacted file. "Nothing to hide" only when everything could be read.
                             Cleanup([hideTarget]);
@@ -152,7 +152,10 @@ internal static class PdfActions
                         }
                         suffix += Lang.T("-gizli", "-redacted");
                         input = output = hideTarget;
-                        notes.Add(Lang.T($"{hidden.Items} öğe gizlendi · metin artık seçilemez", $"{hidden.Items} item(s) hidden · text is no longer selectable"));
+                        // Written with nothing found: notes and fields were left out because they could not be searched as drawn.
+                        notes.Add(hidden.Items > 0
+                            ? Lang.T($"{hidden.Items} öğe gizlendi · metin artık seçilemez", $"{hidden.Items} item(s) hidden · text is no longer selectable")
+                            : Lang.T("gizlenecek bir şey bulunamadı · metin artık seçilemez", "nothing to hide was found · text is no longer selectable"));
                         notes.AddRange(unread);
                         break;
                     case "docx":
@@ -215,14 +218,21 @@ internal static class PdfActions
 
     private static string JoinNotes(string detail, List<string> notes) => notes.Count == 0 ? detail : $"{detail} · {string.Join(" · ", notes)}";
 
-    /// <summary>What Hide could not read, for the result: images (no OCR) and notes drawn from an appearance only.</summary>
+    /// <summary>
+    /// What Hide could not read or could not carry over, for the result: images (no OCR), letters without a Unicode
+    /// value, and notes or form fields left out of the redacted file. The last two only matter when there is one.
+    /// </summary>
     private static List<string> HideWarnings(PdfRedact.Outcome o)
     {
         var w = new List<string>();
         if (o.ImagePages > 0)
             w.Add(Lang.T($"{o.ImagePages} sayfadaki görseller okunmadı (OCR yok), gözle kontrol et", $"images on {o.ImagePages} page(s) were not read (no OCR), check them by eye"));
-        if (o.NotePages > 0)
-            w.Add(Lang.T($"{o.NotePages} sayfadaki notlar okunamadı, gözle kontrol et", $"notes on {o.NotePages} page(s) could not be read, check them by eye"));
+        if (o.UnreadPages > 0)
+            w.Add(Lang.T($"{o.UnreadPages} sayfada metin okunamadı, gözle kontrol et", $"text on {o.UnreadPages} page(s) could not be read, check it by eye"));
+        if (o.Written && o.LeftOutPages > 0)
+            w.Add(Lang.T($"{o.LeftOutPages} sayfadaki notlar ve form alanları çıktıya alınamadı", $"notes and form fields on {o.LeftOutPages} page(s) could not be carried into the output"));
+        if (o.Written && o.NoLookPages > 0)
+            w.Add(Lang.T($"{o.NoLookPages} sayfada görünümü olmayan notlar ve form alanları çıktıya alınmadı", $"notes and form fields without an appearance on {o.NoLookPages} page(s) were left out of the output"));
         return w;
     }
 
