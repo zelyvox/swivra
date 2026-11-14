@@ -42,7 +42,20 @@ static class Program
         // Demo runs are dev tools too: they may start next to the tray instance.
         bool demo = args.Contains("--demo") || args.Contains("--demo-tool");
         using var single = new Mutex(true, demo ? @"Local\Swivra.Demo" : @"Local\Swivra.SingleInstance", out bool first);
-        if (!first) return 0;
+        if (!first)
+        {
+            // Starting it again from the Start menu and seeing nothing would look like a crash.
+            if (!demo)
+            {
+                Log.Write("second start: already running");
+                ApplicationConfiguration.Initialize();
+                MessageBox.Show(
+                    Lang.T("Swivra zaten çalışıyor; simgesi görev çubuğunun sağındaki tepside (gerekirse ^ okunun altında).\n\nKullanmak için bir dosyayı sürüklerken Shift, Ctrl ya da Alt'a bas.",
+                           "Swivra is already running; its icon is in the tray at the right of the taskbar (under the ^ arrow if hidden).\n\nTo use it, press Shift, Ctrl or Alt while dragging a file."),
+                    "Swivra", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            return 0;
+        }
 
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, e) => Log.Write($"ui exception: {e.Exception}");

@@ -33,8 +33,14 @@ internal sealed class InputHook : IDisposable
     /// <summary>A modifier was pressed during a drag. Point is in physical screen pixels.</summary>
     public event Action<WheelMode, Point>? ModifierDuringDrag;
 
-    /// <summary>The left button was released.</summary>
-    public event Action? LeftButtonUp;
+    /// <summary>The left button went down. Point is in physical screen pixels.</summary>
+    public event Action<Point>? LeftButtonDown;
+
+    /// <summary>
+    /// The left button was released. Carries where that press began, not where it ended: a drag that
+    /// starts inside a panel (a crop handle) and ends outside it is still a click in the panel.
+    /// </summary>
+    public event Action<Point>? LeftButtonUp;
 
     /// <summary>A key went down (first press only, no auto-repeat). Carries the virtual key code.</summary>
     public event Action<uint>? KeyPressed;
@@ -47,14 +53,20 @@ internal sealed class InputHook : IDisposable
         _keyProc = KeyCallback;
     }
 
-    /// <summary>Starts the hook thread and returns once both hooks are installed (or failed).</summary>
-    public void Install()
+    /// <summary>
+    /// Starts the hook thread and returns once both hooks are installed. False when Windows refused
+    /// either one (security software can block global hooks): without them the wheel never opens.
+    /// </summary>
+    public bool Install()
     {
-        if (_thread is not null) return;
-        using var ready = new ManualResetEventSlim();
-        _thread = new Thread(() => Run(ready)) { IsBackground = true, Name = "Swivra input hooks" };
-        _thread.Start();
-        ready.Wait();
+        if (_thread is null)
+        {
+            using var ready = new ManualResetEventSlim();
+            _thread = new Thread(() => Run(ready)) { IsBackground = true, Name = "Swivra input hooks" };
+            _thread.Start();
+            ready.Wait();
+        }
+        return _mouseHook != IntPtr.Zero && _keyHook != IntPtr.Zero;
     }
 
     private void Run(ManualResetEventSlim ready)
@@ -90,6 +102,7 @@ internal sealed class InputHook : IDisposable
                     _leftDown = true;
                     _dragging = false;
                     _downAt = p;
+                    LeftButtonDown?.Invoke(p);
                     break;
                 case Native.WM_MOUSEMOVE:
                     if (_leftDown && !_dragging &&
@@ -101,7 +114,7 @@ internal sealed class InputHook : IDisposable
                 case Native.WM_LBUTTONUP:
                     _leftDown = false;
                     _dragging = false;
-                    LeftButtonUp?.Invoke();
+                    LeftButtonUp?.Invoke(_downAt);
                     break;
             }
         }
