@@ -206,6 +206,29 @@ internal static partial class OfficeConvert
     }
 
     private static readonly XNamespace W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    // Strict OOXML spells the same vocabulary in other namespaces; Word reads both.
+    private static readonly XNamespace WStrict = "http://purl.oclc.org/ooxml/wordprocessingml/main";
+    private static readonly XNamespace Rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    private static readonly XNamespace RelStrict = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+
+    private static bool IsW(XNamespace ns) => ns == W || ns == WStrict;
+
+    /// <summary>
+    /// The value Word reads for an attribute: the one with this local name in <paramref name="ns"/>.
+    /// Null when there is none, or when another attribute carries the same local name (unqualified or in
+    /// another namespace): this code and Word could then each take a different one.
+    /// </summary>
+    private static string? OwnAttribute(XElement e, XNamespace ns, string localName)
+    {
+        XAttribute? hit = null;
+        foreach (var a in e.Attributes())
+        {
+            if (a.IsNamespaceDeclaration || a.Name.LocalName != localName) continue;
+            if (a.Name.Namespace != ns || hit is not null) return null;
+            hit = a;
+        }
+        return hit?.Value;
+    }
 
     /// <summary>A plain paragraph per line; an empty list still gives one paragraph, so a table cell stays valid.</summary>
     private static IEnumerable<XElement> Paragraphs(XNamespace w, IReadOnlyList<string> lines) =>
@@ -438,7 +461,7 @@ internal static partial class OfficeConvert
                         changed = true;
                         continue;
                     }
-                    if ((string?)rel.Attribute("TargetMode") != "External") continue;
+                    if (!IsExternal(rel)) continue;
                     if (((string?)rel.Attribute("Type"))?.EndsWith("/hyperlink", StringComparison.Ordinal) == true) continue;
                     rel.SetAttributeValue("Target", Blocked);
                     report.Links++;
@@ -476,15 +499,18 @@ internal static partial class OfficeConvert
                 changed |= CutXmlLinks(xml, PartDir(name), partNames, report);
                 foreach (var chunk in xml.Descendants().Where(e => e.Name.LocalName == "altChunk").ToList())
                 {
-                    string id = (string?)chunk.Attributes().FirstOrDefault(a => a.Name.LocalName == "id" && a.Name.Namespace != XNamespace.None) ?? "";
-                    if (!replaced.TryGetValue((name, id), out var lines))
+                    // Word reads r:id only (the Strict one in a Strict part). Another "id" beside it, or none,
+                    // leaves which relationship Word follows open, so the chunk goes.
+                    XNamespace? relNs = chunk.Name.Namespace == W ? Rel : chunk.Name.Namespace == WStrict ? RelStrict : null;
+                    string? id = relNs is null ? null : OwnAttribute(chunk, relNs, "id");
+                    if (id is null || !replaced.TryGetValue((name, id), out var lines))
                     {
-                        if (known.Contains((name, id))) continue; // a cleaned package or RTF, pinned above
+                        if (id is not null && known.Contains((name, id))) continue; // a cleaned package or RTF, pinned above
                         // Its relationship is not an altChunk one, or is missing: Word may import whatever
                         // it points at all the same, so the chunk goes.
                         lines = null;
                         report.Removed++;
-                        Log.Write($"office input: embedded section {id} in {name} removed (not an altChunk relationship)");
+                        Log.Write($"office input: embedded section {id ?? "(id unclear)"} in {name} removed (not an altChunk relationship)");
                     }
                     chunk.ReplaceWith(Paragraphs(chunk.Name.Namespace, lines ??
                         [Lang.T("[Swivra: gömülü bir bölüm güvenli okunamadığı için çıkarıldı]", "[Swivra: an embedded section was removed because it could not be read safely]")]));
@@ -584,11 +610,15 @@ internal static partial class OfficeConvert
         return XDocument.Load(reader, LoadOptions.PreserveWhitespace);
     }
 
-    /// <summary>The package's content types: which parts Word reads as XML.</summary>
+    /// <summary>
+    /// The package's content types: which parts Word reads as XML. Every Default and Override counts,
+    /// whatever its namespace and however often it repeats: a part is XML when any of them says so, as
+    /// Word may take a different one of two entries than this code would.
+    /// </summary>
     private sealed class ContentTypes
     {
-        private readonly Dictionary<string, string> _byExt = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, string> _byPart = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, bool> _byExt = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, bool> _byPart = new(StringComparer.OrdinalIgnoreCase);
 
         public static ContentTypes Read(ZipArchive zip)
         {
@@ -605,18 +635,21 @@ internal static partial class OfficeConvert
             foreach (var e in xml.Descendants())
             {
                 string type = (string?)e.Attribute("ContentType") ?? "";
-                if (e.Name.LocalName == "Default" && (string?)e.Attribute("Extension") is string ext) result._byExt.TryAdd(ext, type);
-                else if (e.Name.LocalName == "Override" && ResolvePart("", (string?)e.Attribute("PartName")) is string part) result._byPart.TryAdd(part, type);
+                bool xmlType = type.Split(';')[0].Trim().EndsWith("xml", StringComparison.OrdinalIgnoreCase);
+                if (e.Name.LocalName == "Default" && (string?)e.Attribute("Extension") is string ext) Add(result._byExt, ext, xmlType);
+                else if (e.Name.LocalName == "Override" && ResolvePart("", (string?)e.Attribute("PartName")) is string part) Add(result._byPart, part, xmlType);
             }
             return result;
+
+            static void Add(Dictionary<string, bool> map, string key, bool xmlType) =>
+                map[key] = xmlType || (map.TryGetValue(key, out bool before) && before);
         }
 
         public bool IsXml(string name)
         {
             string key = ResolvePart("", name) ?? name;
-            string? type = _byPart.TryGetValue(key, out var t) ? t
-                : _byExt.TryGetValue(Path.GetExtension(key).TrimStart('.'), out var d) ? d : null;
-            return type is not null && type.Split(';')[0].Trim().EndsWith("xml", StringComparison.OrdinalIgnoreCase);
+            return _byPart.TryGetValue(key, out bool t) ? t
+                : _byExt.TryGetValue(Path.GetExtension(key).TrimStart('.'), out bool d) && d;
         }
     }
 
@@ -723,7 +756,7 @@ internal static partial class OfficeConvert
             catch (System.Xml.XmlException ex) { throw new InvalidDataException($"part {rels} is not well-formed XML ({ex.Message})"); }
             foreach (var rel in xml.Descendants().Where(e => e.Name.LocalName == "Relationship"))
             {
-                if ((string?)rel.Attribute("TargetMode") == "External") continue; // cut with the other external links
+                if (IsExternal(rel)) continue; // cut with the other external links
                 if (((string?)rel.Attribute("Type"))?.EndsWith(AltChunkType, StringComparison.OrdinalIgnoreCase) != true) continue;
                 string? real = ResolvePart(baseDir, (string?)rel.Attribute("Target")) is string part && names.TryGetValue(part, out var hit) ? hit : null;
                 found.Add(new ChunkRef(rels, sourceEntry ?? source, (string?)rel.Attribute("Id") ?? "", real));
@@ -731,6 +764,13 @@ internal static partial class OfficeConvert
         }
         return found;
     }
+
+    /// <summary>
+    /// A relationship whose target is outside the package. Anything but a missing TargetMode or
+    /// "Internal" counts, so a spelling Word might still read as External ("external") is cut too.
+    /// </summary>
+    private static bool IsExternal(XElement rel) =>
+        rel.Attribute("TargetMode") is { } mode && !mode.Value.Trim().Equals("Internal", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>A relationship target as a package part name: escapes decoded, "." and ".." applied.</summary>
     private static string? ResolvePart(string baseDir, string? target)
@@ -834,17 +874,19 @@ internal static partial class OfficeConvert
 
     /// <summary>
     /// True when Word certainly reads <paramref name="e"/> (a w:instrText or w:fldChar) as part of the
-    /// field opened above it: it is in the WordprocessingML namespace and nothing between it and that
-    /// field's begin (or, for a field's own begin, its paragraph) is a wrapper Word may skip. A
-    /// w:delInstrText is deleted text, which Word does not read as code.
+    /// field opened above it: it is in the WordprocessingML namespace (transitional or Strict) and
+    /// nothing between it and that field's begin (or, for a field's own begin, its paragraph) is a
+    /// wrapper Word may skip or an element of the other namespace. A w:delInstrText is deleted text,
+    /// which Word does not read as code.
     /// </summary>
     private static bool Plain(XElement e, HashSet<XElement>? above)
     {
-        if (e.Name.Namespace != W || e.Name.LocalName == "delInstrText") return false;
+        var ns = e.Name.Namespace;
+        if (!IsW(ns) || e.Name.LocalName == "delInstrText") return false;
         for (var a = e.Parent; a is not null; a = a.Parent)
         {
-            if (above is not null ? above.Contains(a) : a.Name == W + "p") return true;
-            if (a.Name.Namespace != W || !ReadThrough.Contains(a.Name.LocalName)) return false;
+            if (above is not null ? above.Contains(a) : a.Name == ns + "p") return true;
+            if (a.Name.Namespace != ns || !ReadThrough.Contains(a.Name.LocalName)) return false;
         }
         return false; // no paragraph above: not where Word reads a field
     }
@@ -887,7 +929,19 @@ internal static partial class OfficeConvert
             bool plain = Plain(e, top?.Above);
             // Word may see a different nesting: every field whose code is still being read is affected.
             if (!plain) foreach (var f in open) if (f.Collecting) f.Reshaped = true;
-            switch ((string?)e.Attributes().FirstOrDefault(a => a.Name.LocalName == "fldCharType"))
+            // Word reads w:fldCharType in the element's own namespace. If that one is missing, holds
+            // another value, or has a namesake (x:fldCharType, an unqualified one), this code cannot know
+            // which of begin, separate or end Word sees: every open field becomes inert, and the mark
+            // opens a field of its own here, so whatever code follows it is caught as well.
+            string? type = IsW(e.Name.Namespace) ? OwnAttribute(e, e.Name.Namespace, "fldCharType") : null;
+            if (type is not ("begin" or "separate" or "end"))
+            {
+                foreach (var f in open) cut += Disarm(f);
+                KeepResult(e);
+                open.Push(new FieldCode(e) { Reshaped = true });
+                continue;
+            }
+            switch (type)
             {
                 case "begin":
                     if (top is { Collecting: true }) top.Nested = true;
@@ -927,6 +981,25 @@ internal static partial class OfficeConvert
         string all = string.Concat(f.Pieces.Select(p => p.Value));
         string plainOnly = string.Concat(f.Pieces.Where((p, i) => i < f.FirstWrapped || Plain(p, f.Above)).Select(p => p.Value));
         return !LooseFetching.IsMatch(Fold(all)) && !LooseFetching.IsMatch(Fold(plainOnly));
+    }
+
+    /// <summary>
+    /// A field Word may read differently from here: its code, still being read or already read and
+    /// kept, is made inert and its dirty flag goes. Returns 1 when that changed a code that was kept.
+    /// </summary>
+    private static int Disarm(FieldCode f)
+    {
+        KeepResult(f.Begin);
+        if (f.Collecting)
+        {
+            f.Reshaped = true; // made inert when it is finished
+            return 0;
+        }
+        if (f.Pieces.Count == 0 || (f.Pieces[0].Value == Inert && f.Pieces.Skip(1).All(p => p.Value.Length == 0))) return 0;
+        f.Pieces[0].Value = Inert;
+        f.Pieces[0].SetAttributeValue(XNamespace.Xml + "space", "preserve");
+        foreach (var p in f.Pieces.Skip(1)) p.Value = "";
+        return 1;
     }
 
     private static int Finish(FieldCode f)
