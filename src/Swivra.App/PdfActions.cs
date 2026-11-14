@@ -261,7 +261,7 @@ internal static class PdfActions
             w.Add(Lang.T($"{o.OcrTextPages} sayfada okunamayan metin görüntüden otomatik okundu; kaçan olabilir, gözle kontrol et",
                          $"unreadable text on {o.OcrTextPages} page(s) was read automatically from the page image; some can be missed, check it by eye"));
         if (o.ImagePages > 0)
-            w.Add(Lang.T($"{o.ImagePages} sayfadaki görseller okunmadı (OCR yok), gözle kontrol et", $"images on {o.ImagePages} page(s) were not read (no OCR), check them by eye"));
+            w.Add(Lang.T($"{o.ImagePages} sayfadaki görseller okunamadı, gözle kontrol et", $"images on {o.ImagePages} page(s) could not be read, check them by eye"));
         if (o.UnreadPages > 0)
             w.Add(Lang.T($"{o.UnreadPages} sayfada metin okunamadı, gözle kontrol et", $"text on {o.UnreadPages} page(s) could not be read, check it by eye"));
         if (o.Written && o.LeftOutPages > 0)
