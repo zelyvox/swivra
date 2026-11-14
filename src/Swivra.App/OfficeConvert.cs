@@ -13,8 +13,12 @@ namespace Swivra.App;
 /// </summary>
 internal static partial class OfficeConvert
 {
-    /// <summary>Note: what the cleaning changed in the user's document, null when nothing.</summary>
-    internal sealed record Result(string Path, string Engine, string? Note = null);
+    /// <summary>
+    /// Note: what the cleaning changed in the user's document, null when nothing. Uncleaned: the file went
+    /// to the office program as it is (a binary .doc with Word as the only engine); the note says so.
+    /// Path can differ from the requested target when another run took that name in the meantime.
+    /// </summary>
+    internal sealed record Result(string Path, string Engine, string? Note = null, bool Uncleaned = false);
 
     private const int TimeoutMs = 120_000;
 
@@ -31,30 +35,42 @@ internal static partial class OfficeConvert
         string ext = Path.GetExtension(target).ToLowerInvariant();
         string inExt = Path.GetExtension(input).ToLowerInvariant();
         string? soffice = FindLibreOffice();
-        string? work = null;
+        string? work = null, outDir = null;
         try
         {
             // The dropped file is not trusted. Word fetches a document's remote template (and linked
             // content) on open, which can leak the user's NTLM hash to a UNC path; Protected View avoids
             // that but cannot export, and leaving it triggers the fetch. So OOXML and RTF go in as a copy
             // with their external references cut. Legacy binary .doc cannot be cleaned: LibreOffice
-            // (which does not load Word templates) gets it first, Word only when it is the only engine.
+            // (which does not load Word templates) is its only engine when installed, and Word gets it
+            // only when it is the only engine there is, with a note saying it went in as it is.
             // Word reads the format from the bytes, not the name, so the bytes pick the cleaning, and
-            // nothing reaches Word as it is unless it can only be read as plain text.
+            // nothing else reaches Word as it is unless it can only be read as plain text.
             string safe = input;
             var report = new Cleaning();
-            switch (Sniff(input))
+            var kind = Sniff(input);
+            switch (kind)
             {
                 case Kind.Zip or Kind.Rtf:
                     work = Directory.CreateTempSubdirectory("swivra-word-").FullName;
                     safe = Path.Combine(work, Path.GetFileName(input));
                     SafeFile.CopyWritable(input, safe);
-                    if (Sniff(safe) == Kind.Rtf) report.Links += CutRtfReferences(safe);
-                    else if (IsOdfPackage(safe)) CleanOdf(safe, report); // by the bytes: Word imports ODF under any name
-                    // A ZIP named .odt that is no OpenDocument package: LibreOffice gets it first and would try to repair it.
-                    // A Word file renamed to .odt is still cleaned as one (both programs read it by its contents).
-                    else if (inExt == ".odt" && !HasContentTypes(safe)) throw new UnsafeDocumentException("an .odt that is not an OpenDocument package");
-                    else CutExternalReferences(safe, report);
+                    try
+                    {
+                        if (Sniff(safe) == Kind.Rtf) report.Links += CutRtfReferences(safe);
+                        else if (IsOdfPackage(safe)) CleanOdf(safe, report); // by the bytes: Word imports ODF under any name
+                        // A ZIP named .odt that is no OpenDocument package: LibreOffice gets it first and would try to repair it.
+                        // A Word file renamed to .odt is still cleaned as one (both programs read it by its contents).
+                        else if (inExt == ".odt" && !HasContentTypes(safe)) throw new UnsafeDocumentException("an .odt that is not an OpenDocument package");
+                        else CutExternalReferences(safe, report);
+                    }
+                    catch (Exception ex) when (ex is not UnsafeDocumentException)
+                    {
+                        // The cleaner's own refusal (a duplicate or oversized part, broken XML, a bad escape):
+                        // no office program has seen the file, so the user hears "could not be read safely",
+                        // not "Word could not open it", and a .docx does not slip into the text-only route.
+                        throw new UnsafeDocumentException($"cleaning failed ({ex.GetType().Name}: {ex.Message})");
+                    }
                     break;
                 case Kind.Pdf when inExt == ".pdf":
                     break; // PDF to Word: the PDF itself is read, as before
@@ -64,6 +80,7 @@ internal static partial class OfficeConvert
                         Log.Write("office input: a binary Word file under another extension, not converted");
                         return null;
                     }
+                    if (soffice is null) report.Uncleaned = true; // Word will get it as it is: the user is told
                     break;
                 default: // text, markup or unknown bytes
                     if (OoxmlExts.Contains(inExt) || inExt is ".rtf" or ".odt" or ".pdf")
@@ -100,10 +117,19 @@ internal static partial class OfficeConvert
             if (report.Note() is string done) Log.Write($"office input cleaned before conversion: {done}");
 
             string? note = report.Note();
-            if (inExt is ".doc" or ".odt" && soffice is not null && TryLibreOffice(soffice, safe, target, ext)) return new Result(target, "LibreOffice", note);
-            if (WordInstalled && TryWord(safe, target, ext)) return new Result(target, "Word", note);
-            if (inExt is not (".doc" or ".odt") && soffice is not null && TryLibreOffice(soffice, safe, target, ext)) return new Result(target, "LibreOffice", note);
-            return null;
+            // The engines write into a folder of this run's own and the result is moved to the target
+            // without overwriting: the name was picked before the conversion and another run may have
+            // taken it since. Word would save over that file, and a failed run would delete it.
+            outDir = Directory.CreateTempSubdirectory("swivra-").FullName;
+            string produced = Path.Combine(outDir, Path.GetFileName(target));
+            // A binary .doc is never cleaned: with LibreOffice installed, Word does not get it even when LibreOffice fails.
+            bool rawDoc = kind == Kind.Ole;
+            string? engine = null;
+            if (inExt is ".doc" or ".odt" && soffice is not null && TryLibreOffice(soffice, safe, produced, ext)) engine = "LibreOffice";
+            else if (WordInstalled && !(rawDoc && soffice is not null) && TryWord(safe, produced, ext)) engine = "Word";
+            else if (inExt is not (".doc" or ".odt") && soffice is not null && TryLibreOffice(soffice, safe, produced, ext)) engine = "LibreOffice";
+            if (engine is null) return null;
+            return new Result(Deliver(produced, target), engine, note, report.Uncleaned);
         }
         catch (UnsafeDocumentException ex)
         {
@@ -119,6 +145,24 @@ internal static partial class OfficeConvert
         finally
         {
             if (work is not null) try { Directory.Delete(work, true); } catch { /* harmless leftovers */ }
+            if (outDir is not null) try { Directory.Delete(outDir, true); } catch { /* same */ }
+        }
+    }
+
+    /// <summary>Moves the finished file to the target, or to the next free name if the target appeared meanwhile; never overwrites.</summary>
+    private static string Deliver(string produced, string target)
+    {
+        try
+        {
+            File.Move(produced, target);
+            return target;
+        }
+        catch (IOException) when (File.Exists(target))
+        {
+            string other = FileActions.UniquePath(Path.GetDirectoryName(target)!, Path.GetFileNameWithoutExtension(target), Path.GetExtension(target).TrimStart('.'));
+            File.Move(produced, other);
+            Log.Write("office output name taken meanwhile, saved under the next free name");
+            return other;
         }
     }
 
@@ -201,10 +245,12 @@ internal static partial class OfficeConvert
         public int AsText;  // embedded HTML/MHT/text sections kept as plain paragraphs
         public int Removed; // embedded sections that could not be read safely
         public int Macros;  // macros, scripts and event handlers removed (ODF)
+        public bool Uncleaned; // a binary .doc that goes to Word as it is
 
         public string? Note()
         {
             var parts = new List<string>();
+            if (Uncleaned) parts.Add(Lang.T("eski .doc biçimi temizlenemedi, Word'de olduğu gibi açıldı", "old .doc format could not be cleaned, opened in Word as it is"));
             // Short: it is shown in the small circle in the middle of the wheel.
             if (Links > 0) parts.Add(Lang.T($"{Links} bağlantı kesildi", $"{Links} link{(Links == 1 ? "" : "s")} cut"));
             if (AsText > 0) parts.Add(Lang.T($"{AsText} bölüm düz metin oldu", $"{AsText} section{(AsText == 1 ? "" : "s")} as plain text"));

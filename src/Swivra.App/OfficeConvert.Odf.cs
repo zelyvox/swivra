@@ -345,7 +345,7 @@ internal static partial class OfficeConvert
     private static bool FetchesCss(string css)
     {
         if (css.IndexOf('\\') >= 0) css = CssEscape.Replace(css, m => m.Groups[1].Success
-            ? char.ConvertFromUtf32(Math.Min(0x10FFFF, System.Convert.ToInt32(m.Groups[1].Value, 16)))
+            ? CssCodePoint(System.Convert.ToInt32(m.Groups[1].Value, 16))
             : m.Groups[2].Value);
         if (css.Contains("/*", StringComparison.Ordinal)) css = CssComment.Replace(css, "");
         if (css.Contains("@import", StringComparison.OrdinalIgnoreCase)) return true;
@@ -357,7 +357,11 @@ internal static partial class OfficeConvert
         return false;
     }
 
-    private static readonly System.Text.RegularExpressions.Regex CssEscape = new(@"\\(?:([0-9a-fA-F]{1,6})\s?|(.))", System.Text.RegularExpressions.RegexOptions.Singleline);
+    // As CSS reads an escape: zero, a surrogate ("\D800") or past the last code point is U+FFFD, not an error.
+    private static string CssCodePoint(int cp) =>
+        cp is 0 or > 0x10FFFF or (>= 0xD800 and <= 0xDFFF) ? "�" : char.ConvertFromUtf32(cp);
+
+    private static readonly System.Text.RegularExpressions.Regex CssEscape =new(@"\\(?:([0-9a-fA-F]{1,6})\s?|(.))", System.Text.RegularExpressions.RegexOptions.Singleline);
     private static readonly System.Text.RegularExpressions.Regex CssComment = new(@"/\*.*?\*/", System.Text.RegularExpressions.RegexOptions.Singleline);
 
     private static readonly System.Text.RegularExpressions.Regex CssUrl = new(
