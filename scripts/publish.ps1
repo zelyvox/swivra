@@ -72,8 +72,10 @@ foreach ($f in @('LICENSE.txt', 'ThirdPartyNotices.txt')) {
 
 if (-not (Test-Path (Join-Path $app 'Swivra.exe'))) { throw 'Swivra.exe is missing from the publish output' }
 if (-not (Test-Path (Join-Path $app 'web/index.html'))) { throw 'web/ is missing from the publish output' }
-# RapidOcrNet's own publish target copies the OCR models; without them OCR quietly finds nothing.
-if (-not (Test-Path (Join-Path $app 'models/v5/latin_PP-OCRv5_rec_mobile_infer.onnx'))) { throw 'models/v5 (OCR) is missing from the publish output' }
+# RapidOcrNet's own publish target copies the OCR models; without any one of them OCR quietly finds nothing.
+foreach ($m in @('ch_PP-OCRv5_mobile_det.onnx', 'latin_PP-OCRv5_rec_mobile_infer.onnx', 'ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx', 'ppocrv5_latin_dict.txt')) {
+    if (-not (Test-Path (Join-Path $app "models/v5/$m"))) { throw "models/v5/$m (OCR) is missing from the publish output" }
+}
 
 Compress-Archive -Path $app -DestinationPath $zip -CompressionLevel Optimal
 
