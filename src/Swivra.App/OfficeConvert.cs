@@ -1165,7 +1165,7 @@ internal static partial class OfficeConvert
         // An earlier crash or kill may have left this file on Word's list; its prompt would hang us.
         ForgetCrash(input);
         var before = Process.GetProcessesByName("WINWORD").Select(p => p.Id).ToHashSet();
-        int ownPid = 0; // the WINWORD that our CreateInstance started, once known
+        int ownPid = 0; // the WINWORD that our CreateInstance started, once known for certain
         bool ok = false, isPdf = Path.GetExtension(input).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
         // Opening a PDF shows a "Word will now convert your PDF" message that DisplayAlerts does not
         // cover; invisible, it would hang. Word's own switch turns it off. Word reads it at start-up,
@@ -1178,9 +1178,11 @@ internal static partial class OfficeConvert
             try
             {
                 app = Activator.CreateInstance(Type.GetTypeFromProgID("Word.Application")!)!;
-                // Right after start-up the only new WINWORD is ours. A Word the user opens later is not.
+                // Ours is new and was started by COM ("/Automation" on its command line); a Word the user
+                // opened meanwhile is new too but was not. Two such candidates cannot be told apart.
                 var started = Process.GetProcessesByName("WINWORD").Where(p => !before.Contains(p.Id)).ToList();
-                if (started.Count == 1) Volatile.Write(ref ownPid, started[0].Id);
+                var automated = started.Where(p => IsAutomationWord(p.Id)).ToList();
+                if (automated.Count == 1) Volatile.Write(ref ownPid, automated[0].Id);
                 // Word 16 always starts a new instance for automation. If none started, COM handed us a
                 // Word that was already running, maybe the user's own: hiding it, changing its settings or
                 // quitting it is not ours to do, so this engine steps aside.
@@ -1216,15 +1218,18 @@ internal static partial class OfficeConvert
         thread.Start();
         if (!thread.Join(TimeoutMs))
         {
-            // Only the Word this run started, never the user's own (not even one opened during the wait).
-            // If start-up itself hung, ownPid is unknown; then every new WINWORD is from that start-up.
+            // Only the Word this run started, never the user's own (not even one opened during the wait,
+            // which holds their unsaved work). If start-up itself hung, ownPid is unknown: then the one new
+            // WINWORD started by COM is ours. If there is not exactly one, nothing is killed.
             int pid = Volatile.Read(ref ownPid);
-            var victims = pid != 0
-                ? Process.GetProcessesByName("WINWORD").Where(p => p.Id == pid)
-                : Process.GetProcessesByName("WINWORD").Where(p => !before.Contains(p.Id));
-            foreach (var p in victims)
-                try { p.Kill(true); } catch { /* already gone */ }
-            Log.Write($"word conversion timed out (killed {(pid != 0 ? $"pid {pid}" : "new instances")})");
+            var victims = Process.GetProcessesByName("WINWORD")
+                .Where(p => (pid != 0 ? p.Id == pid : !before.Contains(p.Id)) && IsAutomationWord(p.Id)).ToList();
+            if (victims.Count == 1)
+            {
+                try { victims[0].Kill(true); } catch { /* already gone */ }
+                Log.Write($"word conversion timed out (killed pid {victims[0].Id})");
+            }
+            else Log.Write($"word conversion timed out ({victims.Count} candidate Word processes, none killed)");
             ok = false;
             ForgetCrash(input);
         }
@@ -1234,9 +1239,54 @@ internal static partial class OfficeConvert
     }
 
     /// <summary>
+    /// A Word started through COM: its command line carries "/Automation" (with -Embedding); one the
+    /// user starts does not. False when the command line cannot be read, so such a process is never
+    /// taken for ours.
+    /// </summary>
+    private static bool IsAutomationWord(int pid) =>
+        CommandLine(pid)?.Contains("/Automation", StringComparison.OrdinalIgnoreCase) == true;
+
+    private const int ProcessQueryLimitedInformation = 0x1000, ProcessCommandLineInformation = 60;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(int access, bool inherit, int pid);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(IntPtr process, int infoClass, IntPtr info, int length, out int returned);
+
+    /// <summary>Another process's command line (Windows 8.1 and later), null when it cannot be read.</summary>
+    private static string? CommandLine(int pid)
+    {
+        IntPtr process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
+        if (process == IntPtr.Zero) return null;
+        try
+        {
+            NtQueryInformationProcess(process, ProcessCommandLineInformation, IntPtr.Zero, 0, out int size);
+            if (size <= 0 || size > 1 << 20) return null;
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                if (NtQueryInformationProcess(process, ProcessCommandLineInformation, buffer, size, out _) != 0) return null;
+                // A UNICODE_STRING: its length in bytes, then a pointer to the text (inside the same buffer).
+                int bytes = (ushort)Marshal.ReadInt16(buffer);
+                IntPtr text = Marshal.ReadIntPtr(buffer, IntPtr.Size);
+                return text == IntPtr.Zero ? null : Marshal.PtrToStringUni(text, bytes / 2);
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+        catch { return null; }
+        finally { CloseHandle(process); }
+    }
+
+    /// <summary>
     /// Killing Word makes it list the file under Resiliency\DisabledItems, and next time Word asks
-    /// "this file caused a serious error, open anyway?" in a dialog nobody sees. Remove only the
-    /// entries that name this file; the user's other entries stay.
+    /// "this file caused a serious error, open anyway?" in a dialog nobody sees. Word writes the entry
+    /// when it next starts, not when it is killed, and each run converts from a new work folder, so
+    /// besides the entries that name this file, every entry under one of Swivra's own work folders
+    /// (%TEMP%\swivra-word-…) goes too. The user's other entries stay.
     /// </summary>
     private static void ForgetCrash(string input)
     {
@@ -1248,11 +1298,11 @@ internal static partial class OfficeConvert
             string needle = input.ToLowerInvariant();
             foreach (string name in key.GetValueNames())
             {
-                if (key.GetValue(name) is byte[] data && System.Text.Encoding.Unicode.GetString(data).ToLowerInvariant().Contains(needle))
-                {
-                    key.DeleteValue(name, false);
-                    Log.Write("word crash entry for the converted file removed");
-                }
+                if (key.GetValue(name) is not byte[] data) continue;
+                string text = System.Text.Encoding.Unicode.GetString(data).ToLowerInvariant();
+                if (!text.Contains(needle) && !text.Contains(@"\swivra-word-", StringComparison.Ordinal)) continue;
+                key.DeleteValue(name, false);
+                Log.Write("word crash entry for a converted file removed");
             }
         }
         catch (Exception ex) { Log.Write($"word resiliency cleanup failed: {ex.Message}"); }
