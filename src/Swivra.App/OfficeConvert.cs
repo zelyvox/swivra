@@ -293,7 +293,22 @@ internal static partial class OfficeConvert
     private static void CutExternalReferences(string path, Cleaning report)
     {
         using var file = new FileStream(path, FileMode.Open, FileAccess.ReadWrite);
-        CutPackage(file, 0, report);
+        CutPackage(file, 0, report, new Budget());
+    }
+
+    /// <summary>
+    /// Inflated bytes left for a package and every package nested in it. Each package's parts count at
+    /// their declared sizes, and a nested package also counts once more while it is held in memory, so a
+    /// small file that nests one large package in another is refused before the copies add up.
+    /// </summary>
+    private sealed class Budget
+    {
+        private long _left = MaxPackageBytes;
+
+        public void Spend(long bytes)
+        {
+            if ((_left -= bytes) < 0) throw new UnsafeDocumentException("nested packages inflate past the size limit");
+        }
     }
 
     // A chunk can hold a whole package, which can hold another; deeper than this is not opened.
@@ -316,37 +331,58 @@ internal static partial class OfficeConvert
     /// its relationship and its content-type entry go. Word's HTML import fetches links, stylesheets and
     /// pictures, and no rewrite of the markup could be shown to catch every way of spelling one.
     /// </summary>
-    private static void CutPackage(Stream stream, int depth, Cleaning report)
+    private static void CutPackage(Stream stream, int depth, Cleaning report, Budget budget)
     {
         // A read-only pass first: the limits are checked before anything is inflated, and the parts that
         // need reading are picked by name, content type or first character. An archive opened for update
         // keeps every entry it opens inflated in memory until it closes, so pictures, fonts and other
-        // binary parts are never opened there.
+        // binary parts are never opened there. Every part is still read to its end here, without being
+        // kept, so a damaged one (see CheckedRead) is refused as the whole file once was; the chunk parts
+        // are kept from this read, so a nested package is inflated once.
         List<ChunkRef> refs;
         var toRead = new Dictionary<string, bool>(StringComparer.Ordinal); // part -> Word reads it as XML
         HashSet<string> partNames;
-        using (var peek = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true))
+        var chunkData = new Dictionary<string, MemoryStream>(StringComparer.Ordinal);
+        try
         {
-            CheckEntries(peek);
-            var xmlTypes = ContentTypes.Read(peek);
-            refs = AltChunkRefs(peek);
-            partNames = peek.Entries.Select(e => e.FullName).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var e in peek.Entries)
+            using (var peek = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true))
             {
-                string name = e.FullName;
-                // Word reads a part as XML by its content type (or name); those must parse.
-                bool xmlPart = name.EndsWith(".rels", StringComparison.OrdinalIgnoreCase) || name.Equals("[Content_Types].xml", StringComparison.OrdinalIgnoreCase)
-                    || name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".svg", StringComparison.OrdinalIgnoreCase) || xmlTypes.IsXml(name);
-                if (xmlPart) { toRead[name] = true; continue; }
-                bool looks;
-                try { using var s = e.Open(); looks = LooksLikeXml(s); }
-                catch (InvalidDataException) { looks = true; } // unreadable: read again below, where it fails as before
-                if (looks) toRead[name] = false;
+                budget.Spend(CheckEntries(peek));
+                var xmlTypes = ContentTypes.Read(peek);
+                refs = AltChunkRefs(peek);
+                var chunkParts = refs.Select(r => r.Part).OfType<string>().ToHashSet(StringComparer.Ordinal);
+                partNames = peek.Entries.Select(e => e.FullName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var e in peek.Entries)
+                {
+                    string name = e.FullName;
+                    // Word reads a part as XML by its content type (or name); those must parse.
+                    bool xmlPart = name.EndsWith(".rels", StringComparison.OrdinalIgnoreCase) || name.Equals("[Content_Types].xml", StringComparison.OrdinalIgnoreCase)
+                        || name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".svg", StringComparison.OrdinalIgnoreCase) || xmlTypes.IsXml(name);
+                    MemoryStream? keep = null;
+                    if (chunkParts.Contains(name))
+                    {
+                        budget.Spend(e.Length); // held in memory while it is cleaned
+                        chunkData[name] = keep = new MemoryStream((int)e.Length);
+                    }
+                    using var s = new CheckedRead(e, keep);
+                    if (xmlPart) toRead[name] = true;
+                    else if (LooksLikeXml(s)) toRead[name] = false;
+                    s.ToEnd();
+                }
             }
+            stream.Position = 0;
+            using var zip = new ZipArchive(stream, ZipArchiveMode.Update, leaveOpen: true);
+            CutParts(zip, depth, report, budget, refs, toRead, partNames, chunkData);
         }
-        stream.Position = 0;
-        using var zip = new ZipArchive(stream, ZipArchiveMode.Update, leaveOpen: true);
+        finally
+        {
+            foreach (var ms in chunkData.Values) ms.Dispose();
+        }
+    }
 
+    private static void CutParts(ZipArchive zip, int depth, Cleaning report, Budget budget, List<ChunkRef> refs,
+        Dictionary<string, bool> toRead, HashSet<string> partNames, Dictionary<string, MemoryStream> chunkData)
+    {
         // Chunk part name -> paragraphs to put in its place (null: a placeholder line instead of its text).
         var flatten = new Dictionary<string, List<string>?>(StringComparer.Ordinal);
         // Chunk parts cleaned and kept (package, RTF): their relationship is pinned to this exact part.
@@ -354,14 +390,15 @@ internal static partial class OfficeConvert
         foreach (string part in refs.Select(r => r.Part).OfType<string>().Distinct())
         {
             var entry = zip.GetEntry(part)!;
-            byte[]? data = ReadCapped(entry, MaxChunkBytes);
-            var kind = data is null ? Kind.Other : SniffBytes(data);
-            if (data is not null && kind == Kind.Zip && depth + 1 <= MaxChunkDepth)
+            chunkData.Remove(part, out var held);
+            using var ms = held!; // its memory goes before the next chunk is cleaned
+            var data = ms.GetBuffer().AsSpan(0, (int)ms.Length);
+            var kind = SniffBytes(data);
+            if (kind == Kind.Zip && depth + 1 <= MaxChunkDepth)
             {
-                using var ms = new MemoryStream();
-                ms.Write(data);
                 var inner = new Cleaning();
-                try { CutPackage(ms, depth + 1, inner); }
+                ms.Position = 0;
+                try { CutPackage(ms, depth + 1, inner, budget); }
                 catch (Exception ex) when (ex is InvalidDataException or IOException)
                 {
                     Log.Write($"office input: embedded package {part} unreadable ({ex.Message})");
@@ -370,10 +407,10 @@ internal static partial class OfficeConvert
                     continue;
                 }
                 report.Links += inner.Links; report.AsText += inner.AsText; report.Removed += inner.Removed;
-                Overwrite(entry, ms.ToArray()); // also changes nobody counts (a removed updateFields)
+                Overwrite(entry, ms.GetBuffer().AsSpan(0, (int)ms.Length)); // also changes nobody counts (a removed updateFields)
                 kept.Add(part);
             }
-            else if (data is not null && kind == Kind.Rtf)
+            else if (kind == Kind.Rtf)
             {
                 var latin1 = System.Text.Encoding.Latin1;
                 int cut = 0;
@@ -384,7 +421,7 @@ internal static partial class OfficeConvert
             }
             else
             {
-                var lines = data is null || kind is Kind.Zip or Kind.Ole || data.Length > MaxMarkupBytes ? null : ChunkText.Lines(data);
+                var lines = kind is Kind.Zip or Kind.Ole || data.Length > MaxMarkupBytes ? null : ChunkText.Lines(data.ToArray());
                 flatten[part] = lines;
                 if (lines is null) { report.Removed++; Log.Write($"office input: embedded part {part} removed (not readable as text)"); }
                 else report.AsText++;
@@ -584,8 +621,9 @@ internal static partial class OfficeConvert
     /// name (case and escapes aside) could each be the one Word picks, and an entry that inflates past
     /// the size limit would not fit in memory. Also one with more entries, or more inflated bytes in
     /// all, than any real document. Sizes are the declared ones: the archive reader stops each entry there.
+    /// Returns the declared inflated bytes in all.
     /// </summary>
-    private static void CheckEntries(ZipArchive zip)
+    private static long CheckEntries(ZipArchive zip)
     {
         if (zip.Entries.Count > MaxEntries) throw new InvalidDataException($"{zip.Entries.Count} entries");
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -596,6 +634,80 @@ internal static partial class OfficeConvert
             if ((total += e.Length) > MaxPackageBytes) throw new InvalidDataException("package inflates past the size limit");
             if (!seen.Add(ResolvePart("", e.FullName) ?? e.FullName)) throw new InvalidDataException($"duplicate part {e.FullName}");
         }
+        return total;
+    }
+
+    /// <summary>
+    /// Reads an entry through to its end without keeping it (or into <c>keep</c>, for a part that is
+    /// cleaned in memory): the archive reader checks neither the CRC nor whether the data ends where
+    /// the header says, so both are checked here. A part that cannot be inflated, inflates to another
+    /// length or fails its CRC is refused: Word and LibreOffice would repair it or read it otherwise.
+    /// </summary>
+    private sealed class CheckedRead : Stream
+    {
+        private readonly ZipArchiveEntry _entry;
+        private readonly Stream _inner;
+        private readonly MemoryStream? _keep;
+        private uint _crc = 0xFFFFFFFF;
+        private long _read;
+
+        public CheckedRead(ZipArchiveEntry entry, MemoryStream? keep = null)
+        {
+            _entry = entry;
+            _keep = keep;
+            try { _inner = entry.Open(); }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException) { throw Damaged(ex.Message); }
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            int n;
+            try { n = _inner.Read(buffer); }
+            catch (Exception ex) when (ex is InvalidDataException or IOException) { throw Damaged(ex.Message); }
+            var got = buffer[..n];
+            uint crc = _crc;
+            foreach (byte b in got) crc = CrcTable[(crc ^ b) & 0xFF] ^ (crc >> 8);
+            _crc = crc;
+            _read += n;
+            _keep?.Write(got);
+            return n;
+        }
+
+        /// <summary>Reads what is left and compares length and CRC with the archive's own.</summary>
+        public void ToEnd()
+        {
+            var buffer = new byte[81920];
+            while (Read(buffer, 0, buffer.Length) > 0) { }
+            if (_read != _entry.Length || ~_crc != _entry.Crc32) throw Damaged("length or CRC differs");
+        }
+
+        private UnsafeDocumentException Damaged(string why) => new($"damaged part {_entry.FullName} ({why})");
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
+            base.Dispose(disposing);
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => _read; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        // CRC-32 (IEEE 802.3, reflected 0xEDB88320), as ZIP stores it.
+        private static readonly uint[] CrcTable = Enumerable.Range(0, 256).Select(i =>
+        {
+            uint c = (uint)i;
+            for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+            return c;
+        }).ToArray();
     }
 
     /// <summary>
@@ -807,7 +919,7 @@ internal static partial class OfficeConvert
         catch (InvalidDataException) { return null; }
     }
 
-    private static void Overwrite(ZipArchiveEntry entry, byte[] data)
+    private static void Overwrite(ZipArchiveEntry entry, ReadOnlySpan<byte> data)
     {
         using var w = entry.Open();
         w.SetLength(0);
