@@ -531,15 +531,15 @@ internal static partial class OfficeConvert
     private const int MaxEntries = 10_000;
     private const long MaxPackageBytes = 512L * 1024 * 1024;
 
-    private static readonly XNamespace Svg = "http://www.w3.org/2000/svg";
-
     /// <summary>
     /// The OpenDocument rule for links inside XML parts, applied to an OOXML part other than relationships
     /// and content types: SVG pictures (href, xlink:href, url() in styles), VML (o:href, src) and whatever
     /// else names an address in an attribute. The same copy can go to LibreOffice, whose SVG and VML
     /// importers follow them. Every href or src that does not name a part of this package is pointed at
     /// <see cref="Blocked"/>; inline raster pictures (data:image/...) and cid: names, which reach nothing,
-    /// stay. xml:base and xml-stylesheet instructions go; CSS that loads from an address is refused.
+    /// stay. xml:base and xml-stylesheet instructions go; CSS that loads from an address is refused, in a
+    /// style element or any attribute, whatever its namespace: an SVG importer may take a picture without
+    /// (or under another) namespace as SVG all the same, and url(#id) inside the picture still passes.
     /// </summary>
     private static bool CutXmlLinks(XDocument xml, string partDir, HashSet<string> names, Cleaning report)
     {
@@ -549,10 +549,9 @@ internal static partial class OfficeConvert
             pi.Remove();
             changed = true;
         }
-        bool svg = xml.Root?.Name.Namespace == Svg;
         foreach (var el in xml.Descendants())
         {
-            if (svg && el.Name.LocalName == "style" && FetchesCss(el.Value)) throw new UnsafeDocumentException("style sheet that loads from an address");
+            if (el.Name.LocalName == "style" && FetchesCss(el.Value)) throw new UnsafeDocumentException("style sheet that loads from an address");
             foreach (var attr in el.Attributes().ToList())
             {
                 if (attr.IsNamespaceDeclaration) continue;
@@ -562,8 +561,8 @@ internal static partial class OfficeConvert
                     changed = true;
                     continue;
                 }
-                // In an SVG any presentation attribute can take url(); elsewhere only a style (VML's) holds CSS.
-                if ((svg || attr.Name.LocalName == "style") && FetchesCss(attr.Value))
+                // style="", and SVG presentation attributes (fill, filter, mask, clip-path, marker-*) that take url().
+                if (FetchesCss(attr.Value))
                     throw new UnsafeDocumentException($"attribute {attr.Name.LocalName} that loads from an address");
                 if (attr.Name.LocalName is not ("href" or "src")) continue;
                 string href = attr.Value.Trim();
