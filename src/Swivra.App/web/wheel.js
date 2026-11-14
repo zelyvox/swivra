@@ -47,6 +47,7 @@ function actionsFor(file, mode) {
       { id: 'cmp', label: t('Sıkıştır', 'Compress'), icon: IC.compress, ready: true, prev: t('JPG, kalite %70', 'JPG, quality 70%') },
       { id: 'bg', label: t('Arka planı sil', 'Cut out'), icon: IC.erase, ready: true, prev: t('Şeffaf PNG · basit nesnelerde iyi', 'Transparent PNG · best on simple subjects') },
       { id: 'loc', label: t('Konumu sil', 'Remove location'), icon: IC.pinoff, radar: true, ready: true, prev: t('Konum ve cihaz bilgisi silinir', 'Removes location and device info') },
+      { id: 'hide', label: t('Gizle', 'Hide'), icon: IC.hide, radar: true, ready: true, prev: t('TC, IBAN, e-posta, telefon karartılır', 'ID, IBAN, email, phone blacked out') },
       { id: 'rs', label: t('Boyutlandır', 'Resize'), icon: IC.resize, ready: true, prev: t('1080 px genişlik', '1080 px wide') },
       { id: 'rot', label: t('Döndür', 'Rotate'), icon: IC.rotate, ready: true, prev: t('90° sağa', '90° clockwise') }
     ];
