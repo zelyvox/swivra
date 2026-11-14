@@ -2,6 +2,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Net;
 using System.Text.Json;
+using Microsoft.Web.WebView2.Core;
 
 namespace Swivra.App;
 
@@ -58,7 +59,8 @@ internal sealed class SwivraContext : ApplicationContext
         };
 
         _hook.ModifierDuringDrag += (mode, pt) => _overlay.BeginInvoke(() => OnModifier(mode, pt));
-        _hook.LeftButtonUp += () => _overlay.BeginInvoke(OnLeftUp);
+        _hook.LeftButtonDown += pt => _overlay.BeginInvoke(() => OnLeftDown(pt));
+        _hook.LeftButtonUp += downAt => _overlay.BeginInvoke(() => OnLeftUp(downAt));
         _hook.KeyPressed += vk => _overlay.BeginInvoke(() => OnKey(vk));
 
         _catcher.DragEnter += OnDragEnter;
@@ -68,7 +70,11 @@ internal sealed class SwivraContext : ApplicationContext
 
         _overlay.Message += OnWebMessage;
         _overlay.PageReloaded += OnPageReloaded;
-        _ = StartAsync();
+        _overlay.Failed += OnOverlayFailed;
+        // Start once the message loop runs. Started from here, a failure that comes before the first
+        // await (no WebView2 Runtime throws at once) would call ExitThread before Application.Run, which
+        // then never returns: an invisible process holding the single-instance mutex.
+        After(1, () => _ = StartAsync());
     }
 
     private async Task StartAsync()
@@ -77,7 +83,14 @@ internal sealed class SwivraContext : ApplicationContext
         {
             await _overlay.InitAsync();
             _overlay.Post(new { type = "lang", lang = Lang.Current });
-            _hook.Install();
+            if (!_hook.Install())
+            {
+                // Without the hooks no drag is ever seen: the tray icon would sit there doing nothing.
+                MessageBox.Show(
+                    Lang.T("Swivra sürüklemeleri göremiyor: Windows fare ve klavye izlemesine izin vermedi. Bir güvenlik programı engelliyor olabilir.\n\nSwivra'yı yeniden başlatmayı dene; sürerse güvenlik programında Swivra'ya izin ver. Ayrıntı kayıt dosyasında.",
+                           "Swivra cannot see drags: Windows did not allow it to watch the mouse and keyboard. Security software may be blocking it.\n\nTry restarting Swivra; if it persists, allow Swivra in your security software. See the log file for details."),
+                    "Swivra", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
             if (!_args.Contains("--demo") && !_args.Contains("--demo-tool")) AskStartupOnce();
             int demo = Array.IndexOf(_args, "--demo");
             if (demo >= 0)
@@ -92,12 +105,50 @@ internal sealed class SwivraContext : ApplicationContext
                 RunToolDemo(_args[demoTool + 1], _args[demoTool + 2], shot >= 0 && shot + 1 < _args.Length ? _args[shot + 1] : null);
             }
         }
+        catch (WebView2RuntimeNotFoundException ex)
+        {
+            Log.Write($"startup failed, no WebView2 Runtime: {ex.Message}");
+            var answer = MessageBox.Show(
+                Lang.T("Swivra'nın çalışması için Microsoft Edge WebView2 Runtime gerekli. Bu bilgisayarda bulunamadı.\n\nİndirme sayfası açılsın mı? Kurduktan sonra Swivra'yı yeniden başlat.",
+                       "Swivra needs the Microsoft Edge WebView2 Runtime to run. It was not found on this PC.\n\nOpen the download page? Start Swivra again after installing it."),
+                "Swivra", MessageBoxButtons.YesNo, MessageBoxIcon.Error);
+            if (answer == DialogResult.Yes)
+            {
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(WebView2DownloadUrl) { UseShellExecute = true }); }
+                catch (Exception oe) { Log.Write($"could not open the WebView2 page: {oe.Message}"); }
+            }
+            ExitThread();
+        }
         catch (Exception ex)
         {
             Log.Write($"startup failed: {ex}");
-            MessageBox.Show(Lang.T("Swivra başlatılamadı. Ayrıntı kayıt dosyasında.", "Swivra could not start. See the log file for details."), "Swivra");
+            MessageBox.Show(Lang.T("Swivra başlatılamadı. Ayrıntı kayıt dosyasında.", "Swivra could not start. See the log file for details."), "Swivra", MessageBoxButtons.OK, MessageBoxIcon.Error);
             ExitThread();
         }
+    }
+
+    private const string WebView2DownloadUrl = "https://developer.microsoft.com/microsoft-edge/webview2/";
+
+    /// <summary>The wheel's page could not be brought back after WebView2 died: the wheel will not open again until a restart.</summary>
+    private void OnOverlayFailed()
+    {
+        _awaitingPage = 0;
+        _dropping = false;
+        if (_visible) CloseWheel();
+        TellRestart();
+    }
+
+    private DateTime _lastRestartNotice;
+
+    private void TellRestart()
+    {
+        // Every swallowed summon would repeat it; once a minute is enough to be seen.
+        if (DateTime.UtcNow - _lastRestartNotice < TimeSpan.FromMinutes(1)) return;
+        _lastRestartNotice = DateTime.UtcNow;
+        _tray.ShowBalloonTip(10000, Lang.T("Swivra yeniden başlatılmalı", "Swivra needs a restart"),
+            Lang.T("Çark çizilemiyor (WebView2 kapandı). Tepsiden Çıkış'a basıp Swivra'yı yeniden aç.",
+                   "The wheel cannot be drawn (WebView2 stopped). Use Exit in the tray menu and open Swivra again."),
+            ToolTipIcon.Error);
     }
 
     /// <summary>
@@ -127,10 +178,39 @@ internal sealed class SwivraContext : ApplicationContext
         lang.DropDownItems.Add(new ToolStripMenuItem("English", null, (_, _) => SetLanguage("en")) { Checked = !Lang.IsTurkish });
         menu.Items.Add(lang);
         var startup = new ToolStripMenuItem(Lang.T("Windows ile başlat", "Start with Windows")) { Checked = Startup.IsEnabled };
-        startup.Click += (_, _) => { Startup.Set(!Startup.IsEnabled); startup.Checked = Startup.IsEnabled; };
+        startup.Click += (_, _) =>
+        {
+            bool on = !Startup.IsEnabled;
+            if (!Startup.Set(on)) TellStartupFailed(on);
+            startup.Checked = Startup.IsEnabled;
+        };
         menu.Items.Add(startup);
         menu.Items.Add(Lang.T("Kayıtları aç", "Open logs"), null, (_, _) => OpenLogFolder());
-        menu.Items.Add(Lang.T("Çıkış", "Exit"), null, (_, _) => ExitThread());
+        menu.Items.Add(Lang.T("Çıkış", "Exit"), null, (_, _) => Exit());
+    }
+
+    /// <summary>The registry refused the "start with Windows" entry: the tick stays as it was, and this says why.</summary>
+    private static void TellStartupFailed(bool on) =>
+        MessageBox.Show(
+            on ? Lang.T("Swivra, Windows ile başlayacak şekilde ayarlanamadı: kayıt defterine yazılamadı. Ayrıntı kayıt dosyasında.",
+                        "Swivra could not be set to start with Windows: the registry could not be written. See the log file for details.")
+               : Lang.T("Windows ile başlatma kapatılamadı: kayıt defterine yazılamadı. Ayrıntı kayıt dosyasında.",
+                        "Start with Windows could not be turned off: the registry could not be written. See the log file for details."),
+            "Swivra", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+    /// <summary>Exit from the tray. A file being processed would be cut halfway, so that is asked first.</summary>
+    private void Exit()
+    {
+        if (_runsInFlight > 0)
+        {
+            var answer = MessageBox.Show(
+                Lang.T("Bir dosya işlemi sürüyor; çıkarsan yarıda kesilir. Yine de çıkılsın mı?",
+                       "A file is still being processed; exiting cuts it off halfway. Exit anyway?"),
+                "Swivra", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes) return;
+            Log.Write($"exit while {_runsInFlight} run(s) in flight");
+        }
+        ExitThread();
     }
 
     /// <summary>
@@ -146,7 +226,7 @@ internal sealed class SwivraContext : ApplicationContext
             Lang.T("Swivra yalnız açıkken çalışır. Windows açıldığında kendiliğinden başlasın mı?\n\nBunu sonra tepsi menüsünden değiştirebilirsin.",
                    "Swivra only works while it is running. Start it with Windows?\n\nYou can change this later from the tray menu."),
             "Swivra", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-        if (answer == DialogResult.Yes) Startup.Set(true);
+        if (answer == DialogResult.Yes && !Startup.Set(true)) TellStartupFailed(true);
         BuildTrayMenu();
     }
 
@@ -167,7 +247,13 @@ internal sealed class SwivraContext : ApplicationContext
 
     private void OnModifier(WheelMode mode, Point pt)
     {
-        if (!_overlay.Ready) return;
+        if (!_overlay.Ready)
+        {
+            // The page is reloading or gone: the summon is lost, so leave a trace and, if it is gone for good, say so.
+            Log.Write($"summon ignored mode={mode}: wheel page not ready{(_overlay.Broken ? " (needs restart)" : "")}");
+            if (_overlay.Broken) TellRestart();
+            return;
+        }
         if (_visible)
         {
             _overlay.Post(new { type = "mode", mode = ModeName(mode) });
@@ -204,6 +290,7 @@ internal sealed class SwivraContext : ApplicationContext
         _hideTimer.Stop();
         _session++;
         _dropping = false;
+        _panel = false; // a panel left from an earlier wheel must not make this one close on a click
         _files = [];
         _overlay.ShowAt(pt);
         _catcher.Cover(_overlay.Bounds);
@@ -212,20 +299,51 @@ internal sealed class SwivraContext : ApplicationContext
         _overlay.Post(new { type = "open", mode = ModeName(mode) });
     }
 
-    private void OnLeftUp()
+    /// <param name="downAt">Where the press began: dragging a crop handle out of the panel and letting go there is not a click outside.</param>
+    private void OnLeftUp(Point downAt)
     {
         if (_panel)
         {
             // The panel is clicked like any window; a click outside it means "never mind".
-            if (!_overlay.Bounds.Contains(Cursor.Position)) CancelWheel();
+            if (_overlay.Bounds.Contains(downAt)) return;
+            if (IsRunShown()) HideRunningWheel(); // cropping or locking already runs: let it finish unseen, not "never mind"
+            else CancelWheel();
             return;
         }
         if (_visible) _hideTimer.Start();
     }
 
+    /// <summary>
+    /// A press outside the wheel while its work runs puts the wheel away; the work goes on and its result
+    /// comes as a tray notice. Only a new press counts: the drop's own release began outside the wheel too.
+    /// </summary>
+    private void OnLeftDown(Point pt)
+    {
+        if (IsRunShown() && !_panel && !_overlay.Bounds.Contains(pt)) HideRunningWheel();
+    }
+
+    /// <summary>The wheel is on screen and waits for a run (a slow Word conversion can take minutes).</summary>
+    private bool IsRunShown() => _visible && _runSession == _session && _runSession != 0;
+
+    private void HideRunningWheel()
+    {
+        Log.Write("wheel put away while its run goes on");
+        _dropping = false;
+        CloseWheel();
+        _tray.ShowBalloonTip(4000, Lang.T("Swivra çalışmayı sürdürüyor", "Swivra is still working"),
+            Lang.T("İşlem arka planda sürüyor, bitince haber vereceğim.", "It goes on in the background; you will get a notice when it is done."),
+            ToolTipIcon.Info);
+    }
+
     /// <summary>The panel never takes focus (it must not steal it from Explorer), so its keys come from the hook.</summary>
     private void OnKey(uint vk)
     {
+        if (vk == 0x1B && IsRunShown())
+        {
+            // Esc while the work runs: the wheel (or panel) goes, the work does not.
+            HideRunningWheel();
+            return;
+        }
         if (!_panel) return;
         if (vk == 0x1B) _overlay.Post(new { type = "key", key = "esc" });
         else if (vk == 0x0D) _overlay.Post(new { type = "key", key = "enter" });
@@ -257,7 +375,8 @@ internal sealed class SwivraContext : ApplicationContext
         t.Tick += (_, _) =>
         {
             t.Dispose();
-            if (!_visible) _overlay.Hide();
+            // A page that is not ready hides itself; meanwhile it may be booting a new WebView2 off-screen.
+            if (!_visible && _overlay.Ready) _overlay.Hide();
         };
         t.Start();
     }
@@ -321,6 +440,11 @@ internal sealed class SwivraContext : ApplicationContext
 
     private int _awaitingPage;
 
+    // The wheel whose run is under way (0: none), so a press outside or Esc can put it away meanwhile.
+    private int _runSession;
+    // Runs not finished yet, from any wheel: exiting now would cut them, so Exit asks first.
+    private int _runsInFlight;
+
     /// <summary>The page was reloaded after its renderer died: whatever the wheel was doing is gone.</summary>
     private void OnPageReloaded()
     {
@@ -342,9 +466,10 @@ internal sealed class SwivraContext : ApplicationContext
                 break;
             case "tool":
                 string? tool = msg.TryGetProperty("tool", out var tl) ? tl.GetString() : null;
+                bool chained = msg.TryGetProperty("steps", out var ts) && ts.ValueKind == JsonValueKind.Array && ts.GetArrayLength() > 0;
                 if (tool == "crop") StartCrop();
                 else if (tool == "lock") StartLock();
-                else if (tool == "tel") StartTel();
+                else if (tool == "tel") StartTel(chained);
                 break;
             case "panel-size":
                 _panel = true;
@@ -397,9 +522,19 @@ internal sealed class SwivraContext : ApplicationContext
     /// "To phone": starts the LAN server for the dragged files and hands the web UI the URL and QR code.
     /// The server lives until the panel closes (CloseWheel) or its 10 minutes run out.
     /// </summary>
-    private void StartTel()
+    /// <param name="chained">A chain was built before the drop. The phone gets the files as they are, so the
+    /// chain (say, "Remove location") would be silently skipped and the original sent: refused instead,
+    /// like the other send steps.</param>
+    private void StartTel(bool chained = false)
     {
         string title = Lang.T("Telefona", "To phone");
+        if (chained)
+        {
+            Log.Write("phone share refused: dropped with a chain");
+            _overlay.Post(new { type = "result", ok = false, title, detail = Lang.T("Telefona zincirde tek başına olmalı", "To phone must be alone in the chain") });
+            FinishSoon();
+            return;
+        }
         var files = _files.Where(File.Exists).ToArray();
         if (files.Length == 0)
         {
@@ -460,6 +595,7 @@ internal sealed class SwivraContext : ApplicationContext
         if (share is null) return;
         if (hard) share.Dispose();
         else if (share.Stop()) Drain(share);
+        else share.Dispose(); // nothing runs: let its token sources go now
     }
 
     /// <summary>"Close when done": the panel closes, the running download goes on and is shown in the tray.</summary>
@@ -467,8 +603,10 @@ internal sealed class SwivraContext : ApplicationContext
     {
         if (_share is not { } share) return;
         _share = null;
-        share.Stop();
-        Drain(share);
+        // Stop() says whether a download still runs; one that ended a moment ago leaves nothing to wait for,
+        // and draining it would keep "sending 0%" in the tray for good.
+        if (share.Stop()) Drain(share);
+        else share.Dispose();
     }
 
     private void Drain(PhoneShare share)
@@ -609,10 +747,14 @@ internal sealed class SwivraContext : ApplicationContext
         string[] files = _files;
         int session = _session;
         Log.Write($"run {string.Join(">", steps)} on {string.Join(" | ", files)}");
+        _runSession = session;
+        _runsInFlight++;
         Task.Run(() => FileActions.Run(files, steps, options)).ContinueWith(t =>
         {
             _overlay.BeginInvoke(() =>
             {
+                _runsInFlight--;
+                if (_runSession == session) _runSession = 0;
                 var r = t.IsCompletedSuccessfully ? t.Result : new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("Beklenmeyen hata", "Unexpected error"));
                 if (!t.IsCompletedSuccessfully) Log.Write($"run crashed: {t.Exception?.InnerException}");
                 try
@@ -661,10 +803,14 @@ internal sealed class SwivraContext : ApplicationContext
         _overlay.Post(new { type = "enter", files = new[] { new { name = Lang.T("Tatil", "Holiday"), ext = "jpg", kind = "img", size = Lang.T("5,1 MB", "5.1 MB") } }, count = 1 });
         _overlay.Post(new { type = "radar", sens = new[] { Lang.T("Konum bilgisi", "Location"), Lang.T("Cihaz modeli", "Device model") } });
 
-        After(900, () => _overlay.Post(new { type = "over", x = 170 + 104, y = 170 - 56 }));
+        // The demo's timers belong to its own wheel: if the user closed it and opened a real one, they
+        // must not hover, shoot or close that one.
+        int session = _session;
+        bool Mine() => session == _session && _visible;
+        After(900, () => { if (Mine()) _overlay.Post(new { type = "over", x = 170 + 104, y = 170 - 56 }); });
         After(2400, () =>
         {
-            if (shotPath is null) return;
+            if (shotPath is null || !Mine()) return;
             var b = _overlay.Bounds;
             b.Inflate(60, 60);
             using var bmp = new Bitmap(b.Width, b.Height);
@@ -675,7 +821,7 @@ internal sealed class SwivraContext : ApplicationContext
         });
         After(4200, () =>
         {
-            CloseWheel();
+            if (Mine()) CloseWheel();
             if (shotPath is not null) After(400, ExitThread);
         });
     }
@@ -689,7 +835,7 @@ internal sealed class SwivraContext : ApplicationContext
         ShowWheel(WheelMode.Tools, center);
         _files = [Path.GetFullPath(file)];
         _dropping = true;
-        After(500, tool == "lock" ? StartLock : tool == "tel" ? StartTel : StartCrop);
+        After(500, tool == "lock" ? StartLock : tool == "tel" ? () => StartTel() : StartCrop);
         if (shotPath is null) return;
         After(tool == "tel" ? 6000 : 1800, () =>
         {

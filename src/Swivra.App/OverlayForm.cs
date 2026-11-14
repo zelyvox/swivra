@@ -18,7 +18,7 @@ internal sealed class OverlayForm : Form
     public const int CssBleed = 24;       // extra snapshot margin so the blur has no dark edge
     public const int CssPanelRadius = 24; // must match .panel border-radius in web/wheel.css
 
-    private readonly WebView2 _web = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.Transparent };
+    private WebView2 _web = new(){ Dock = DockStyle.Fill, DefaultBackgroundColor = Color.Transparent };
 
     public bool Ready { get; private set; }
 
@@ -49,6 +49,10 @@ internal sealed class OverlayForm : Form
         }
     }
 
+    /// <summary>
+    /// Boots WebView2 and loads the wheel page. Throws when either fails (no WebView2 Runtime, web/
+    /// missing, ...): the host must tell the user, not run on as a tray icon that does nothing.
+    /// </summary>
     public async Task InitAsync()
     {
         // WebView2 needs a real window; park it off-screen while it boots.
@@ -60,6 +64,7 @@ internal sealed class OverlayForm : Form
         await _web.EnsureCoreWebView2Async(env);
 
         var core = _web.CoreWebView2;
+        int generation = ++_generation;
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
@@ -81,36 +86,120 @@ internal sealed class OverlayForm : Form
             }
         };
 
-        var loaded = new TaskCompletionSource<bool>();
-        core.NavigationCompleted += (_, args) => loaded.TrySetResult(args.IsSuccess);
+        var loaded = new TaskCompletionSource<CoreWebView2WebErrorStatus?>();
+        core.NavigationCompleted += (_, args) => loaded.TrySetResult(args.IsSuccess ? null : args.WebErrorStatus);
         core.Navigate("https://swivra.local/index.html");
-        bool ok = await loaded.Task;
-        Log.Write($"webview ready ok={ok} version={core.Environment.BrowserVersionString}");
-
+        var error = await loaded.Task;
+        Log.Write($"webview ready ok={error is null} version={core.Environment.BrowserVersionString}");
         Hide();
-        Ready = ok;
+        // Without its page the wheel can never open; staying up as a silent tray icon would hide that.
+        if (error is not null) throw new InvalidOperationException($"the wheel page did not load ({error}) from {webDir}");
+        Ready = true;
 
         // A tray app runs for days; if the page's renderer dies, reload it instead of posting into a dead page.
         core.ProcessFailed += (_, e) =>
         {
+            if (generation != _generation) return; // a WebView2 already replaced
             Log.Write($"webview process failed: {e.ProcessFailedKind} {e.Reason}");
-            if (e.ProcessFailedKind is CoreWebView2ProcessFailedKind.BrowserProcessExited) { Ready = false; return; }
+            if (e.ProcessFailedKind is CoreWebView2ProcessFailedKind.BrowserProcessExited)
+            {
+                // The whole control is dead with its browser: only a new one brings the wheel back.
+                Ready = false;
+                Hide();
+                _ = RecreateAsync();
+                return;
+            }
             if (e.ProcessFailedKind is not (CoreWebView2ProcessFailedKind.RenderProcessExited or CoreWebView2ProcessFailedKind.RenderProcessUnresponsive)) return;
             Ready = false;
             Hide();
-            try { core.Reload(); } catch (Exception ex) { Log.Write($"webview reload failed: {ex.Message}"); }
+            try { core.Reload(); }
+            catch (Exception ex)
+            {
+                Log.Write($"webview reload failed: {ex.Message}");
+                GiveUp();
+            }
         };
         core.NavigationCompleted += (_, args) =>
         {
-            if (Ready || !args.IsSuccess) return;
+            if (generation != _generation || Ready) return;
+            if (!args.IsSuccess)
+            {
+                Log.Write($"webview reload did not load: {args.WebErrorStatus}");
+                GiveUp();
+                return;
+            }
             Ready = true;
+            Broken = false;
             Log.Write("webview page reloaded");
             PageReloaded?.Invoke();
         };
     }
 
-    /// <summary>The page came back after its renderer died; the host resets the wheel and resends the language.</summary>
+    // Bumped for every WebView2 created, so events from one that was replaced are ignored.
+    private int _generation;
+    private bool _recreating;
+
+    /// <summary>
+    /// The browser process died, taking the control with it: build a new control and environment and
+    /// load the page again. A second try follows a pause (the old browser may still hold its folder).
+    /// </summary>
+    private async Task RecreateAsync()
+    {
+        if (_recreating) return;
+        _recreating = true;
+        try
+        {
+            for (int attempt = 1; attempt <= 2; attempt++)
+            {
+                await Task.Delay(attempt == 1 ? 500 : 3000);
+                try
+                {
+                    var old = _web;
+                    _generation++; // the old control's late events are stale from here on
+                    Controls.Remove(old);
+                    try { old.Dispose(); } catch (Exception ex) { Log.Write($"old webview dispose failed: {ex.Message}"); }
+                    _web = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.Transparent };
+                    Controls.Add(_web);
+                    await InitAsync();
+                    Broken = false;
+                    Log.Write($"webview recreated (attempt {attempt})");
+                    PageReloaded?.Invoke();
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Ready = false;
+                    Hide();
+                    Log.Write($"webview recreate attempt {attempt} failed: {ex.Message}");
+                }
+            }
+            GiveUp();
+        }
+        finally
+        {
+            _recreating = false;
+        }
+    }
+
+    /// <summary>The wheel cannot be brought back in this run; the host tells the user to restart Swivra.</summary>
+    private void GiveUp()
+    {
+        Ready = false;
+        Hide();
+        if (Broken) return;
+        Broken = true;
+        Log.Write("webview could not be recovered: Swivra needs a restart");
+        Failed?.Invoke();
+    }
+
+    /// <summary>True once the page could not be brought back; only a restart helps.</summary>
+    public bool Broken { get; private set; }
+
+    /// <summary>The page came back after its renderer or browser died; the host resets the wheel and resends the language.</summary>
     public event Action? PageReloaded;
+
+    /// <summary>The page could not be brought back; the host must say so, the wheel will not open.</summary>
+    public event Action? Failed;
 
     /// <summary>Centers the wheel on a physical screen point and shows it without stealing focus.</summary>
     public void ShowAt(Point center)
