@@ -20,7 +20,7 @@ There are three wheels. The key you press decides which one opens.
 
 ### Tools (Ctrl)
 
-- **Images:** crop, compress, remove the background, rotate, resize to 1080 pixels wide, remove location and camera data.
+- **Images:** crop, compress, remove the background, rotate, resize to 1080 pixels wide, remove location and camera data, hide sensitive data in screenshots, photos and scans.
 - **PDF:** compress, hide sensitive data, split into pages, merge, rotate, lock with a password.
 - **Other files:** compress into a zip, put into a password-protected zip. Hide sensitive data in text and Word files.
 
@@ -34,8 +34,8 @@ There are three wheels. The key you press decides which one opens.
 ## Highlights
 
 - **Chains:** Rest on a slice for about half a second and that step joins a chain. When you drop the file, every step in the chain runs in order. For example: rotate, then remove location data, then convert to JPG. WhatsApp, Mail and To phone send the file as it is, so they run alone, not at the end of a chain.
-- **Sensitive-data radar:** While you drag, Swivra looks inside the file. If it finds location data, a camera model, a Turkish ID number, an IBAN, an e-mail address or a phone number, the edge of the wheel turns orange. For PDFs, the first 20 pages are scanned.
-- **Real redaction:** In PDFs, hidden items are covered with black boxes and the pages are turned into images, so the covered text cannot be copied back out. In text and Word files the items are replaced with block characters.
+- **Sensitive-data radar:** While you drag, Swivra looks inside the file. If it finds location data, a camera model, a Turkish ID number, an IBAN, an e-mail address or a phone number, the edge of the wheel turns orange. For PDFs, the first 20 pages are scanned. In images it also reads the text in the picture (a photographed ID card, a screenshot of a receipt); it has about three seconds for that while you drag, so small print in a large photo can be missed.
+- **Real redaction:** In PDFs, hidden items are covered with black boxes and the pages are turned into images, so the covered text cannot be copied back out. In text and Word files the items are replaced with block characters. In images the text is read on your PC and each item is painted over in solid black, in a new file without location or camera data; when nothing is found, no file is made.
 - **Your original is never changed:** The result is always saved next to the original under a new name, for example `Holiday-clean.jpg`.
 - **Several files at once:** Drag several files together. Dropping several PDFs on **Merge** gives you one PDF.
 - **Turkish and English:** Switch the language from the tray menu.
@@ -72,7 +72,8 @@ The app is not code-signed, so Windows SmartScreen may warn you the first time. 
 - **Word, RTF and OpenDocument files from others:** Word can reach out to the internet or your network when it opens a file: a remote template, a linked picture, a field that pulls in another file, an embedded web page. Swivra gives Word a cleaned copy instead: these links are cut, and embedded web-page sections are kept as plain text. Your original file is not changed, and the result tells you what was cut. A web page saved as `.doc` is converted from its text only. Old binary `.doc` files cannot be cleaned this way; LibreOffice is used for them when it is installed, as it does not load Word templates. An `.odt` is cleaned the same way before LibreOffice or Word opens it: links to pictures, sections, objects, fonts and templates outside the file are cut, and macros are removed. LibreOffice also runs with macros, link updates and the document's printer turned off. An `.odt` that cannot be read with confidence (encrypted, damaged, or a spreadsheet renamed to `.odt`) is not opened at all.
 - **To phone:** The first time, Windows Firewall asks whether Swivra may use the network. If you do not allow it, your phone cannot connect.
 - **Password-protected zip:** Encrypted with AES-256. The zip support built into Windows cannot open it; use [7-Zip](https://www.7-zip.org/).
-- **Scanned documents:** Text inside scanned page images cannot be read yet, so the radar and redaction do not see it.
+- **Text in images:** Swivra reads printed text in images on your PC, without the internet. Handwriting, very small or blurry text and unusual fonts can be missed, so Hide on an image always asks you to check the result by eye; it never calls an image clean. Only the first frame of an animated GIF, WebP or PNG, and the first page of a multi-page TIFF, is read and saved.
+- **Scanned PDFs:** Text inside the page images of a PDF cannot be read yet, so the radar and PDF redaction do not see it.
 - **Embedded objects in Word files:** Embedded Word, Excel and PowerPoint files are masked too, but other embedded objects (older binary OLE objects, ActiveX controls) cannot be looked into. Hide leaves them as they are and tells you how many there were.
 - **Background removal:** Runs entirely on your PC with a small AI model (U-2-Net). It works well on clear subjects; hair and fine edges are not perfect.
 - **Internet:** Swivra sends nothing to the internet. Only the To phone slice uses your local network: while its panel is open, and, if you choose **Close when done**, until the download already running ends (10 minutes at most). No new download starts once the panel is closed; the running one shows in the tray, where you can stop it.
@@ -112,7 +113,7 @@ Results of `--run` and `--radar` are written to the log file.
 - **Keyboard and mouse listener** (`InputHook`): Notices when Shift, Ctrl or Alt is pressed during a drag. It never blocks a key.
 - **Wheel window** (`OverlayForm`): A round, always-on-top window that never steals focus. WebView2 draws the wheel (`web/`). The glass effect is a blurred screenshot of the area behind the wheel, taken just before it opens.
 - **Drop target** (`CatcherForm`): A nearly invisible window on top of the wheel. It is what actually receives the file, and it always reports the drop as a copy, so File Explorer never moves your original.
-- **Processing:** Images use GDI+ and SkiaSharp; PDFs use PDFium, PdfPig and PDFsharp; Word files use the Open XML SDK, and Microsoft Word or LibreOffice when the layout must be kept; password-protected zips use SharpZipLib; background removal uses ONNX Runtime; QR codes use QRCoder.
+- **Processing:** Images use GDI+ and SkiaSharp; PDFs use PDFium, PdfPig and PDFsharp; Word files use the Open XML SDK, and Microsoft Word or LibreOffice when the layout must be kept; password-protected zips use SharpZipLib; background removal uses ONNX Runtime; reading text in images uses RapidOcrNet with the PaddleOCR PP-OCRv5 models; QR codes use QRCoder.
 
 ## License
 

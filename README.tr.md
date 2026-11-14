@@ -20,7 +20,7 @@ Windows için çevrimdışı çalışan bir dosya çarkı. Bir dosyayı sürükl
 
 ### Araçlar (Ctrl)
 
-- **Resim:** kırpma, sıkıştırma, arka planı silme, döndürme, 1080 piksel genişliğe küçültme, konum ve cihaz bilgisini silme.
+- **Resim:** kırpma, sıkıştırma, arka planı silme, döndürme, 1080 piksel genişliğe küçültme, konum ve cihaz bilgisini silme, ekran görüntüsü, fotoğraf ve taramalarda hassas bilgileri gizleme.
 - **PDF:** sıkıştırma, hassas bilgileri gizleme, sayfalara bölme, birleştirme, döndürme, parolayla kilitleme.
 - **Diğer dosyalar:** zip'e sıkıştırma, parolalı zip'e koyma. Metin ve Word dosyalarında hassas bilgileri gizleme.
 
@@ -34,8 +34,8 @@ Windows için çevrimdışı çalışan bir dosya çarkı. Bir dosyayı sürükl
 ## Öne çıkanlar
 
 - **Zincir:** Bir dilimin üstünde yarım saniye kadar beklersen o adım zincire eklenir. Dosyayı bıraktığında zincirdeki bütün adımlar sırayla uygulanır. Örnek: önce döndür, sonra konumu sil, en son JPG'ye çevir. WhatsApp, Mail ve Telefona dosyayı olduğu gibi gönderir; bu yüzden zincirin sonunda değil, tek başına çalışır.
-- **Hassas bilgi radarı:** Dosyayı sürüklerken Swivra içine bakar. Konum bilgisi, cihaz modeli, TC kimlik numarası, IBAN, e-posta ya da telefon numarası bulursa çarkın kenarı turuncu yanar. PDF'lerde ilk 20 sayfa taranır.
-- **Gerçek gizleme:** PDF'te gizlenen bilgiler siyah kutuyla kapatılır ve sayfalar resme çevrilir. Böylece kapatılan yazı sonradan kopyalanıp geri alınamaz. Metin ve Word dosyalarında bu bilgiler blok karakterlerle değiştirilir.
+- **Hassas bilgi radarı:** Dosyayı sürüklerken Swivra içine bakar. Konum bilgisi, cihaz modeli, TC kimlik numarası, IBAN, e-posta ya da telefon numarası bulursa çarkın kenarı turuncu yanar. PDF'lerde ilk 20 sayfa taranır. Resimlerde görüntüdeki yazıyı da okur (fotoğrafı çekilmiş bir kimlik kartı, bir dekontun ekran görüntüsü); sürükleme sırasında bunun için üç saniye kadar vakti olduğundan büyük bir fotoğraftaki küçük yazı kaçabilir.
+- **Gerçek gizleme:** PDF'te gizlenen bilgiler siyah kutuyla kapatılır ve sayfalar resme çevrilir. Böylece kapatılan yazı sonradan kopyalanıp geri alınamaz. Metin ve Word dosyalarında bu bilgiler blok karakterlerle değiştirilir. Resimlerde yazı bilgisayarında okunur ve her bilgi düz siyahla boyanır; sonuç, konum ve cihaz bilgisi olmayan yeni bir dosyadır. Bir şey bulunamazsa dosya oluşturulmaz.
 - **Orijinal dosyaya dokunulmaz:** Sonuç her zaman orijinalin yanına yeni bir adla kaydedilir, örneğin `Tatil-temiz.jpg`.
 - **Birden fazla dosya:** Birkaç dosyayı birlikte sürükleyebilirsin. Birden fazla PDF'i **Birleştir** dilimine bırakırsan tek bir PDF olur.
 - **Türkçe ve İngilizce:** Arayüz iki dilde. Dili tepsi menüsünden değiştirebilirsin.
@@ -72,7 +72,8 @@ Uygulama dijital olarak imzalı olmadığı için Windows SmartScreen ilk açıl
 - **Başkasından gelen Word, RTF ve OpenDocument dosyaları:** Word bir dosyayı açarken internete ya da ağına bağlanabilir: uzaktaki bir şablon, bağlantılı bir resim, başka bir dosyayı çeken bir alan, gömülü bir web sayfası. Swivra Word'e dosyanın temizlenmiş bir kopyasını verir: bu bağlantılar kesilir, gömülü web sayfası bölümleri düz metin olarak alınır. Asıl dosyan değişmez, sonuç ekranı neyin kesildiğini söyler. `.doc` uzantısıyla kaydedilmiş bir web sayfası yalnız metninden dönüştürülür. Eski ikili `.doc` dosyaları bu şekilde temizlenemez; LibreOffice kuruluysa bunlar için o kullanılır, çünkü Word şablonlarını yüklemez. `.odt` dosyası da LibreOffice ya da Word açmadan önce aynı şekilde temizlenir: dosyanın dışındaki resimlere, bölümlere, nesnelere, yazı tiplerine ve şablonlara giden bağlantılar kesilir, makrolar çıkarılır. LibreOffice ayrıca makroları, bağlantı güncellemeyi ve belgenin yazıcısını kapalı olarak çalışır. Güvenle okunamayan bir `.odt` (şifreli, bozuk ya da `.odt` diye adlandırılmış bir tablo) hiç açılmaz.
 - **Telefona gönderme:** İlk kullanımda Windows Güvenlik Duvarı, Swivra'nın ağa erişip erişemeyeceğini sorar. İzin vermezsen telefon bağlanamaz.
 - **Parolalı zip:** AES-256 ile şifrelenir. Windows'un kendi zip açıcısı bu şifrelemeyi desteklemez, dosyayı [7-Zip](https://www.7-zip.org/) ile açabilirsin.
-- **Taranmış belgeler:** Resim olarak taranmış sayfalardaki yazılar henüz okunamıyor. Radar ve gizleme bu yazıları görmez.
+- **Resimdeki yazılar:** Swivra resimlerdeki basılı yazıyı internete çıkmadan, bilgisayarında okur. El yazısı, çok küçük ya da bulanık yazı ve alışılmadık yazı tipleri kaçabilir. Bu yüzden resimde Gizle her zaman sonucu gözle kontrol etmeni ister; bir resme asla "temiz" demez. Hareketli GIF, WebP ya da PNG'nin yalnız ilk karesi, çok sayfalı TIFF'in yalnız ilk sayfası okunur ve kaydedilir.
+- **Taranmış PDF'ler:** PDF içindeki sayfa resimlerinde kalan yazılar henüz okunamıyor. Radar ve PDF'te gizleme bu yazıları görmez.
 - **Word dosyalarındaki gömülü nesneler:** Gömülü Word, Excel ve PowerPoint dosyaları da maskelenir. Ama diğer gömülü nesnelerin (eski ikili OLE nesneleri, ActiveX denetimleri) içine bakılamaz. Gizle bunları olduğu gibi bırakır ve kaç tane olduğunu söyler.
 - **Arka plan silme:** Küçük bir yapay zekâ modeliyle (U-2-Net) tamamen bilgisayarında çalışır. Belirgin nesnelerde iyi sonuç verir. Saç ve ince kenarlarda kusursuz değildir.
 - **İnternet:** Swivra internete hiçbir şey göndermez. Yalnız "Telefona" dilimi yerel ağını kullanır: paneli açıkken ve **Bitince kapat** seçersen o an süren indirme bitene kadar (en çok 10 dakika). Panel kapandıktan sonra yeni indirme başlamaz; süren aktarım tepside görünür, oradan durdurabilirsin.
@@ -112,7 +113,7 @@ Paket `publish/Swivra-<sürüm>-win-x64.zip` olarak oluşur. Uygulama tek bir ex
 - **Klavye ve fare dinleme** (`InputHook`): Sürükleme sırasında Shift, Ctrl ya da Alt'a basıldığını yakalar. Hiçbir tuşu engellemez.
 - **Çark penceresi** (`OverlayForm`): Odak çalmayan, her şeyin üstünde duran yuvarlak bir pencere. Çarkı WebView2 çizer (`web/`). Arkadaki cam görüntüsü, çark açılmadan hemen önce alınan ve bulanıklaştırılan ekran görüntüsüdür.
 - **Bırakma hedefi** (`CatcherForm`): Çarkın üstünde duran, neredeyse görünmez bir pencere. Dosyayı asıl o karşılar ve bırakma işlemini her zaman kopyalama olarak bildirir. Böylece Gezgin orijinal dosyayı asla taşımaz.
-- **İşlemler:** Resimler GDI+ ve SkiaSharp, PDF'ler PDFium, PdfPig ve PDFsharp, Word dosyaları Open XML SDK (düzen korunacaksa Microsoft Word ya da LibreOffice), parolalı zip'ler SharpZipLib, arka plan silme ONNX Runtime, QR kodlar QRCoder ile işlenir.
+- **İşlemler:** Resimler GDI+ ve SkiaSharp, PDF'ler PDFium, PdfPig ve PDFsharp, Word dosyaları Open XML SDK (düzen korunacaksa Microsoft Word ya da LibreOffice), parolalı zip'ler SharpZipLib, arka plan silme ONNX Runtime, resimdeki yazıyı okuma PaddleOCR PP-OCRv5 modelleriyle RapidOcrNet, QR kodlar QRCoder ile işlenir.
 
 ## Lisans
 
