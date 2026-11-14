@@ -129,6 +129,7 @@ internal static partial class OfficeConvert
                 // parser, an SVG importer say, with whatever it hides: refused, never passed on uncleaned.
                 throw new UnsafeDocumentException($"part {name} is not well-formed XML ({ex.Message})");
             }
+            CheckOdfNamespaces(xml, name);
             bool changed = CleanOdfXml(xml, PartDir(name), names, report);
             // Sub-documents have their own settings.xml.
             if (name == "settings.xml" || name.EndsWith("/settings.xml", StringComparison.Ordinal)) changed |= CleanOdfSettings(xml, report);
@@ -179,6 +180,8 @@ internal static partial class OfficeConvert
         var manifestEntry = zip.GetEntry("META-INF/manifest.xml") ?? throw new UnsafeDocumentException("no manifest");
         byte[] manifestBytes = ReadCapped(manifestEntry, MaxChunkBytes) ?? throw new UnsafeDocumentException("manifest too large");
         XDocument manifest = ParseOdfPart(manifestBytes, manifestEntry.FullName);
+        CheckOdfNamespaces(manifest, manifestEntry.FullName);
+        if (manifest.Root?.Name != OdfManifest + "manifest") throw new UnsafeDocumentException("manifest in another namespace");
         if (manifest.Descendants(OdfManifest + "encryption-data").Any()) throw new UnsafeDocumentException("encrypted ODF");
         // A sub-document loads its own module: a spreadsheet brings formulas that fetch, a presentation its
         // sounds. Charts, formulas, drawings and text are what a text document embeds. The manifest may name
@@ -236,6 +239,38 @@ internal static partial class OfficeConvert
             if (looks) xmlParts.Add(name);
         }
         return (manifest, manifestBytes, xmlParts);
+    }
+
+    // urn:oasis:names:tc:<any>:xmlns:<name>:1.<any>, which LibreOffice reads as the ODF namespace of that name.
+    private static readonly System.Text.RegularExpressions.Regex OasisUrn = new(
+        @"^urn:oasis:names:tc:[^:]*:xmlns:([^:]*):1\.[^:]*$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The cleaning matches ODF elements and attributes by their exact namespace. LibreOffice's importer
+    /// is laxer: it takes any "urn:oasis:names:tc:…:xmlns:office:1.x" as the office namespace, any
+    /// "http://www.w3.org/…/xforms" as XForms and OpenOffice's old manifest namespace as the manifest
+    /// one, so office:scripts in such a namespace would pass here and run there. Real documents spell
+    /// their elements and attributes with the 1.0 names: a part that uses another spelling is refused.
+    /// </summary>
+    private static void CheckOdfNamespaces(XDocument xml, string name)
+    {
+        var seen = new HashSet<XNamespace>();
+        foreach (var el in xml.Descendants())
+        {
+            Check(el.Name.Namespace);
+            foreach (var a in el.Attributes()) if (!a.IsNamespaceDeclaration) Check(a.Name.Namespace);
+        }
+
+        void Check(XNamespace ns)
+        {
+            if (!seen.Add(ns)) return;
+            string uri = ns.NamespaceName;
+            var m = OasisUrn.Match(uri);
+            bool odd = (m.Success && uri != $"urn:oasis:names:tc:opendocument:xmlns:{m.Groups[1].Value}:1.0")
+                || (uri.StartsWith("http://www.w3.org/", StringComparison.OrdinalIgnoreCase) && uri.EndsWith("/xforms", StringComparison.OrdinalIgnoreCase) && ns != XForms)
+                || uri.Equals("http://openoffice.org/2001/manifest", StringComparison.OrdinalIgnoreCase);
+            if (odd) throw new UnsafeDocumentException($"part {name} uses the namespace {uri}");
+        }
     }
 
     private static XDocument ParseOdfPart(byte[] bytes, string name)
