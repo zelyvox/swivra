@@ -24,6 +24,8 @@ namespace Swivra.App;
 /// a match there still counts and still produces the image-only file, which cannot carry them.
 /// Embedded images are not read (no OCR) and letters without a Unicode value cannot be searched: the outcome
 /// counts those pages so the user is told to check them.
+/// PDFium's own text layer of the same copy is searched too (<see cref="CrossCheck"/>): the two libraries do not
+/// always read a content stream alike, and whatever PDFium reads where it draws it is covered as well.
 /// </summary>
 internal static class PdfRedact
 {
@@ -39,7 +41,7 @@ internal static class PdfRedact
     /// <param name="Items">Number of matches covered (page text, notes and form fields).</param>
     /// <param name="Written">True when the redacted file was written: there were matches, or notes had to be left out.</param>
     /// <param name="ImagePages">Pages with images large enough to hold text: they cannot be checked without OCR.</param>
-    /// <param name="UnreadPages">Pages with letters that have no Unicode value (Type 3 or broken fonts): drawn, but not searchable.</param>
+    /// <param name="UnreadPages">Pages with text that is drawn but not searchable: letters without a usable Unicode value (Type 3, broken or unmapped fonts), text or images inside a pattern, a Type 3 glyph or a soft mask, or a page whose PDFium text layer could not be loaded.</param>
     /// <param name="LeftOutPages">The file could not be flattened: pages whose visible notes and form fields were left out of the output.</param>
     /// <param name="NoLookPages">Pages with visible notes or form fields that have no appearance of their own: flattening drops them.</param>
     public sealed record Outcome(int Items, bool Written, int ImagePages, int UnreadPages, int LeftOutPages, int NoLookPages);
@@ -73,16 +75,19 @@ internal static class PdfRedact
         // Before PdfPig reads a page or PDFium flattens one: a looping or runaway content tree takes the app down in
         // the first and never finishes in the second. The copy is checked too, it is read the same way.
         using var orig = PigDocument.Open(original);
-        PdfTree.Check(orig);
+        var tree = PdfTree.Check(orig);
         byte[]? flat = Pdfium.Flatten(original);
 
         var perPage = new List<PageBoxes>();
-        int items = 0, imagePages = 0, unreadPages = 0, leftOutPages = 0, noLookPages = 0;
+        var foundPerPage = new List<HashSet<string>>();
+        var unread = new bool[orig.NumberOfPages];
+        int items = 0, imagePages = 0, leftOutPages = 0, noLookPages = 0;
         using (var copy = OpenCopy(flat, orig.NumberOfPages))
         {
-            if (copy is not null) PdfTree.Check(copy);
+            if (copy is not null) tree = PdfTree.Check(copy);
             if (copy is null) flat = null;
             PigDocument drawn = flat is null ? orig : copy!;
+            var blind = new BlindFonts(drawn);
             for (int n = 1; n <= orig.NumberOfPages; n++)
             {
                 // Page content comes from the copy that is drawn; note texts and field values from the original,
@@ -96,11 +101,16 @@ internal static class PdfRedact
                 items += count + notes.Hits;
                 if (notes.Visible && flat is null) leftOutPages++;
                 if (notes.NoLook && flat is not null) noLookPages++;
-                if (HasUnreadableLetters(page)) unreadPages++;
+                // Letters without a usable value, and text or images shown inside a pattern, a Type 3 glyph or a
+                // soft mask, which neither text layer has: drawn, but not searched.
+                if (HasUnreadableText(page, blind) || tree.HidesText(page.Dictionary)) unread[n - 1] = true;
                 if (page.GetImages().Any(CanHoldText)) imagePages++;
                 perPage.Add(new PageBoxes(map.Width, map.Height, boxes));
+                foundPerPage.Add(found);
             }
         }
+        items += CrossCheck(flat ?? original, perPage, foundPerPage, unread);
+        int unreadPages = unread.Count(u => u);
         bool written = items > 0 || leftOutPages > 0;
         if (!written) return new Outcome(0, false, imagePages, unreadPages, 0, noLookPages);
 
@@ -175,6 +185,78 @@ internal static class PdfRedact
         }
         return bmp;
     }
+
+    // A PDFium glyph box may poke this far (points) out of a painted box and still count as covered.
+    private const double CoverSlack = 0.25;
+
+    /// <summary>
+    /// Second opinion from PDFium's own text layer of the copy that is drawn. PdfPig and PDFium do not always read a
+    /// content stream alike (extra operands, malformed numbers, inline image data, two names before one Do): one can
+    /// place or even see text the other does not. Every match in PDFium's text must lie inside the boxes found from
+    /// PdfPig's letters; a character outside them gets PDFium's own box, and a match PdfPig did not have at all counts
+    /// as an item. A page whose text layer cannot be loaded is marked unread, so it is never called clean.
+    /// Throws <see cref="PlacementException"/> when PDFium cannot say where a matched character is.
+    /// </summary>
+    /// <returns>Matches PDFium found that the page's other searches had not.</returns>
+    private static int CrossCheck(byte[] pdf, List<PageBoxes> pages, List<HashSet<string>> found, bool[] unread)
+    {
+        int added = 0;
+        bool loaded = Pdfium.ReadText(pdf, (i, layer) =>
+        {
+            if (i >= pages.Count) return;
+            if (layer is null)
+            {
+                unread[i] = true;
+                return;
+            }
+            var pb = pages[i];
+            if (Math.Abs(layer.Width - pb.W) > Math.Max(0.5, pb.W * 0.005) || Math.Abs(layer.Height - pb.H) > Math.Max(0.5, pb.H * 0.005))
+                throw new AlignmentException(i + 1);
+            double fx = pb.W / layer.Width, fy = pb.H / layer.Height;
+            XRect Drawn(Pdfium.Area a) => new(a.X0 * fx, a.Y0 * fy, (a.X1 - a.X0) * fx, (a.Y1 - a.Y0) * fy);
+
+            string text = Fold(layer.Text);
+            foreach (var hit in Radar.FindAll(text))
+            {
+                bool open = false;
+                var paint = new List<XRect>();
+                for (int c = hit.Index; c < hit.Index + hit.Length; c++)
+                {
+                    int k = layer.CharAt[c];
+                    if (k < 0 || char.IsWhiteSpace(text[c]) || layer.Generated(k)) continue;
+                    if (!layer.Box(k, out Pdfium.Area? ink, out Pdfium.Area? reach)) throw new PlacementException(i + 1);
+                    XRect test = Drawn((ink ?? reach)!.Value);
+                    if (pb.Boxes.Any(b => Inside(test, b))) continue;
+                    open = true;
+                    paint.Add(ink is Pdfium.Area a && reach is Pdfium.Area r ? Union(Drawn(a), Drawn(r)) : test);
+                }
+                foreach (XRect p in paint) AddPadded(pb.Boxes, p, pb.W, pb.H);
+                if (open && found[i].Add(Key(text, hit))) added++;
+            }
+        });
+        if (!loaded) Array.Fill(unread, true);
+        return added;
+    }
+
+    private static bool Inside(XRect r, XRect box) =>
+        r.X >= box.X - CoverSlack && r.Y >= box.Y - CoverSlack
+        && r.X + r.Width <= box.X + box.Width + CoverSlack && r.Y + r.Height <= box.Y + box.Height + CoverSlack;
+
+    /// <summary>
+    /// Symbol fonts (Symbol, Wingdings, many PowerPoint and math fonts) put their characters at U+F020..U+F0FF, the
+    /// private-use copy of U+0020..U+00FF: Word bullets come out as U+F0B7. Folded back, they read as ordinary
+    /// characters, and digits written in such a font can be searched. One character for one, so positions stay.
+    /// </summary>
+    internal static string Fold(string s)
+    {
+        if (!s.Any(IsSymbolArea)) return s;
+        var chars = s.ToCharArray();
+        for (int i = 0; i < chars.Length; i++)
+            if (IsSymbolArea(chars[i])) chars[i] = (char)(chars[i] - 0xF000);
+        return new string(chars);
+    }
+
+    private static bool IsSymbolArea(char c) => c is >= '\uF020' and <= '\uF0FF';
 
     /// <summary>
     /// Maps PdfPig's page coordinates to the area PDFium draws: the effective crop box (inherited or not, clipped to
@@ -323,24 +405,82 @@ internal static class PdfRedact
     private static string Key(string text, Radar.Hit h) =>
         h.Kind + ":" + new string(text.AsSpan(h.Index, h.Length).ToArray().Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
+    // Unreadable letters on one page that are always worth a warning, wherever they sit: the shortest item the radar
+    // looks for (a mobile number without separators) has ten characters, so ten unreadable letters could hide one
+    // even when each stands alone (boxed form cells).
+    private const int UnreadableEnough = 10;
+    // Neighbouring letters further apart than this many font sizes are not read as one word or number.
+    private const double NeighbourReach = 3;
+
     /// <summary>
-    /// True when the page draws letters PdfPig cannot turn into text (no value, a control character, U+FFFD or a
-    /// private-use code: Type 3 or embedded fonts without a Unicode map). They are drawn but cannot be searched.
+    /// True when the page draws letters that cannot be searched in a way that could hide an item: letters PdfPig
+    /// cannot turn into text (no value, a control character, U+FFFD, a private-use code outside the symbol-font
+    /// area, see <see cref="Fold"/>) or letters in a font whose codes have no Unicode meaning (<see cref="BlindFonts"/>).
+    /// A lone ornament between readable words (a check mark, an arrow, a math sign) is not worth a warning; one next
+    /// to a digit (it could be one digit of a number whose others are readable), next to another unreadable letter
+    /// (a word or number in that font) or <see cref="UnreadableEnough"/> of them on a page are.
     /// </summary>
-    private static bool HasUnreadableLetters(Page page)
+    private static bool HasUnreadableText(Page page, BlindFonts blind)
     {
-        foreach (Letter l in page.Letters)
+        var letters = page.Letters.Where(l => string.IsNullOrEmpty(l.Value) || !string.IsNullOrWhiteSpace(l.Value)).ToList();
+        var bad = letters.Select(l => IsUnreadable(l, blind)).ToArray();
+        if (bad.Count(b => b) >= UnreadableEnough) return true;
+        for (int i = 0; i < letters.Count; i++)
         {
-            if (string.IsNullOrEmpty(l.Value)) return true;
-            foreach (Rune r in l.Value.EnumerateRunes())
+            if (!bad[i]) continue;
+            foreach (int j in new[] { i - 1, i + 1 })
             {
-                if (r.Value == 0xFFFD) return true;
-                var cat = Rune.GetUnicodeCategory(r);
-                if (cat == System.Globalization.UnicodeCategory.PrivateUse) return true;
-                if (cat == System.Globalization.UnicodeCategory.Control && !Rune.IsWhiteSpace(r)) return true;
+                if (j < 0 || j >= letters.Count || !Near(letters[Math.Min(i, j)], letters[Math.Max(i, j)])) continue;
+                if (bad[j] || Fold(letters[j].Value).Any(char.IsAsciiDigit)) return true;
             }
         }
         return false;
+
+        static bool Near(Letter a, Letter b)
+        {
+            double gap = Math.Sqrt(Math.Pow(b.StartBaseLine.X - a.EndBaseLine.X, 2) + Math.Pow(b.StartBaseLine.Y - a.EndBaseLine.Y, 2));
+            double size = Math.Max(Math.Max(a.PointSize, b.PointSize), 1);
+            return gap <= NeighbourReach * size;
+        }
+    }
+
+    private static bool IsUnreadable(Letter l, BlindFonts blind)
+    {
+        if (string.IsNullOrEmpty(l.Value) || blind.Has(l)) return true;
+        foreach (Rune r in Fold(l.Value).EnumerateRunes())
+        {
+            if (r.Value == 0xFFFD) return true;
+            var cat = Rune.GetUnicodeCategory(r);
+            if (cat == System.Globalization.UnicodeCategory.PrivateUse) return true;
+            if (cat == System.Globalization.UnicodeCategory.Control && !Rune.IsWhiteSpace(r)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Composite (Type 0) fonts whose codes mean nothing without a /ToUnicode map: an Identity ordering only numbers
+    /// the glyphs of the embedded font, often in order of first use in a subset. PdfPig still hands out "letters" for
+    /// them (the codes taken as characters, e.g. "BCDEFGHIJFA" for eleven digits), which look readable and are not.
+    /// </summary>
+    private sealed class BlindFonts(PigDocument doc)
+    {
+        private readonly Dictionary<IndirectReference, bool> known = [];
+
+        public bool Has(Letter l)
+        {
+            if (l.FontDetails?.FontDictionaryReference is not IndirectReference r) return false;
+            if (!known.TryGetValue(r, out bool blind)) known[r] = blind = IsBlind(r);
+            return blind;
+        }
+
+        private bool IsBlind(IndirectReference r)
+        {
+            if (Resolve(doc, new IndirectReferenceToken(r)) is not DictionaryToken font) return false;
+            if (Get(doc, font, "Subtype") is not NameToken { Data: "Type0" } || Get(doc, font, "ToUnicode") is not null) return false;
+            if (Get(doc, font, "DescendantFonts") is not ArrayToken { Length: > 0 } kids || Resolve(doc, kids.Data[0]) is not DictionaryToken cid) return false;
+            return Get(doc, cid, "CIDSystemInfo") is DictionaryToken info && TextOf(doc, Get(doc, info, "Ordering"), out string? ordering)
+                && ordering!.Trim() == "Identity";
+        }
     }
 
     private static IToken? Get(PigDocument doc, DictionaryToken dict, string key) =>

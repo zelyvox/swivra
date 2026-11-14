@@ -209,7 +209,8 @@ internal static partial class Radar
     {
         try
         {
-            ScanText(string.Join("\n", PdfActions.ExtractPages(path, MaxPdfPages)), found);
+            // Symbol-font characters folded back, as Hide searches them: digits in such a font are found too.
+            ScanText(PdfRedact.Fold(string.Join("\n", PdfActions.ExtractPages(path, MaxPdfPages))), found);
         }
         catch (PdfTree.TreeException ex)
         {
