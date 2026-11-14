@@ -468,12 +468,11 @@ internal static partial class OfficeConvert
             // Any part may hold a story, under any name: _rels/.rels and the content types decide, not
             // the extension. So every part that is XML by its bytes is checked (picked in the first pass).
             if (!toRead.TryGetValue(name, out bool xmlPart)) continue;
-            byte[] bytes = ReadCapped(entry, MaxChunkBytes) ?? throw new InvalidDataException($"part {name} too large");
+            byte[] bytes = ReadCapped(entry, MaxXmlBytes) ?? throw new UnsafeDocumentException($"part {name} too large to read as XML");
             XDocument xml;
             try
             {
-                using var s = new MemoryStream(bytes);
-                xml = LoadXml(s);
+                xml = LoadXml(bytes, name);
             }
             catch (System.Xml.XmlException ex)
             {
@@ -757,16 +756,35 @@ internal static partial class OfficeConvert
         }).ToArray();
     }
 
+    // A parsed part takes many times its size in memory (a 6-byte "<w:p/>" becomes an object of over a
+    // hundred bytes), and the package limit does not bound that. Word's own limit for a text-only
+    // document is 32 MB, and the markup around that much text stays well under 48 MB; real parts were
+    // measured at 18 to 30 bytes per node (element, attribute or text), so 48 MB of real markup holds
+    // about 2.5 million. A part past either limit is refused before it is parsed: at most a few hundred
+    // megabytes of tree, however the bytes are spent.
+    private const int MaxXmlBytes = 48 * 1024 * 1024;
+    private const int MaxXmlNodes = 2_500_000;
+
     /// <summary>
     /// Parses a part. A DOCTYPE (some SVG pictures carry one) is skipped, not refused; nothing outside
-    /// the package is ever read.
+    /// the package is ever read. Its nodes are counted in a streaming pass first (see <see cref="MaxXmlNodes"/>).
     /// </summary>
-    private static XDocument LoadXml(Stream s)
+    private static XDocument LoadXml(byte[] bytes, string name)
     {
+        if (bytes.Length > MaxXmlBytes) throw new UnsafeDocumentException($"part {name} too large to read as XML");
         var settings = new System.Xml.XmlReaderSettings { DtdProcessing = System.Xml.DtdProcessing.Ignore, XmlResolver = null };
-        using var reader = System.Xml.XmlReader.Create(s, settings);
+        long nodes = 0;
+        using (var counter = System.Xml.XmlReader.Create(new MemoryStream(bytes, writable: false), settings))
+            while (counter.Read())
+                if (counter.NodeType != System.Xml.XmlNodeType.EndElement && (nodes += 1 + counter.AttributeCount) > MaxXmlNodes)
+                    throw new UnsafeDocumentException($"part {name} has too many XML nodes");
+        using var reader = System.Xml.XmlReader.Create(new MemoryStream(bytes, writable: false), settings);
         return XDocument.Load(reader, LoadOptions.PreserveWhitespace);
     }
+
+    /// <summary>An entry read whole (up to <see cref="MaxXmlBytes"/>) and parsed; see <see cref="LoadXml(byte[], string)"/>.</summary>
+    private static XDocument LoadXml(ZipArchiveEntry entry) =>
+        LoadXml(ReadCapped(entry, MaxXmlBytes) ?? throw new UnsafeDocumentException($"part {entry.FullName} too large to read as XML"), entry.FullName);
 
     /// <summary>
     /// The package's content types: which parts Word reads as XML. Every Default and Override counts,
@@ -786,8 +804,7 @@ internal static partial class OfficeConvert
             XDocument xml;
             try
             {
-                using var s = entry.Open();
-                xml = LoadXml(s);
+                xml = LoadXml(entry);
             }
             catch (System.Xml.XmlException ex) { throw new InvalidDataException($"content types are not well-formed XML ({ex.Message})"); }
             foreach (var e in xml.Descendants())
@@ -908,8 +925,7 @@ internal static partial class OfficeConvert
             XDocument xml;
             try
             {
-                using var s = entry.Open();
-                xml = LoadXml(s);
+                xml = LoadXml(entry);
             }
             catch (System.Xml.XmlException ex) { throw new InvalidDataException($"part {rels} is not well-formed XML ({ex.Message})"); }
             foreach (var rel in xml.Descendants().Where(e => e.Name.LocalName == "Relationship"))
