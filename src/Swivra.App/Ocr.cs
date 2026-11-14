@@ -713,6 +713,30 @@ internal static class Ocr
             }
             if (!any) break;
         }
+        // A group of look-alikes only ("0532 100 II 22"): no digit touches it, but on its line it stands between two
+        // groups of digits, a space on each side. At most two such groups in a row, of up to four characters each.
+        var groups = new List<(int Start, int End)>();
+        for (int i = 0; i < c.Length;)
+        {
+            if (c[i] is ' ' or '\n') { i++; continue; }
+            int s = i;
+            while (i < c.Length && c[i] is not (' ' or '\n')) i++;
+            groups.Add((s, i));
+        }
+        bool Digits((int Start, int End) g) => g.End - g.Start >= 2 && c.AsSpan(g.Start, g.End - g.Start).IndexOfAnyExceptInRange('0', '9') < 0;
+        bool Alike((int Start, int End) g) => g.End - g.Start <= 4 && c.AsSpan(g.Start, g.End - g.Start).ToArray().All(LookAlike.ContainsKey);
+        bool Spaced(int a, int b) => c.AsSpan(groups[a].End, groups[b].Start - groups[a].End).IndexOfAnyExcept(' ') < 0; // same line
+        for (int g = 1; g + 1 < groups.Count; g++)
+        {
+            if (!Alike(groups[g]) || !Digits(groups[g - 1]) || !Spaced(g - 1, g)) continue;
+            int e = g;
+            if (e + 2 < groups.Count && Alike(groups[e + 1]) && Spaced(e, e + 1)) e++;
+            if (!Digits(groups[e + 1]) || !Spaced(e, e + 1)) continue;
+            for (int k = g; k <= e; k++)
+                for (int i = groups[k].Start; i < groups[k].End; i++) c[i] = LookAlike[c[i]];
+            changed = true;
+            g = e;
+        }
         return changed ? new string(c) : text;
     }
 
