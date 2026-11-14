@@ -513,6 +513,9 @@ internal static class PdfActions
     private static (string Path, bool IsFolder) Render(string input, string dir, string baseName, string ext, List<string> created)
     {
         byte[] bytes = SafeFile.ReadAll(input);
+        // PDFium never finishes a page whose pattern or forms draw themselves; the check the text routes use refuses it first.
+        try { using var check = UglyToad.PdfPig.PdfDocument.Open(bytes); PdfTree.Check(check); }
+        catch (Exception ex) when (ex is not PdfTree.TreeException) { /* PdfPig cannot open it: PDFium decides, as before */ }
         int count;
         using (var ms = new MemoryStream(bytes)) lock (Pdfium.Gate) count = PDFtoImage.Conversion.GetPageCount(ms);
         if (count < 1) throw new PdfFailure(NoPages());
