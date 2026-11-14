@@ -33,7 +33,7 @@ Windows için çevrimdışı çalışan bir dosya çarkı. Bir dosyayı sürükl
 
 ## Öne çıkanlar
 
-- **Zincir:** Bir dilimin üstünde yarım saniye kadar beklersen o adım zincire eklenir. Dosyayı bıraktığında zincirdeki bütün adımlar sırayla uygulanır. Örnek: önce döndür, sonra konumu sil, en son JPG'ye çevir.
+- **Zincir:** Bir dilimin üstünde yarım saniye kadar beklersen o adım zincire eklenir. Dosyayı bıraktığında zincirdeki bütün adımlar sırayla uygulanır. Örnek: önce döndür, sonra konumu sil, en son JPG'ye çevir. WhatsApp, Mail ve Telefona dosyayı olduğu gibi gönderir; bu yüzden zincirin sonunda değil, tek başına çalışır.
 - **Hassas bilgi radarı:** Dosyayı sürüklerken Swivra içine bakar. Konum bilgisi, cihaz modeli, TC kimlik numarası, IBAN, e-posta ya da telefon numarası bulursa çarkın kenarı turuncu yanar. PDF'lerde ilk 20 sayfa taranır.
 - **Gerçek gizleme:** PDF'te gizlenen bilgiler siyah kutuyla kapatılır ve sayfalar resme çevrilir. Böylece kapatılan yazı sonradan kopyalanıp geri alınamaz. Metin ve Word dosyalarında bu bilgiler blok karakterlerle değiştirilir.
 - **Orijinal dosyaya dokunulmaz:** Sonuç her zaman orijinalin yanına yeni bir adla kaydedilir, örneğin `Tatil-temiz.jpg`.
@@ -61,6 +61,7 @@ Uygulama dijital olarak imzalı olmadığı için Windows SmartScreen ilk açıl
 
 - Vazgeçmek için dosyayı çarkın ortasına bırak.
 - Kırpma ve parola panellerinde **Enter** onaylar, **Esc** vazgeçer.
+- Uzun süren bir iş (büyük bir Word dosyası dakikalar alabilir) ekranı tutmaz: **Esc**'e bas ya da çarkın dışında bir yere tıkla, çark kapanır, iş sürer. Bitince tepsiden bildirim gelir.
 - Dili değiştirmek için tepsi simgesine sağ tıkla ve **Dil / Language** menüsünü kullan. İlk açılışta Windows hangi dildeyse o seçilir.
 - Swivra yalnız açıkken çalışır. İlk açılışta Windows ile başlayıp başlamayacağını sorar; bunu sonra tepsi menüsündeki **Windows ile başlat** seçeneğinden değiştirebilirsin.
 - Tepsi menüsünde ayrıca **Çarkı göster (demo)**, **Kayıtları aç** ve **Çıkış** seçenekleri var.
