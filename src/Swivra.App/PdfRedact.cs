@@ -406,7 +406,10 @@ internal static class PdfRedact
 
     // Line box around the baseline, in multiples of the font size: below for descenders (g, ş, ç), above for
     // capitals with accents (İ, Ğ, Ş). Generous on purpose: covering a little too much is fine, too little is a leak.
-    private const double Descent = 0.3, Ascent = 1.05;
+    // Along the baseline each letter reaches a little further than its advance: an outlined (stroked) glyph spills
+    // half its line width past its edges, and only the first and last letter of a run are exposed to that. A share
+    // of the font size stays inside the word gap, so the next word is not swallowed.
+    private const double Descent = 0.3, Ascent = 1.05, Reach = 0.15;
 
     /// <summary>
     /// The area a letter can paint, axis-aligned: its glyph bounding box joined with a box spanned along the baseline
@@ -431,7 +434,8 @@ internal static class PdfRedact
         double dx = ex - sx, dy = ey - sy, len = Math.Sqrt(dx * dx + dy * dy);
         if (len < 1e-6) (dx, dy, len) = (1, 0, 1);   // zero-width letter: assume horizontal text
         double ux = -dy / len, uy = dx / len;          // "up", perpendicular to the baseline
-        foreach (var (bx, by) in new[] { (sx, sy), (ex, ey) })
+        double rx = dx / len * Reach * size, ry = dy / len * Reach * size;
+        foreach (var (bx, by) in new[] { (sx - rx, sy - ry), (ex + rx, ey + ry) })
             foreach (double k in new[] { -Descent * size, Ascent * size })
                 Add(bx + ux * k, by + uy * k);
 
