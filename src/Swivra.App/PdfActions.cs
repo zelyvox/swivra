@@ -199,6 +199,14 @@ internal static class PdfActions
                 Lang.T($"{ex.Page}. sayfa beklenen boyutta çizilmedi; kutular yanlış yere düşebileceği için gizlenmiş dosya verilmedi",
                        $"Page {ex.Page} was not drawn at its expected size; no redacted file was made because the boxes could miss"));
         }
+        catch (PdfRedact.PlacementException ex)
+        {
+            Cleanup(created);
+            Log.Write($"pdf hide refused {path}: {ex.Message}");
+            return new ActionResult(false, Lang.T("Gizlenmedi", "Not redacted"),
+                Lang.T($"{ex.Page}. sayfadaki yazının yeri kesin bulunamadı; kutular kaçabileceği için gizlenmiş dosya verilmedi",
+                       $"Where the text on page {ex.Page} is drawn could not be worked out; no redacted file was made because the boxes could miss"));
+        }
         catch (Exception ex)
         {
             Cleanup(created);

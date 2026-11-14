@@ -10,6 +10,7 @@ using UglyToad.PdfPig.Annotations;
 using UglyToad.PdfPig.Content;
 using UglyToad.PdfPig.Core;
 using UglyToad.PdfPig.Tokens;
+using UglyToad.PdfPig.Tokenization.Scanner;
 
 namespace Swivra.App;
 
@@ -49,6 +50,15 @@ internal static class PdfRedact
         public int Page { get; } = page;
     }
 
+    /// <summary>
+    /// Where PDFium draws some text on a page could not be worked out (a form drawn there could not be read while
+    /// raised text was in effect): boxes measured from PdfPig's letters could miss it.
+    /// </summary>
+    public sealed class PlacementException(int page) : Exception($"text placement on page {page} could not be determined")
+    {
+        public int Page { get; } = page;
+    }
+
     /// <summary>Everything needed to paint one page: displayed size in points and the boxes to black out (origin top-left).</summary>
     private sealed record PageBoxes(double W, double H, List<XRect> Boxes);
 
@@ -75,7 +85,9 @@ internal static class PdfRedact
                 // where the notes still are (flattening removes them from the copy).
                 Page page = drawn.GetPage(n), source = flat is null ? page : orig.GetPage(n);
                 var map = PageMap.For(drawn, page);
-                var (boxes, count, found) = Locate(page, map);
+                double drift = RiseDrift.Of(drawn, page);
+                if (double.IsNaN(drift)) throw new PlacementException(n);
+                var (boxes, count, found) = Locate(page, map, drift);
                 var notes = ScanNotes(orig, source, flat is null ? map : PageMap.For(orig, source), boxes, found);
                 items += count + notes.Hits;
                 if (notes.Visible && flat is null) leftOutPages++;
@@ -387,10 +399,11 @@ internal static class PdfRedact
     /// The text is rebuilt from the letters in drawing order (a space wherever the letters are not neighbours),
     /// so it works for rotated pages and for IBANs or phone numbers written with spaces; each matched character maps back to its letter box.
     /// </summary>
-    private static (List<XRect> Boxes, int Count, HashSet<string> Found) Locate(Page page, PageMap map)
+    /// <param name="grow">Distance (page units) by which PDFium may draw a letter away from where PdfPig puts it: see <see cref="RiseDrift"/>.</param>
+    private static (List<XRect> Boxes, int Count, HashSet<string> Found) Locate(Page page, PageMap map, double grow)
     {
         var rects = new List<PdfRectangle?>();   // one entry per character of the text; null for separators
-        string text = PageText(page, rects);
+        string text = PageText(page, rects, grow);
 
         var boxes = new List<XRect>();
         var hits = Radar.FindAll(text);
@@ -416,7 +429,7 @@ internal static class PdfRedact
     }
 
     /// <summary>Page text rebuilt from the letters in drawing order (also used for the text-only Word export of rotated pages); <paramref name="rects"/> gets one box per character.</summary>
-    internal static string PageText(Page page, List<PdfRectangle?>? rects = null)
+    internal static string PageText(Page page, List<PdfRectangle?>? rects = null, double grow = 0)
     {
         rects ??= [];
         var sb = new StringBuilder();
@@ -435,6 +448,7 @@ internal static class PdfRedact
                 if (gap > 0.15 * Math.Max(prev.PointSize, l.PointSize)) { sb.Append(' '); rects.Add(null); }
             }
             var box = CoverBox(l);
+            if (grow > 0) box = new PdfRectangle(box.Left - grow, box.Bottom - grow, box.Right + grow, box.Top + grow);
             foreach (char ch in l.Value) { sb.Append(ch); rects.Add(box); }
             prev = l;
         }
@@ -491,6 +505,170 @@ internal static class PdfRedact
         double x0 = Math.Min(a.X, b.X), y0 = Math.Min(a.Y, b.Y);
         double x1 = Math.Max(a.X + a.Width, b.X + b.Width), y1 = Math.Max(a.Y + a.Height, b.Y + b.Height);
         return new XRect(x0, y0, x1 - x0, y1 - y0);
+    }
+
+    /// <summary>
+    /// Text rise (Ts) is part of the graphics state, and PdfPig carries the rise in effect at a form XObject's Do
+    /// into the form. PDFium does not: every form it draws starts at rise 0 (note appearances burned in by
+    /// flattening are such forms too). Text a form shows before setting its own rise is then drawn by PDFium away
+    /// from where PdfPig puts its letters. This walks the page content and every form it draws, keeps both rises
+    /// (and the text and CTM scale, since rise is in text space) and returns the largest distance, in page units,
+    /// between the two placements of any shown text: 0 when they always agree. NaN when a form drawn while they
+    /// may disagree cannot be read, so the distance is unknown.
+    /// </summary>
+    private static class RiseDrift
+    {
+        private const int MaxDepth = 32;
+
+        /// <summary>Linear part of a PDF matrix [a b c d]; translation never changes a distance.</summary>
+        private readonly record struct Lin(double A, double B, double C, double D)
+        {
+            public static readonly Lin Identity = new(1, 0, 0, 1);
+            public Lin Times(Lin m) => new(A * m.A + B * m.C, A * m.B + B * m.D, C * m.A + D * m.C, C * m.B + D * m.D);
+        }
+
+        private readonly record struct State(double PigRise, double DrawnRise, Lin Ctm);
+
+        public static double Of(PigDocument doc, Page page)
+        {
+            DictionaryToken? resources = InheritedDict(doc, page.Dictionary, NameToken.Resources);
+            byte[]? content;
+            try
+            {
+                content = PageContent(doc, page.Dictionary);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                return 0;   // PdfPig cannot read this content either: it has no letters, so there is nothing to place
+            }
+            if (content is null) return 0;
+            return Walk(doc, content, resources, new State(0, 0, Lin.Identity), 0, new HashSet<IndirectReference>());
+        }
+
+        private static double Walk(PigDocument doc, byte[] content, DictionaryToken? resources, State start, int depth, HashSet<IndirectReference> open)
+        {
+            // Nothing can disagree in a stream that starts in agreement and never sets a rise or draws a form.
+            if (start.PigRise == start.DrawnRise && !Has(content, "Ts") && !Has(content, "Do")) return 0;
+            // If reading stops part way, what was not read could only be misplaced when a rise is in play.
+            bool matters = start.PigRise != start.DrawnRise || start.PigRise != 0 || Has(content, "Ts");
+            double drift = 0;
+            var stack = new Stack<State>();
+            State s = start;
+            Lin tm = Lin.Identity;
+            var operands = new List<IToken>();
+            try
+            {
+                var scanner = new CoreTokenScanner(new MemoryInputBytes(content), false, new StackDepthGuard(256), ScannerScope.None, null, true);
+                while (scanner.MoveNext())
+                {
+                    if (scanner.CurrentToken is not OperatorToken op) { operands.Add(scanner.CurrentToken); continue; }
+                    switch (op.Data)
+                    {
+                        case "q": if (stack.Count < 4096) stack.Push(s); break;
+                        case "Q": if (stack.Count > 0) s = stack.Pop(); break;
+                        case "cm" when Numbers(operands, 6) is double[] m: s = s with { Ctm = new Lin(m[0], m[1], m[2], m[3]).Times(s.Ctm) }; break;
+                        case "BT": tm = Lin.Identity; break;
+                        case "Tm" when Numbers(operands, 6) is double[] m: tm = new Lin(m[0], m[1], m[2], m[3]); break;
+                        case "Ts" when operands.Count > 0 && operands[^1] is NumericToken r: s = s with { PigRise = r.Double, DrawnRise = r.Double }; break;
+                        case "Tj" or "TJ" or "'" or "\"" when s.PigRise != s.DrawnRise:
+                            Lin full = tm.Times(s.Ctm);
+                            drift = Math.Max(drift, Math.Abs(s.PigRise - s.DrawnRise) * Math.Sqrt(full.C * full.C + full.D * full.D));
+                            break;
+                        case "Do" when operands.Count > 0 && operands[^1] is NameToken name:
+                            double inner = Form(doc, resources, name, s, depth, open);
+                            if (double.IsNaN(inner)) return double.NaN;
+                            drift = Math.Max(drift, inner);
+                            break;
+                    }
+                    operands.Clear();
+                }
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                return matters ? double.NaN : drift;
+            }
+            return drift;
+        }
+
+        /// <summary>A form XObject drawn with state <paramref name="s"/>: PdfPig keeps the rise, PDFium starts at 0.</summary>
+        private static double Form(PigDocument doc, DictionaryToken? resources, NameToken name, State s, int depth, HashSet<IndirectReference> open)
+        {
+            IToken? entry = null;
+            if (resources is not null && Get(doc, resources, "XObject") is DictionaryToken xobjects) xobjects.TryGet(name, out entry);
+            var reference = entry as IndirectReferenceToken;
+            if (Resolve(doc, entry) is not StreamToken form || Get(doc, form.StreamDictionary, "Subtype") is not NameToken { Data: "Form" })
+                return 0;   // an image, or nothing: no text
+            bool matters = s.PigRise != 0;
+            if (depth >= MaxDepth || (reference is not null && open.Contains(reference.Data)))
+                return matters ? double.NaN : 0;   // PdfPig does not draw past this either; refuse only when it could matter
+            byte[] content;
+            try
+            {
+                content = UglyToad.PdfPig.PdfExtensions.Decode(form, doc.Structure.FilterProvider, doc.Structure.TokenScanner).ToArray();
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                return matters ? double.NaN : 0;
+            }
+            Lin ctm = s.Ctm;
+            if (Get(doc, form.StreamDictionary, "Matrix") is ArrayToken { Length: 6 } mt
+                && mt.Data.Select(t => Resolve(doc, t)).OfType<NumericToken>().Select(t => t.Double).ToArray() is { Length: 6 } m)
+                ctm = new Lin(m[0], m[1], m[2], m[3]).Times(ctm);
+            var own = Get(doc, form.StreamDictionary, "Resources") as DictionaryToken ?? resources;
+            if (reference is not null) open.Add(reference.Data);
+            try
+            {
+                return Walk(doc, content, own, new State(s.PigRise, 0, ctm), depth + 1, open);
+            }
+            finally
+            {
+                if (reference is not null) open.Remove(reference.Data);
+            }
+        }
+
+        private static double[]? Numbers(List<IToken> operands, int n)
+        {
+            if (operands.Count < n) return null;
+            var r = new double[n];
+            for (int i = 0; i < n; i++)
+            {
+                if (operands[operands.Count - n + i] is not NumericToken t) return null;
+                r[i] = t.Double;
+            }
+            return r;
+        }
+
+        private static bool Has(byte[] data, string word) => data.AsSpan().IndexOf(Encoding.ASCII.GetBytes(word)) >= 0;
+
+        /// <summary>The page's content streams joined, or null when there are none.</summary>
+        private static byte[]? PageContent(PigDocument doc, DictionaryToken page)
+        {
+            var streams = Get(doc, page, "Contents") switch
+            {
+                StreamToken one => new List<StreamToken> { one },
+                ArrayToken many => many.Data.Select(t => Resolve(doc, t)).OfType<StreamToken>().ToList(),
+                _ => [],
+            };
+            if (streams.Count == 0) return null;
+            using var ms = new MemoryStream();
+            foreach (var st in streams)
+            {
+                ms.Write(UglyToad.PdfPig.PdfExtensions.Decode(st, doc.Structure.FilterProvider, doc.Structure.TokenScanner).ToArray());
+                ms.WriteByte((byte)'\n');
+            }
+            return ms.ToArray();
+        }
+
+        private static DictionaryToken? InheritedDict(PigDocument doc, DictionaryToken dict, NameToken key)
+        {
+            DictionaryToken? d = dict;
+            for (int depth = 0; d is not null && depth < 64; depth++)
+            {
+                if (d.TryGet(key, out IToken? v)) return Resolve(doc, v) as DictionaryToken;
+                d = d.TryGet(NameToken.Parent, out IToken? parent) ? Resolve(doc, parent) as DictionaryToken : null;
+            }
+            return null;
+        }
     }
 
     private static XRect Pad(XRect r, double maxW, double maxH)
