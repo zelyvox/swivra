@@ -213,8 +213,9 @@ internal static class PdfActions
         {
             Cleanup(created);
             Log.Write($"pdf refused {path}: {ex.Message}");
-            return new ActionResult(false, Lang.T("Olmadı", "Failed"),
-                Lang.T("PDF işlenemedi · içindeki çizimler kendini çağırıyor ya da çok derin iç içe", "Could not process the PDF · its drawings call themselves or are nested too deep"));
+            return new ActionResult(false, Lang.T("Olmadı", "Failed"), ex.Fault == PdfTree.Fault.Large
+                ? Lang.T("PDF işlenemedi · içindeki çizimler güvenle denetlenemeyecek kadar çok", "Could not process the PDF · it has too many drawings to check safely")
+                : Lang.T("PDF işlenemedi · içindeki çizimler kendini çağırıyor ya da çok derin iç içe", "Could not process the PDF · its drawings call themselves or are nested too deep"));
         }
         catch (Exception ex)
         {

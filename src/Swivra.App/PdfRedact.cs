@@ -707,118 +707,272 @@ internal static class PdfRedact
 }
 
 /// <summary>
-/// The content streams a page runs besides its own: forms it draws (Do) and tiling patterns it paints with (scn),
-/// each with its own resources or the ones it was drawn with. PdfPig follows forms by plain recursion: a form that
-/// draws itself through the resources it inherits, two that draw each other or a chain of about a thousand
-/// overflows the stack, which no catch can stop, so the whole app ended (dropping such a file onto Swivra was
-/// enough, through the radar). A tree whose shared parts are drawn twice on every level never finishes and eats
-/// memory, in PdfPig and PDFium alike, and PDFium never finishes a pattern that paints with itself. This walks the
-/// tree from the dictionaries alone, before PdfPig reads any page content, and says what is wrong with it; every
-/// path that has PdfPig read page content checks it first. Type 3 glyphs and soft masks are left out: measured,
-/// neither library recurses into them.
+/// The content streams a page runs besides its own: forms it draws (Do), tiling patterns it paints with (scn), the
+/// glyph procedures of Type 3 fonts it shows text with (Tf), the soft-mask groups of graphics states it sets (gs) and
+/// the appearances of its notes, each with its own resources or the ones it was drawn with. PdfPig follows forms by
+/// plain recursion: a form that draws itself through the resources it inherits, two that draw each other or a chain
+/// of about a thousand overflows the stack, which no catch can stop, so the whole app ended (dropping such a file
+/// onto Swivra was enough, through the radar). A tree whose shared parts are drawn twice on every level never
+/// finishes and eats memory, in PdfPig and PDFium alike, and PDFium never finishes a pattern that paints with
+/// itself, also when a glyph or a soft mask is what paints with it (the shared PDFium lock then stays taken).
+/// This walks the tree from the dictionaries and a token scan of each stream, before PdfPig reads any page content,
+/// and says what is wrong with it; every path that has PdfPig read page content checks it first.
+/// A name is taken as used by an operator when it is any name operand given to it: with more operands than the
+/// operator takes, PdfPig uses the first and PDFium the last. A page's streams are scanned joined, as both libraries
+/// read them, so an operator split across two streams is still seen. Where a reader could take bytes for something
+/// other than what the scanner made of them (inline image data, comments, a stream the scanner cannot finish),
+/// every name in them counts as used by every operator: that only adds a stream to check, never hides one.
+/// The walk also tells which pages show text or images inside a pattern, a glyph or a soft mask: PDFium draws them,
+/// but neither text layer has their letters, so they cannot be searched.
+/// The checker itself only recurses to a fixed depth, so no input can overflow its stack or keep it busy for long.
 /// </summary>
 internal static partial class PdfTree
 {
     // Deeper nesting than this is not made by any real producer; PdfPig itself still reads a chain of 300 (measured).
     private const int MaxDepth = 64;
-    // Paths walked across the whole document: a shared stream counts once for each place that draws it.
-    private const int MaxVisits = 100_000;
+    // Page trees are balanced and a few levels deep, even for tens of thousands of pages.
+    private const int MaxPageTreeDepth = 64;
+    // Streams entered for one page, once for every place that draws them: far above any real page (a page that
+    // draws the same 100 template forms takes 100), far below a tree whose shared parts double on every level.
+    private const int MaxPageVisits = 100_000;
+    // The same across the whole document, so a huge file cannot keep the check busy for minutes.
+    private const long MaxDocVisits = 2_000_000;
     // Streams one page runs, counting every Do and scn: far above any real page, far below a tree that doubles per level.
     private const double MaxDraws = 1_000_000;
 
-    public sealed class TreeException(string why) : Exception(why);
+    /// <summary>What is wrong: drawings that draw themselves, nesting too deep, or a tree too large to check.</summary>
+    public enum Fault { Loop, Deep, Large }
 
-    /// <summary>Throws <see cref="TreeException"/> when the document's content tree loops, is too deep or too large.</summary>
-    public static void Check(UglyToad.PdfPig.PdfDocument doc)
+    public sealed class TreeException(Fault fault, string why) : Exception(why)
     {
-        if (Problem(doc) is string why) throw new TreeException(why);
+        public Fault Fault { get; } = fault;
+    }
+
+    /// <summary>Throws <see cref="TreeException"/> when the document's content tree loops, is too deep or too large; otherwise the checked tree.</summary>
+    public static Tree Check(UglyToad.PdfPig.PdfDocument doc)
+    {
+        var tree = new Tree(doc);
+        if (tree.Walk() is var (fault, why)) throw new TreeException(fault, why);
+        return tree;
     }
 
     /// <summary>What is wrong with the content tree, or null when PdfPig can safely read every page.</summary>
-    public static string? Problem(UglyToad.PdfPig.PdfDocument doc)
-    {
-        var walk = new Walker(doc);
-        IToken? root = doc.Structure.Catalog.CatalogDictionary.TryGet(NameToken.Pages, out IToken? p) ? p : null;
-        return walk.Pages(root, null, 0, new HashSet<IndirectReference>());
-    }
+    public static string? Problem(UglyToad.PdfPig.PdfDocument doc) => new Tree(doc).Walk()?.Why;
 
     /// <summary>Resources in effect: a stream's own, then the ones it was drawn with (a lookup that misses goes outward).</summary>
     private sealed record Res(DictionaryToken Dict, Res? Outer);
 
-    private sealed class Walker(UglyToad.PdfPig.PdfDocument doc)
+    /// <summary>Where a stream is drawn: on the page, as a glyph of a Type 3 font, or inside a pattern or soft mask.</summary>
+    private enum Ctx { Page, Glyph, Hidden }
+
+    /// <summary>Names a stream hands to each operator and how many times; whether it shows text or inline images.</summary>
+    private sealed class Uses
     {
+        public readonly Dictionary<string, int> Do = [], Scn = [], Gs = [], Tf = [];
+        public bool Text, Image, ImageNoMask;
+
+        /// <summary>A name the scanner could not place: taken as used by every operator.</summary>
+        public void Any(string name)
+        {
+            foreach (var map in new[] { Do, Scn, Gs, Tf }) map[name] = map.GetValueOrDefault(name) + 1;
+        }
+    }
+
+    public sealed class Tree
+    {
+        private readonly UglyToad.PdfPig.PdfDocument doc;
         private readonly Dictionary<IndirectReference, Uses> uses = [];
         private readonly HashSet<IndirectReference> open = [];
-        private int visits;
+        // Type 3 fonts and soft masks entered on the current page: shown again, they run nothing new.
+        private readonly HashSet<IndirectReference> fontsDone = [], masksDone = [];
+        // Type 3 fonts whose glyphs are being run right now: showing one of them again is a loop.
+        private readonly HashSet<IndirectReference> fontsOpen = [];
+        private int pageVisits;
+        private long docVisits;
         private string? problem;
+        private Fault fault;
+        private bool hidden;
 
-        /// <summary>Names a stream uses and how many times, by the operator that uses them.</summary>
-        private sealed record Uses(Dictionary<string, int> Do, Dictionary<string, int> Scn);
+        internal Tree(UglyToad.PdfPig.PdfDocument doc) => this.doc = doc;
 
-        public string? Pages(IToken? node, Res? res, int depth, HashSet<IndirectReference> seen)
+        internal (Fault Fault, string Why)? Walk()
         {
-            if (node is IndirectReferenceToken r && !seen.Add(r.Data)) return null;   // a page tree loop is PdfPig's to report
-            if (depth > MaxDepth || Resolve(node) is not DictionaryToken dict) return null;
-            if (Resolve(Get(dict, "Resources")) is DictionaryToken own) res = new Res(own, res);
-            if (Resolve(Get(dict, "Kids")) is ArrayToken kids)
+            IToken? root = doc.Structure.Catalog.CatalogDictionary.TryGet(NameToken.Pages, out IToken? p) ? p : null;
+            Pages(root, null, 0, []);
+            return problem is null ? null : (fault, problem);
+        }
+
+        /// <summary>
+        /// True when the page shows text or images inside a pattern, a Type 3 glyph or a soft mask: drawn, but in no
+        /// text layer. Also true when the page cannot be walked, so it is never called readable without a look.
+        /// </summary>
+        public bool HidesText(DictionaryToken page)
+        {
+            var chain = new List<DictionaryToken>();
+            DictionaryToken? d = page;
+            for (int depth = 0; d is not null && depth <= MaxPageTreeDepth; depth++)
             {
-                foreach (IToken kid in kids.Data)
-                    if (Pages(kid, res, depth + 1, seen) is string why) return why;
-                return null;
+                if (Resolve(Get(d, "Resources")) is DictionaryToken r) chain.Add(r);
+                d = Resolve(Get(d, "Parent")) as DictionaryToken;
             }
-            var streams = Resolve(Get(dict, "Contents")) switch
+            Res? res = null;
+            for (int i = chain.Count - 1; i >= 0; i--) res = new Res(chain[i], res);
+            problem = null;
+            docVisits = 0;
+            open.Clear();
+            Leaf(page, res);
+            return hidden || problem is not null;
+        }
+
+        private void Fail(Fault f, string why)
+        {
+            if (problem is not null) return;
+            problem = why;
+            fault = f;
+        }
+
+        private void Pages(IToken? node, Res? res, int depth, HashSet<IndirectReference> path)
+        {
+            if (depth > MaxPageTreeDepth) { Fail(Fault.Deep, $"page tree nested deeper than {MaxPageTreeDepth} levels"); return; }
+            if (++docVisits > MaxDocVisits) { Fail(Fault.Large, $"document has more than {MaxDocVisits} drawings to check"); return; }
+            var reference = node as IndirectReferenceToken;
+            if (reference is not null && !path.Add(reference.Data)) { Fail(Fault.Loop, $"page tree node {reference.Data} contains itself"); return; }
+            try
             {
-                StreamToken one => [one],
-                ArrayToken many => many.Data.Select(Resolve).OfType<StreamToken>().ToList(),
-                _ => new List<StreamToken>(),
-            };
-            double draws = 0;
-            foreach (var st in streams)
-            {
-                draws += Children(Scan(st), res, 0);
-                if (problem is not null) return problem;
+                if (Resolve(node) is not DictionaryToken dict) return;
+                if (Resolve(Get(dict, "Resources")) is DictionaryToken own) res = new Res(own, res);
+                if (Resolve(Get(dict, "Kids")) is ArrayToken kids)
+                {
+                    foreach (IToken kid in kids.Data)
+                    {
+                        Pages(kid, res, depth + 1, path);
+                        if (problem is not null) return;
+                    }
+                    return;
+                }
+                Leaf(dict, res);
             }
-            return draws > MaxDraws ? $"a page draws more than {MaxDraws} streams" : null;
+            finally
+            {
+                if (reference is not null) path.Remove(reference.Data);
+            }
+        }
+
+        /// <summary>One page: its content, then the appearances of its notes (drawn with it, and burned in by flattening).</summary>
+        private void Leaf(DictionaryToken page, Res? res)
+        {
+            pageVisits = 0;
+            hidden = false;
+            fontsDone.Clear();
+            fontsOpen.Clear();
+            masksDone.Clear();
+            double draws = Children(Scan(PageContent(page)), res, 0, Ctx.Page);
+            if (problem is null && Resolve(Get(page, "Annots")) is ArrayToken annots)
+            {
+                foreach (IToken a in annots.Data)
+                {
+                    if (Resolve(a) is not DictionaryToken annot || Resolve(Get(annot, "AP")) is not DictionaryToken ap) continue;
+                    foreach (string key in new[] { "N", "R", "D" })
+                    {
+                        IToken? look = Get(ap, key);
+                        if (Resolve(look) is DictionaryToken states)
+                            foreach (IToken state in states.Data.Values) draws += Enter(state, null, res, 0, Ctx.Page);
+                        else if (look is not null)
+                            draws += Enter(look, null, res, 0, Ctx.Page);
+                        if (problem is not null) return;
+                    }
+                }
+            }
+            if (draws > MaxDraws) Fail(Fault.Large, $"a page draws more than {MaxDraws} streams");
         }
 
         /// <summary>
         /// Enters what a stream with these uses draws; <paramref name="depth"/> is the stream's own nesting. Returns
         /// how many streams that runs, counting every use: a part shared by two uses on each level runs twice per level.
         /// </summary>
-        private double Children(Uses u, Res? res, int depth)
+        private double Children(Uses u, Res? res, int depth, Ctx ctx)
         {
+            if (ctx != Ctx.Page && (u.Text || (ctx == Ctx.Glyph ? u.ImageNoMask : u.Image))) hidden = true;
             double draws = 0;
             foreach (var (n, times) in u.Do)
                 if (Find(res, "XObject", n) is IToken t)
                 {
-                    draws += times * Enter(t, "Form", res, depth);
+                    draws += times * Enter(t, "Form", res, depth, ctx);
                     if (problem is not null) return 0;
                 }
             foreach (var (n, times) in u.Scn)
                 if (Find(res, "Pattern", n) is IToken t)
                 {
-                    draws += times * Enter(t, null, res, depth);
+                    draws += times * Enter(t, null, res, depth, Ctx.Hidden);
                     if (problem is not null) return 0;
                 }
+            foreach (var n in u.Gs.Keys)
+            {
+                // A soft mask: its group is drawn (into the mask) whenever the state is set.
+                if (Resolve(Find(res, "ExtGState", n)) is not DictionaryToken gs || Resolve(Get(gs, "SMask")) is not DictionaryToken mask) continue;
+                IToken? group = Get(mask, "G");
+                // Entered again only when it is being drawn right now: that is a loop, and Enter says so.
+                if (group is IndirectReferenceToken g && !open.Contains(g.Data) && !masksDone.Add(g.Data)) continue;
+                if (group is not null) draws += Enter(group, null, res, depth, Ctx.Hidden);
+                if (problem is not null) return 0;
+            }
+            foreach (var n in u.Tf.Keys)
+            {
+                // A Type 3 font: its glyphs are content streams, run with the font's resources or the ones in effect.
+                IToken? f = Find(res, "Font", n);
+                if (Resolve(f) is not DictionaryToken font || (Resolve(Get(font, "Subtype")) as NameToken)?.Data != "Type3") continue;
+                var fontRef = (f as IndirectReferenceToken)?.Data;
+                if (fontRef is IndirectReference open3 && fontsOpen.Contains(open3))
+                {
+                    Fail(Fault.Loop, $"Type 3 font {open3} draws itself");
+                    return 0;
+                }
+                if (fontRef is IndirectReference fr && !fontsDone.Add(fr)) continue;
+                if (Resolve(Get(font, "CharProcs")) is not DictionaryToken procs) continue;
+                Res? inner = Resolve(Get(font, "Resources")) is DictionaryToken own ? new Res(own, res) : res;
+                if (fontRef is IndirectReference fo) fontsOpen.Add(fo);
+                try
+                {
+                    foreach (IToken proc in procs.Data.Values)
+                    {
+                        draws += Enter(proc, null, inner, depth, ctx == Ctx.Hidden ? Ctx.Hidden : Ctx.Glyph);
+                        if (problem is not null) return 0;
+                    }
+                }
+                finally
+                {
+                    if (fontRef is IndirectReference fc) fontsOpen.Remove(fc);
+                }
+            }
             return draws;
         }
 
         /// <summary>One stream drawn from depth <paramref name="depth"/>: a loop, too deep, too much work or too many draws is the problem.</summary>
-        private double Enter(IToken token, string? subtype, Res? res, int depth)
+        private double Enter(IToken token, string? subtype, Res? res, int depth, Ctx ctx)
         {
             if (Resolve(token) is not StreamToken st) return 0;
-            if (subtype is not null && (Resolve(Get(st.StreamDictionary, "Subtype")) as NameToken)?.Data != subtype)
-                return 0;   // an image: nothing is run
+            if (subtype is not null)
+            {
+                string? actual = (Resolve(Get(st.StreamDictionary, "Subtype")) as NameToken)?.Data;
+                if (actual == "Image")
+                {
+                    // An image drawn where no one looks for text; a glyph's stencil mask is just the glyph's shape.
+                    if (ctx == Ctx.Hidden || (ctx == Ctx.Glyph && !IsMask(st))) hidden = true;
+                    return 0;
+                }
+                if (actual != subtype) return 0;
+            }
             var reference = token as IndirectReferenceToken;
-            if (depth + 1 > MaxDepth) problem = $"content nested deeper than {MaxDepth} levels";
-            else if (++visits > MaxVisits) problem = $"content tree has more than {MaxVisits} paths";
-            else if (reference is not null && !open.Add(reference.Data)) problem = $"content stream {reference.Data} draws itself";
+            if (depth + 1 > MaxDepth) Fail(Fault.Deep, $"content nested deeper than {MaxDepth} levels");
+            else if (++pageVisits > MaxPageVisits) Fail(Fault.Large, $"a page has more than {MaxPageVisits} drawings to check");
+            else if (++docVisits > MaxDocVisits) Fail(Fault.Large, $"document has more than {MaxDocVisits} drawings to check");
+            else if (reference is not null && !open.Add(reference.Data)) Fail(Fault.Loop, $"content stream {reference.Data} draws itself");
             if (problem is not null) return 0;
             try
             {
                 Res? inner = Resolve(Get(st.StreamDictionary, "Resources")) is DictionaryToken own ? new Res(own, res) : res;
-                double draws = 1 + Children(Scan(st, reference?.Data), inner, depth + 1);
-                if (draws > MaxDraws) problem ??= $"a page draws more than {MaxDraws} streams";
+                double draws = 1 + Children(StreamUses(st, reference?.Data), inner, depth + 1, ctx);
+                if (draws > MaxDraws) Fail(Fault.Large, $"a page draws more than {MaxDraws} streams");
                 return draws;
             }
             finally
@@ -827,27 +981,46 @@ internal static partial class PdfTree
             }
         }
 
-        private Uses Scan(StreamToken st, IndirectReference? key = null)
+        private bool IsMask(StreamToken image) =>
+            Resolve(Get(image.StreamDictionary, "ImageMask")) is BooleanToken { Data: true };
+
+        private Uses StreamUses(StreamToken st, IndirectReference? key)
         {
             if (key is IndirectReference k && uses.TryGetValue(k, out Uses? known)) return known;
-            var u = new Uses([], []);
-            byte[] data;
+            var u = Scan(Decode(st));
+            if (key is IndirectReference k2) uses[k2] = u;
+            return u;
+        }
+
+        private byte[] Decode(StreamToken st)
+        {
             try
             {
-                data = UglyToad.PdfPig.PdfExtensions.Decode(st, doc.Structure.FilterProvider, doc.Structure.TokenScanner).ToArray();
+                return UglyToad.PdfPig.PdfExtensions.Decode(st, doc.Structure.FilterProvider, doc.Structure.TokenScanner).ToArray();
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
-                data = [];   // PdfPig cannot read it either: it draws nothing from it
+                return [];   // PdfPig cannot read it either: it draws nothing from it
             }
-            foreach (Match m in NameUse().Matches(Encoding.Latin1.GetString(data)))
+        }
+
+        /// <summary>The page's content streams joined, as both libraries read them.</summary>
+        private byte[] PageContent(DictionaryToken page)
+        {
+            var streams = Resolve(Get(page, "Contents")) switch
             {
-                var map = m.Groups[2].Value == "Do" ? u.Do : u.Scn;
-                string n = Unescape(m.Groups[1].Value);
-                map[n] = map.GetValueOrDefault(n) + 1;
+                StreamToken one => [one],
+                ArrayToken many => many.Data.Select(Resolve).OfType<StreamToken>().ToList(),
+                _ => new List<StreamToken>(),
+            };
+            if (streams.Count == 1) return Decode(streams[0]);
+            using var ms = new MemoryStream();
+            foreach (var st in streams)
+            {
+                ms.Write(Decode(st));
+                ms.WriteByte((byte)'\n');
             }
-            if (key is IndirectReference k2) uses[k2] = u;
-            return u;
+            return ms.ToArray();
         }
 
         private IToken? Find(Res? res, string category, string name)
@@ -866,17 +1039,82 @@ internal static partial class PdfTree
         }
 
         private static IToken? Get(DictionaryToken dict, string key) => dict.TryGet(NameToken.Create(key), out IToken? t) ? t : null;
-
-        private static string Unescape(string name) =>
-            name.Contains('#') ? Regex.Replace(name, "#([0-9A-Fa-f]{2})", m => ((char)Convert.ToByte(m.Groups[1].Value, 16)).ToString()) : name;
     }
 
-    // A name operand right before the operator that uses it: /Fm0 Do, /P0 scn. Whitespace and
-    // comments may sit between them. Strings and inline image data can hold look-alikes: those only add a
-    // stream to check, never hide one.
-    private const string Ws = @"(?:[\x00\t\n\f\r ]|%[^\r\n]*)*";
-    private const string NameChars = @"[^\x00\t\n\f\r ()<>\[\]{}/%]";
+    /// <summary>The names each operator is given in a content stream, and whether it shows text or inline images.</summary>
+    private static Uses Scan(byte[] data)
+    {
+        var u = new Uses();
+        var names = new List<string>();   // name operands since the last operator
+        bool mask = false;                // the inline image being read is a stencil mask (/IM true)
+        string? lastName = null;
+        try
+        {
+            var scanner = new CoreTokenScanner(new MemoryInputBytes(data), false, new StackDepthGuard(256), ScannerScope.None, null, true);
+            while (scanner.MoveNext())
+            {
+                switch (scanner.CurrentToken)
+                {
+                    case NameToken n:
+                        names.Add(n.Data);
+                        lastName = n.Data;
+                        continue;
+                    case BooleanToken { Data: true } when lastName is "IM" or "ImageMask":
+                        mask = true;
+                        lastName = null;
+                        continue;
+                    case InlineImageDataToken img:
+                        // The scanner reads BI .. ID .. EI as BI, the dictionary's tokens, then this one.
+                        u.Image = true;
+                        if (!mask) u.ImageNoMask = true;
+                        AnyNames(Encoding.Latin1.GetString(img.Data.Span), u);
+                        names.Clear();
+                        mask = false;
+                        lastName = null;
+                        continue;
+                    case CommentToken c:
+                        AnyNames(c.Data, u);
+                        continue;
+                    case OperatorToken op:
+                        switch (op.Data)
+                        {
+                            case "Do": foreach (string n in names) Add(u.Do, n); break;
+                            case "scn" or "SCN": foreach (string n in names) Add(u.Scn, n); break;
+                            case "gs": foreach (string n in names) Add(u.Gs, n); break;
+                            case "Tf": foreach (string n in names) Add(u.Tf, n); break;
+                            case "Tj" or "TJ" or "'" or "\"": u.Text = true; break;
+                            case "BI": mask = false; break;
+                        }
+                        names.Clear();
+                        lastName = null;
+                        continue;
+                    default:
+                        lastName = null;
+                        continue;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // The scanner stopped where a reader may go on: every name in the stream counts.
+            AnyNames(Encoding.Latin1.GetString(data), u);
+            u.Text = u.Image = u.ImageNoMask = true;
+        }
+        return u;
 
-    [GeneratedRegex("/(" + NameChars + "+)" + Ws + "(Do|scn|SCN)(?!" + NameChars + ")")]
-    private static partial Regex NameUse();
+        static void Add(Dictionary<string, int> map, string n) => map[n] = map.GetValueOrDefault(n) + 1;
+    }
+
+    private static void AnyNames(string text, Uses u)
+    {
+        foreach (Match m in AnyName().Matches(text))
+        {
+            string n = m.Groups[1].Value;
+            if (n.Contains('#')) n = Regex.Replace(n, "#([0-9A-Fa-f]{2})", h => ((char)Convert.ToByte(h.Groups[1].Value, 16)).ToString());
+            u.Any(n);
+        }
+    }
+
+    [GeneratedRegex(@"/([^\x00\t\n\f\r ()<>\[\]{}/%]+)")]
+    private static partial Regex AnyName();
 }
