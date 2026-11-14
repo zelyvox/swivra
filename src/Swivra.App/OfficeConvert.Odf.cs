@@ -419,21 +419,33 @@ internal static partial class OfficeConvert
 
     /// <summary>
     /// CSS that imports a sheet or uses url() for anything but a place in the same picture or inline data.
-    /// Escapes ("\75 rl(") and comments are undone first, so they cannot hide either.
+    /// Escapes ("\75 rl(") and comments are undone first, so they cannot hide either. "@import" counts as a
+    /// whole word only ("@importco" is another at-rule and "curl(" another function, neither loads
+    /// anything), so an address like ali@importco.com is no import. A comment is a token separator in CSS
+    /// ("@import/**/url(...)" imports), so the text is read with each comment as a space, comments taken
+    /// out before the escapes as CSS does and after them (an escaped "/\2a" opens no comment). It is also
+    /// read with comments dropped, so a name split by one ("@im/**/port") is still caught by a laxer parser.
     /// </summary>
     private static bool FetchesCss(string css)
     {
-        if (css.IndexOf('\\') >= 0) css = CssEscape.Replace(css, m => m.Groups[1].Success
+        if (!css.Contains("/*", StringComparison.Ordinal)) return Fetches(Unescape(css));
+        string unescaped = Unescape(css);
+        return Fetches(Unescape(CssComment.Replace(css, " "))) || Fetches(CssComment.Replace(unescaped, " ")) || Fetches(CssComment.Replace(unescaped, ""));
+
+        static string Unescape(string css) => css.IndexOf('\\') < 0 ? css : CssEscape.Replace(css, m => m.Groups[1].Success
             ? CssCodePoint(System.Convert.ToInt32(m.Groups[1].Value, 16))
             : m.Groups[2].Value);
-        if (css.Contains("/*", StringComparison.Ordinal)) css = CssComment.Replace(css, "");
-        if (css.Contains("@import", StringComparison.OrdinalIgnoreCase)) return true;
-        foreach (System.Text.RegularExpressions.Match m in CssUrl.Matches(css))
+
+        static bool Fetches(string css)
         {
-            string target = m.Groups[1].Value.TrimStart();
-            if (!target.StartsWith('#') && !target.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return true;
+            if (CssImport.IsMatch(css)) return true;
+            foreach (System.Text.RegularExpressions.Match m in CssUrl.Matches(css))
+            {
+                string target = m.Groups[1].Value.TrimStart();
+                if (!target.StartsWith('#') && !target.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
         }
-        return false;
     }
 
     // As CSS reads an escape: zero, a surrogate ("\D800") or past the last code point is U+FFFD, not an error.
@@ -443,8 +455,15 @@ internal static partial class OfficeConvert
     private static readonly System.Text.RegularExpressions.Regex CssEscape =new(@"\\(?:([0-9a-fA-F]{1,6})\s?|(.))", System.Text.RegularExpressions.RegexOptions.Singleline);
     private static readonly System.Text.RegularExpressions.Regex CssComment = new(@"/\*.*?\*/", System.Text.RegularExpressions.RegexOptions.Singleline);
 
+    // A CSS name character: letter, digit, "-", "_" or anything past ASCII. "@import" or "url(" next to
+    // one is part of another name.
+    private const string CssNameChar = @"[-_a-zA-Z0-9\u0080-￿]";
+
+    private static readonly System.Text.RegularExpressions.Regex CssImport = new(
+        @"@import(?!" + CssNameChar + ")", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
     private static readonly System.Text.RegularExpressions.Regex CssUrl = new(
-        @"url\s*\(\s*['""]?([^'"")]*)", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        @"(?<!" + CssNameChar + @")url\s*\(\s*['""]?([^'"")]*)", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     /// <summary>PNG, JPEG, GIF, BMP, TIFF, WMF or EMF by its first bytes; anything else is not taken as a picture.</summary>
     private static bool IsRasterBase64(string base64)
