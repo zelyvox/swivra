@@ -57,7 +57,15 @@ internal static class FileActions
         ["path"] = Lang.T("Yolu kopyala", "Copy path"), ["wa"] = "WhatsApp", ["mail"] = "Mail", ["tel"] = Lang.T("Telefona", "To phone"),
     };
 
-    private static readonly HashSet<string> ImageSteps = new() { "png", "jpg", "bmp", "webp", "pdf", "bg", "rot", "loc", "rs", "cmp", "crop" };
+    private static readonly HashSet<string> ImageSteps = new() { "png", "jpg", "bmp", "webp", "pdf", "bg", "rot", "loc", "rs", "cmp", "crop", "hide" };
+
+    // Hide is asked for, not a scan during a drag: time for a large photo or a 300 DPI scan read at full size (a 12 MP
+    // photo takes about 6 s, a 48 MP one about 22 s), but an end, after which nothing is hidden and the result says so.
+    private static readonly TimeSpan HideBudget = TimeSpan.FromSeconds(90);
+
+    // Said with every Hide result on an image, found or not: OCR never gets to say "clean". Short enough that the result
+    // still fits inside the wheel's centre (measured: one note more, or "blurry" too, runs over its edge).
+    private static string HideCaveat => Lang.T("el yazısı ya da küçük yazı kaçabilir, gözle bak", "handwriting or small text may be missed, check by eye");
 
     public static ActionResult Run(IReadOnlyList<string> files, IReadOnlyList<string> steps, StepOptions? options = null)
     {
@@ -149,13 +157,30 @@ internal static class FileActions
                 }
                 else
                 {
-                    finalPath = RunImage(path, fileSteps, options);
+                    bool hide = fileSteps.Contains("hide");
+                    string? written = RunImage(path, fileSteps, options, out int hidden);
+                    string? frames = ExtraFrames(path);
+                    if (written is null)
+                    {
+                        // Hide found nothing: no file, and no claim that the image is clean (the other steps did not run either).
+                        var none = new List<string> { Lang.T("Görselde gizlenecek bir şey bulunamadı", "Nothing to hide found in the image") };
+                        if (frames is not null) none.Add(frames);
+                        none.Add(HideCaveat);
+                        return new ActionResult(true, Lang.T("Gizle", "Hide"), string.Join(" · ", none));
+                    }
+                    finalPath = written;
                     finalExt = Path.GetExtension(finalPath).TrimStart('.').ToLowerInvariant();
                     // Say what the file name does not: a format kept for transparency, frames or pages left out.
                     var notes = new List<string>();
+                    if (hide)
+                    {
+                        notes.Add(Lang.T($"{hidden} öğe gizlendi", hidden == 1 ? "1 item hidden" : $"{hidden} items hidden"));
+                        notes.Add(Lang.T("meta veri silindi", "metadata removed"));
+                    }
                     if (fileSteps.Contains("bg") && finalExt == "png" && fileSteps.Any(s => s is "jpg" or "bmp" or "cmp"))
                         notes.Add(Lang.T("saydamlık için PNG", "PNG, to keep transparency"));
-                    if (ExtraFrames(path) is string frames) notes.Add(frames);
+                    if (frames is not null) notes.Add(frames);
+                    if (hide) notes.Add(HideCaveat);
                     if (notes.Count > 0) finalName = $"{Path.GetFileName(finalPath)} · {string.Join(" · ", notes)}";
                 }
             }
@@ -231,12 +256,17 @@ internal static class FileActions
         return false;
     }
 
-    private static string RunImage(string path, List<string> steps, StepOptions options)
+    /// <summary>
+    /// Runs the image steps and writes the result; returns its path. Null only when Hide is in the chain and found
+    /// nothing: then nothing is written. <paramref name="hidden"/> is the number of values Hide painted over.
+    /// </summary>
+    private static string? RunImage(string path, List<string> steps, StepOptions options, out int hidden)
     {
+        hidden = 0;
         string ext = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
         if (ext == "jpeg") ext = "jpg";
         string suffix = "";
-        bool strip = false, compress = false, cutout = false;
+        bool strip = false, compress = false, cutout = false, hide = false;
         int rotations = 0;
         int? maxWidth = null;
 
@@ -251,6 +281,8 @@ internal static class FileActions
                 case "loc": strip = true; suffix += Lang.T("-temiz", "-clean"); break;
                 case "rs": maxWidth = 1080; suffix += "-1080"; break;
                 case "cmp": compress = true; ext = "jpg"; suffix += Lang.T("-kucuk", "-small"); break;
+                // A blacked-out copy must not hand the original back: the EXIF thumbnail still shows it whole, GPS says where.
+                case "hide": hide = strip = true; suffix += Lang.T("-gizli", "-hidden"); break;
             }
         }
 
@@ -278,9 +310,23 @@ internal static class FileActions
 
             for (int i = 0; i < rotations; i++) work.RotateFlip(RotateFlipType.Rotate90FlipNone);
 
+            // Hide reads the image as it now stands (cropped, turned): its polygons need no mapping back. It reads before
+            // Resize, at full size, since 1080 px can shrink small print below what OCR reads, and paints there, so the
+            // smaller copy is made from pixels that are already black. Before the cut-out, too: text the cut-out makes
+            // transparent is still in the file's colour channels, and OCR only sees what a viewer shows.
+            List<PointF[]>? cover = null;
+            if (hide)
+            {
+                (cover, hidden) = FindToHide(work, path);
+                if (hidden == 0) return null;
+                ImageActions.Cover(work, cover);
+            }
+
             if (maxWidth is int mw && work.Width > mw)
             {
                 int h = Math.Max(1, (int)Math.Round(work.Height * (mw / (double)work.Width))); // a very wide, flat image would round to 0
+                float kx = mw / (float)work.Width, ky = h / (float)work.Height;
+                cover = cover?.Select(p => p.Select(q => new PointF(q.X * kx, q.Y * ky)).ToArray()).ToList();
                 var resized = new Bitmap(mw, h);
                 using (var g = Graphics.FromImage(resized))
                 {
@@ -300,6 +346,13 @@ internal static class FileActions
                 var cut = ImageActions.RemoveBackground(work);
                 work.Dispose();
                 work = cut;
+            }
+
+            if (cover is not null)
+            {
+                // Again on the final pixels: the cut-out may have made the black see-through, and resizing blends its edge.
+                ImageActions.Cover(work, cover);
+                ImageActions.ClearUnderTransparent(work);
             }
 
             if (!strip)
@@ -323,6 +376,23 @@ internal static class FileActions
         {
             work.Dispose();
         }
+    }
+
+    /// <summary>
+    /// The polygons to paint over and how many values they cover, read by OCR at full size. Text that could not be read
+    /// (no models, out of time, an error) is a failure: nothing may be called hidden then.
+    /// </summary>
+    private static (List<PointF[]> Polygons, int Count) FindToHide(Bitmap work, string path)
+    {
+        var page = Ocr.Read(work, HideBudget);
+        if (page is null)
+        {
+            Log.Write($"hide: text not read in {path} (see the ocr line above)");
+            throw new UserFacingException(Lang.T("Görseldeki yazılar okunamadı, gizlenmedi", "Could not read the text in the image; nothing was hidden"));
+        }
+        var found = Ocr.FindSensitive(page);
+        Log.Write($"hide: {found.Count} value(s) in {path}");
+        return (found.SelectMany(f => f.Region).ToList(), found.Count);
     }
 
     /// <summary>
