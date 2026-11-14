@@ -50,42 +50,94 @@ internal static partial class Radar
             (gps, model) = ImageIO.ReadPrivacy(path); // HEIC, AVIF, WebP: GDI+ cannot read them, WIC can
         }
         if (!gps && path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) gps = PngHasGps(path); // GDI+ ignores eXIf and XMP in PNG
+        if (!gps && (path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase)))
+            gps = JpegXmpHasGps(path); // nor does it show GPS kept only in XMP
         if (gps) found.Add(Lang.T("Konum bilgisi", "Location"));
         if (model is not null)
             found.Add(model.Length > 0 ? Lang.T($"Cihaz modeli: {model}", $"Device model: {model}") : Lang.T("Cihaz modeli", "Device model"));
     }
 
-    private const int MaxPngBytes = 8 * 1024 * 1024; // metadata sits before the pixels; do not read a whole 50 MB PNG while dragging
+    private const int MaxMetaChunkBytes = 8 * 1024 * 1024; // one metadata chunk or segment read into memory, at most
     private const int MaxXmpBytes = 4 * 1024 * 1024;
+    private const int MaxChunks = 200_000;                 // a 2 GB PNG in 8 KB IDAT chunks stays under this; a crafted file cannot loop forever
 
-    /// <summary>GPS in a PNG: an eXIf chunk with a GPS IFD, or XMP (XML:com.adobe.xmp) with exif:GPSLatitude/Longitude. Never throws.</summary>
+    /// <summary>
+    /// GPS in a PNG: an eXIf chunk with a GPS IFD, or XMP (XML:com.adobe.xmp) with exif:GPSLatitude/Longitude. Never throws.
+    /// eXIf and XMP may also come after the pixels (the spec allows it), so pixel chunks are skipped by seeking, not read.
+    /// </summary>
     private static bool PngHasGps(string path)
     {
         try
         {
-            byte[] buf;
-            using (var fs = File.OpenRead(path))
+            using var fs = File.OpenRead(path);
+            Span<byte> head = stackalloc byte[8];
+            if (fs.ReadAtLeast(head, 8, throwOnEndOfStream: false) < 8 || head[0] != 0x89 || head[1] != 'P' || head[2] != 'N' || head[3] != 'G') return false;
+            for (int n = 0; n < MaxChunks && fs.Position + 12 <= fs.Length; n++)
             {
-                buf = new byte[(int)Math.Min(fs.Length, MaxPngBytes)];
-                fs.ReadExactly(buf);
-            }
-            if (buf.Length < 8 || buf[0] != 0x89 || buf[1] != 'P' || buf[2] != 'N' || buf[3] != 'G') return false;
-            int pos = 8;
-            while (pos + 12 <= buf.Length)
-            {
-                uint len = (uint)(buf[pos] << 24 | buf[pos + 1] << 16 | buf[pos + 2] << 8 | buf[pos + 3]);
-                string type = Encoding.ASCII.GetString(buf, pos + 4, 4);
-                if (len > buf.Length - pos - 12) return false; // truncated: nothing more to trust
-                var data = new ReadOnlySpan<byte>(buf, pos + 8, (int)len);
-                if (type == "IDAT" || type == "IEND") return false; // metadata chunks come first in practice
-                if (type == "eXIf" && ExifHasGps(data.ToArray())) return true;
-                if (type is "iTXt" or "tEXt" or "zTXt" && XmpHasGps(type, data)) return true;
-                pos += 12 + (int)len;
+                if (fs.ReadAtLeast(head, 8, throwOnEndOfStream: false) < 8) return false;
+                uint len = (uint)(head[0] << 24 | head[1] << 16 | head[2] << 8 | head[3]);
+                string type = Encoding.ASCII.GetString(head[4..8]);
+                if (len > fs.Length - fs.Position - 4) return false; // truncated: nothing more to trust
+                if (type == "IEND") return false;
+                bool wanted = type is "eXIf" or "iTXt" or "tEXt" or "zTXt" && len <= MaxMetaChunkBytes;
+                if (!wanted)
+                {
+                    fs.Seek(len + 4, SeekOrigin.Current); // data and CRC
+                    continue;
+                }
+                var data = new byte[len];
+                fs.ReadExactly(data);
+                fs.Seek(4, SeekOrigin.Current);
+                if (type == "eXIf" && ExifHasGps(data)) return true;
+                if (type != "eXIf" && XmpHasGps(type, data)) return true;
             }
         }
         catch (Exception ex)
         {
             Log.Write($"radar png metadata skipped {path}: {ex.Message}");
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// GPS that a JPEG keeps only in XMP (APP1 "http://ns.adobe.com/xap/1.0/" or its extension segments), which GDI+ does not
+    /// show as EXIF properties. Reads segment headers up to the image data; never throws.
+    /// </summary>
+    private static bool JpegXmpHasGps(string path)
+    {
+        try
+        {
+            using var fs = File.OpenRead(path);
+            if (fs.ReadByte() != 0xFF || fs.ReadByte() != 0xD8) return false;
+            for (int n = 0; n < MaxChunks; n++)
+            {
+                int ff = fs.ReadByte();
+                if (ff < 0) return false;
+                if (ff != 0xFF) return false; // lost sync: stop rather than guess
+                int marker = fs.ReadByte();
+                while (marker == 0xFF) marker = fs.ReadByte(); // fill bytes
+                if (marker < 0 || marker == 0xD9 || marker == 0xDA) return false; // end, or image data: metadata is over
+                if (marker is 0x01 or (>= 0xD0 and <= 0xD7)) continue; // no length
+                int hi = fs.ReadByte(), lo = fs.ReadByte();
+                if (hi < 0 || lo < 0) return false;
+                int len = hi << 8 | lo;
+                if (len < 2 || len - 2 > fs.Length - fs.Position) return false;
+                if (marker != 0xE1)
+                {
+                    fs.Seek(len - 2, SeekOrigin.Current);
+                    continue;
+                }
+                var data = new byte[len - 2];
+                fs.ReadExactly(data);
+                string text = Encoding.UTF8.GetString(data);
+                if ((text.StartsWith("http://ns.adobe.com/xap/1.0/", StringComparison.Ordinal) || text.StartsWith("http://ns.adobe.com/xmp/extension/", StringComparison.Ordinal))
+                    && (text.Contains("GPSLatitude", StringComparison.Ordinal) || text.Contains("GPSLongitude", StringComparison.Ordinal)))
+                    return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"radar jpeg xmp skipped {path}: {ex.Message}");
         }
         return false;
     }
