@@ -159,6 +159,8 @@ internal static class PdfActions
                         notes.AddRange(unread);
                         break;
                     case "docx":
+                        // Without Word or LibreOffice the text comes from PdfPig reading every page.
+                        using (var check = UglyToad.PdfPig.PdfDocument.Open(SafeFile.ReadAll(input))) PdfTree.Check(check);
                         var word = PdfWord.Convert(input, origDir, baseName, created);
                         if (!word.Ok) throw new PdfFailure(word);
                         return word with { Detail = JoinNotes(word.Detail, notes) };
@@ -206,6 +208,13 @@ internal static class PdfActions
             return new ActionResult(false, Lang.T("Gizlenmedi", "Not redacted"),
                 Lang.T($"{ex.Page}. sayfadaki yazının yeri kesin bulunamadı; kutular kaçabileceği için gizlenmiş dosya verilmedi",
                        $"Where the text on page {ex.Page} is drawn could not be worked out; no redacted file was made because the boxes could miss"));
+        }
+        catch (PdfTree.TreeException ex)
+        {
+            Cleanup(created);
+            Log.Write($"pdf refused {path}: {ex.Message}");
+            return new ActionResult(false, Lang.T("Olmadı", "Failed"),
+                Lang.T("PDF işlenemedi · içindeki çizimler kendini çağırıyor ya da çok derin iç içe", "Could not process the PDF · its drawings call themselves or are nested too deep"));
         }
         catch (Exception ex)
         {
@@ -296,6 +305,7 @@ internal static class PdfActions
     {
         var pages = new List<string>();
         using var doc = UglyToad.PdfPig.PdfDocument.Open(path);
+        PdfTree.Check(doc);   // before any page content is read: a looping tree would end the app, not throw
         foreach (var page in doc.GetPages().Take(maxPages))
             pages.Add(ContentOrderTextExtractor.GetText(page));
         return pages;
