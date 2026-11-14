@@ -241,7 +241,8 @@ internal static class Ocr
         // Tiles are wide strips, which cut every line of a page turned on its side, and the detector breaks such cut
         // vertical lines into loose pieces (measured on an A4 page at 300 DPI turned 90°: 53 pieces for 33 lines, three
         // values lost). Such a page is turned upright first, the way its text reads; the rest is read as usual.
-        int turn = Sideways(engine, work, cancel);
+        int turn = Sideways(engine, work, cancel, out float skew);
+        if (turn == 0 && skew != 0) return RunStraightened(engine, work, skew, cancel);
         if (turn == 0) return RunTiled(engine, work, cancel);
         using var turned = new SKBitmap(new SKImageInfo(h, w, SKColorType.Bgra8888, SKAlphaType.Opaque));
         using (var canvas = new SKCanvas(turned))
@@ -255,26 +256,62 @@ internal static class Ocr
             .Select(l => new Line(l.Text, Back(l.Quad), l.Words.Select(x => x with { Quad = Back(x.Quad) }).ToList())).ToList();
     }
 
+    // A page whose long lines run so askew that they no longer fit inside the strip two tiles share (their rise across
+    // the line plus their height is over Overlap) is straightened before it is cut into tiles: its lines then lie in one
+    // strip instead of crossing several. Measured on a 12 MP photo of a page at 15°: 39 s read askew (nearly every line
+    // cut and read again from its own crop), 15 s straightened; at 1° a value on a cut line was lost askew and is found
+    // straightened. Lines that fit are read as they lie: turning resamples the pixels, and on a small photo 4° askew
+    // that cost a digit of a phone number.
+    private const float MinSkew = 0.5f;
+
     /// <summary>
     /// How to turn an image whose text mostly runs up or down it: +1 a quarter clockwise (text reads bottom to top),
     /// -1 anticlockwise (top to bottom), 0 leave it. Judged from a quick read of a small copy: the recogniser turns a tall
     /// crop one fixed way and the angle classifier says whether that left it upside down, which tells the reading direction.
+    /// <paramref name="skew"/> is the angle (degrees, clockwise on screen) to straighten an upright page by: the
+    /// length-weighted median direction of the clearly elongated boxes; 0 when there are none, when it is under
+    /// <see cref="MinSkew"/>, or when its long lines fit inside the tile overlap as they lie.
     /// </summary>
-    private static int Sideways(RapidOcr engine, SKBitmap work, CancellationToken cancel)
+    private static int Sideways(RapidOcr engine, SKBitmap work, CancellationToken cancel, out float skew)
     {
+        skew = 0;
         float k = 1024f / Math.Max(work.Width, work.Height);
         using var small = work.Resize(new SKImageInfo(Math.Max(1, (int)(work.Width * k)), Math.Max(1, (int)(work.Height * k)), SKColorType.Bgra8888, SKAlphaType.Opaque),
             new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear));
         if (small is null) return 0;
         // boxes alone first: an upright page, the usual case, then costs one small detection and no recognition
         double across = 0, tall = 0;
+        var angles = new List<(float Angle, float Length, float Thick)>();
         foreach (var box in engine.DetectBoxes(small, Options(1024), cancel))
         {
-            var b = Bounds(Points(box.BoxPoints, 0, 0));
+            var q = Points(box.BoxPoints, 0, 0);
+            var b = Bounds(q);
             if (b.Width > 1.5f * b.Height) across += b.Width;
             else if (b.Height > 1.5f * b.Width) tall += b.Height;
+            if (q.Length != 4) continue;
+            float s01 = Dist(q[0], q[1]), s12 = Dist(q[1], q[2]);
+            var (p, r) = s01 >= s12 ? (q[0], q[1]) : (q[1], q[2]);
+            if (Math.Max(s01, s12) < 3 * Math.Max(1, Math.Min(s01, s12))) continue; // too short to tell a direction
+            float a = MathF.Atan2(r.Y - p.Y, r.X - p.X) * 180 / MathF.PI;
+            if (a > 90) a -= 180; else if (a <= -90) a += 180;
+            if (Math.Abs(a) < 45) angles.Add((a, Math.Max(s01, s12), Math.Min(s01, s12)));
         }
-        if (tall <= 1.5 * across) return 0;
+        if (tall <= 1.5 * across)
+        {
+            if (angles.Count > 0)
+            {
+                float Median(Func<(float Angle, float Length, float Thick), float> by)
+                {
+                    float half = angles.Sum(x => x.Length) / 2, run = 0;
+                    foreach (var x in angles.OrderBy(by))
+                        if ((run += x.Length) >= half) return by(x);
+                    return by(angles[^1]);
+                }
+                float angle = Median(x => x.Angle), length = Median(x => x.Length) / k, thick = Median(x => x.Thick) / k;
+                if (Math.Abs(angle) >= MinSkew && length * Math.Abs(MathF.Sin(angle * MathF.PI / 180)) + thick > Overlap) skew = angle;
+            }
+            return 0;
+        }
         double up = 0, down = 0;
         foreach (var block in engine.Detect(small, Options(1024), cancel).TextBlocks)
         {
@@ -284,6 +321,38 @@ internal static class Ocr
             else up += b.Height;
         }
         return down > up ? -1 : 1;
+    }
+
+    /// <summary>
+    /// Reads a page askew by <paramref name="skew"/> degrees: turned back onto a white sheet large enough to hold it,
+    /// read in tiles, and the quads mapped back onto the image as it was.
+    /// </summary>
+    private static List<Line> RunStraightened(RapidOcr engine, SKBitmap work, float skew, CancellationToken cancel)
+    {
+        int w = work.Width, h = work.Height;
+        double a = skew * Math.PI / 180;
+        int sw = (int)Math.Ceiling(w * Math.Abs(Math.Cos(a)) + h * Math.Abs(Math.Sin(a)));
+        int sh = (int)Math.Ceiling(w * Math.Abs(Math.Sin(a)) + h * Math.Abs(Math.Cos(a)));
+        var toStraight = SKMatrix.CreateTranslation(-w / 2f, -h / 2f)
+            .PostConcat(SKMatrix.CreateRotationDegrees(-skew))
+            .PostConcat(SKMatrix.CreateTranslation(sw / 2f, sh / 2f));
+        var back = toStraight.Invert();
+        List<Line> lines;
+        using (var straight = new SKBitmap(new SKImageInfo(sw, sh, SKColorType.Bgra8888, SKAlphaType.Opaque)))
+        {
+            using (var canvas = new SKCanvas(straight))
+            {
+                canvas.Clear(SKColors.White);
+                canvas.SetMatrix(toStraight);
+                using var image = SKImage.FromBitmap(work);
+                canvas.DrawImage(image, 0, 0, new SKSamplingOptions(SKFilterMode.Linear), null);
+            }
+            lines = RunTiled(engine, straight, cancel);
+        }
+        PointF[] Back(PointF[] q) => q.Select(p => { var o = back.MapPoint(p.X, p.Y); return new PointF(o.X, o.Y); }).ToArray();
+        // The corners of the sheet that the image does not cover are white: what is read there lies outside the image.
+        return lines.Select(l => new Line(l.Text, Back(l.Quad), l.Words.Select(x => x with { Quad = Back(x.Quad) }).ToList()))
+            .Where(l => Center(l.Quad) is var c && c.X >= 0 && c.Y >= 0 && c.X <= w && c.Y <= h).ToList();
     }
 
     private static List<Line> RunTiled(RapidOcr engine, SKBitmap work, CancellationToken cancel)
@@ -347,45 +416,109 @@ internal static class Ocr
     /// <summary>Bounding boxes of cut line pieces, joined where pieces of the same line overlap.</summary>
     private static List<List<RectangleF>> Groups(List<Line> pieces)
     {
-        var boxes = pieces.Select(p => Bounds(p.Quad)).ToList();
-        var parent = Enumerable.Range(0, boxes.Count).ToArray();
+        var parent = Enumerable.Range(0, pieces.Count).ToArray();
         int Find(int i) => parent[i] == i ? i : parent[i] = Find(parent[i]);
-        for (int i = 0; i < boxes.Count; i++)
-            for (int j = i + 1; j < boxes.Count; j++)
-                if (SameLine(boxes[i], boxes[j])) parent[Find(i)] = Find(j);
-        return Enumerable.Range(0, boxes.Count).GroupBy(Find).Select(g => g.Select(i => boxes[i]).ToList()).ToList();
+        for (int i = 0; i < pieces.Count; i++)
+            for (int j = i + 1; j < pieces.Count; j++)
+                if (SameLine(pieces[i].Quad, pieces[j].Quad)) parent[Find(i)] = Find(j);
+        return Enumerable.Range(0, pieces.Count).GroupBy(Find).Select(g => g.Select(i => Bounds(pieces[i].Quad)).ToList()).ToList();
     }
 
     /// <summary>
-    /// Two pieces of one line: they touch, and along the line's run they share most of their height (two lines stacked
-    /// one above the other touch too, but barely overlap across). Square-ish pieces need most of the smaller one shared.
+    /// Two pieces of one line: measured along and across the line they run on (the more elongated of the two quads), they
+    /// touch, and across the line they share most of the thinner one's height. Two lines stacked one above the other
+    /// touch too, but barely overlap across. Taken from the quads, not their upright bounding boxes: on a page a degree or
+    /// two askew, the box of a long line takes in the short lines above and below it.
     /// </summary>
-    private static bool SameLine(RectangleF a, RectangleF b)
+    private static bool SameLine(PointF[] a, PointF[] b)
     {
-        var i = RectangleF.Intersect(RectangleF.Inflate(a, 2, 2), RectangleF.Inflate(b, 2, 2));
-        if (i.Width <= 0 || i.Height <= 0) return false;
-        bool ha = a.Width >= a.Height, hb = b.Width >= b.Height;
-        if (ha && hb) return i.Height >= 0.5f * Math.Min(a.Height, b.Height);
-        if (!ha && !hb) return i.Width >= 0.5f * Math.Min(a.Width, b.Width);
-        return i.Width * i.Height >= 0.5f * Math.Min(a.Width * a.Height, b.Width * b.Height);
+        var (u, v) = Frame(a, b);
+        var (au, bu, av, bv) = (Span(a, u), Span(b, u), Span(a, v), Span(b, v));
+        if (Shared(au, bu) < -2 || Shared(av, bv) < -2) return false; // touching, within 2 px
+        return Shared(av, bv) >= 0.5f * Math.Min(av.Hi - av.Lo, bv.Hi - bv.Lo);
     }
 
-    /// <summary>The same line read twice (from two overlapping tiles, or from a tile and a crop): the longer reading stays.</summary>
+    /// <summary>
+    /// The same line read twice (from two overlapping tiles, or from a tile and a crop): the longer reading stays. Same
+    /// line means, along and across the line (see <see cref="SameLine"/>): most of the thinner one's height shared, most
+    /// of the shorter one's run shared, and most of the shorter text in the longer one. Different lines never count as
+    /// one, however askew the page: each may hold a value.
+    /// </summary>
     private static List<Line> Distinct(List<Line> lines)
     {
-        var kept = new List<(Line Line, RectangleF Box)>();
+        var kept = new List<Line>();
         foreach (var l in lines.OrderByDescending(l => l.Text.Length))
         {
-            var b = Bounds(l.Quad);
             bool dup = kept.Any(k =>
             {
-                var i = RectangleF.Intersect(k.Box, b);
-                return i.Width > 0 && i.Height > 0 && i.Width * i.Height >= 0.6f * Math.Min(k.Box.Width * k.Box.Height, b.Width * b.Height);
+                var (u, v) = Frame(k.Quad, l.Quad);
+                var (ku, lu, kv, lv) = (Span(k.Quad, u), Span(l.Quad, u), Span(k.Quad, v), Span(l.Quad, v));
+                return Shared(kv, lv) >= 0.5f * Math.Min(kv.Hi - kv.Lo, lv.Hi - lv.Lo)
+                    && Shared(ku, lu) >= 0.6f * Math.Min(ku.Hi - ku.Lo, lu.Hi - lu.Lo)
+                    && Similar(k.Text, l.Text);
             });
-            if (!dup) kept.Add((l, b));
+            if (!dup) kept.Add(l);
         }
-        return kept.Select(k => k.Line).ToList();
+        return kept;
     }
+
+    /// <summary>
+    /// The shorter text is mostly in the longer one (longest common subsequence, spaces left out, at least half of it):
+    /// two readings of one line differ in a slip or a cut-off end, two different lines in most of their characters.
+    /// </summary>
+    private static bool Similar(string a, string b)
+    {
+        string s = new(a.Where(c => !char.IsWhiteSpace(c)).ToArray()), t = new(b.Where(c => !char.IsWhiteSpace(c)).ToArray());
+        if (s.Length > t.Length) (s, t) = (t, s);
+        if (s.Length == 0) return true;
+        var row = new int[t.Length + 1];
+        for (int i = 1; i <= s.Length; i++)
+        {
+            int diag = 0;
+            for (int j = 1; j <= t.Length; j++)
+            {
+                int up = row[j];
+                row[j] = char.ToUpperInvariant(s[i - 1]) == char.ToUpperInvariant(t[j - 1]) ? diag + 1 : Math.Max(row[j], row[j - 1]);
+                diag = up;
+            }
+        }
+        return row[t.Length] >= 0.5 * s.Length;
+    }
+
+    /// <summary>
+    /// Unit vectors along (u) and across (v) the line that the more elongated of two quads lies on; v is u turned a
+    /// quarter clockwise. Quads that are not four corners fall back to the image axes.
+    /// </summary>
+    private static (PointF U, PointF V) Frame(PointF[] a, PointF[] b)
+    {
+        static (PointF Dir, float Ratio) Axis(PointF[] q)
+        {
+            if (q.Length != 4) return (new PointF(1, 0), 1);
+            float s01 = (Dist(q[0], q[1]) + Dist(q[2], q[3])) / 2, s12 = (Dist(q[1], q[2]) + Dist(q[3], q[0])) / 2;
+            var (p, r) = s01 >= s12 ? (q[0], q[1]) : (q[1], q[2]);
+            float dx = r.X - p.X, dy = r.Y - p.Y, n = MathF.Sqrt(dx * dx + dy * dy);
+            if (n < 1e-3f) return (new PointF(1, 0), 1);
+            return (new PointF(dx / n, dy / n), Math.Max(s01, s12) / Math.Max(1e-3f, Math.Min(s01, s12)));
+        }
+        var (da, ra) = Axis(a);
+        var (db, rb) = Axis(b);
+        PointF u = ra >= rb ? da : db;
+        return (u, new PointF(-u.Y, u.X));
+    }
+
+    private static (float Lo, float Hi) Span(PointF[] q, PointF axis)
+    {
+        float lo = float.MaxValue, hi = float.MinValue;
+        foreach (var p in q)
+        {
+            float d = p.X * axis.X + p.Y * axis.Y;
+            lo = Math.Min(lo, d); hi = Math.Max(hi, d);
+        }
+        return (lo, hi);
+    }
+
+    /// <summary>Length two intervals share; negative is the gap between them.</summary>
+    private static float Shared((float Lo, float Hi) a, (float Lo, float Hi) b) => Math.Min(a.Hi, b.Hi) - Math.Max(a.Lo, b.Lo);
 
     /// <summary>One RapidOcrNet pass; lines come back moved by (dx, dy). Words are matched to their place in the line text.</summary>
     private static List<Line> Detect(RapidOcr engine, SKBitmap bmp, float dx, float dy, CancellationToken cancel, int side = 0, int padding = -1)
