@@ -263,13 +263,17 @@ internal static partial class OfficeConvert
         return slash < 0 ? "" : name[..(slash + 1)];
     }
 
-    // Elements that run code or open a live connection; removed whole.
+    private static readonly XNamespace XForms = "http://www.w3.org/2002/xforms";
+
+    // Elements that run code or open a live connection; removed whole. An XForms model loads its
+    // instance data from src= and sends the form to submission's action=, neither an href.
     private static readonly XName[] CodeElements =
     [
         OdfOffice + "scripts", OdfOffice + "event-listeners", OdfScript + "event-listener",
         OdfPresentation + "event-listener", OdfText + "script", OdfDraw + "applet",
         OdfText + "dde-connection-decls", OdfText + "section-source-dde", OdfTable + "dde-links",
         OdfMeta + "template", OdfMeta + "auto-reload",
+        XForms + "model", XForms + "instance", XForms + "submission",
     ];
 
     // Form attributes that name a data source, a query or where a form sends its data.
@@ -289,8 +293,8 @@ internal static partial class OfficeConvert
         foreach (var el in xml.Descendants().Where(e => CodeElements.Contains(e.Name)).ToList())
         {
             if (el.Document is null) continue; // already gone with an ancestor (a listener inside a removed list)
-            bool dde = el.Name.LocalName.Contains("dde", StringComparison.Ordinal);
-            if (dde) report.Links++;
+            bool connection = el.Name.LocalName.Contains("dde", StringComparison.Ordinal) || el.Name.Namespace == XForms;
+            if (connection) report.Links++;
             else if (el.Name == OdfMeta + "template" || el.Name == OdfMeta + "auto-reload")
             {
                 // Always removed. Word writes a bare "Normal.dotm" into every .odt it saves; that names no other
@@ -345,8 +349,9 @@ internal static partial class OfficeConvert
                     changed = true;
                     continue;
                 }
-                // xlink:href, and plain href (SVG 2 pictures) or any other namespace's href.
-                if (attr.Name.LocalName != "href") continue;
+                // xlink:href, and plain href (SVG 2 pictures) or any other namespace's href; src (an
+                // XForms instance outside a model, HTML inside an SVG) the same way.
+                if (attr.Name.LocalName is not ("href" or "src")) continue;
                 string href = attr.Value.Trim();
                 bool click = ClickLinks.Contains(el.Name);
                 if (click ? !RunsCode(href) && !LocalOrShare(href) : IsInsidePackage(href, partDir, names)) continue;

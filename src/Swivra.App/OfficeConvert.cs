@@ -473,6 +473,7 @@ internal static partial class OfficeConvert
                 }
                 report.Links += cut;
                 changed |= cut > 0;
+                changed |= CutXmlLinks(xml, PartDir(name), partNames, report);
                 foreach (var chunk in xml.Descendants().Where(e => e.Name.LocalName == "altChunk").ToList())
                 {
                     string id = (string?)chunk.Attributes().FirstOrDefault(a => a.Name.LocalName == "id" && a.Name.Namespace != XNamespace.None) ?? "";
@@ -503,6 +504,55 @@ internal static partial class OfficeConvert
     // either limit is refused before any part is inflated (a 1 MB file can declare gigabytes of zeros).
     private const int MaxEntries = 10_000;
     private const long MaxPackageBytes = 512L * 1024 * 1024;
+
+    private static readonly XNamespace Svg = "http://www.w3.org/2000/svg";
+
+    /// <summary>
+    /// The OpenDocument rule for links inside XML parts, applied to an OOXML part other than relationships
+    /// and content types: SVG pictures (href, xlink:href, url() in styles), VML (o:href, src) and whatever
+    /// else names an address in an attribute. The same copy can go to LibreOffice, whose SVG and VML
+    /// importers follow them. Every href or src that does not name a part of this package is pointed at
+    /// <see cref="Blocked"/>; inline raster pictures (data:image/...) and cid: names, which reach nothing,
+    /// stay. xml:base and xml-stylesheet instructions go; CSS that loads from an address is refused.
+    /// </summary>
+    private static bool CutXmlLinks(XDocument xml, string partDir, HashSet<string> names, Cleaning report)
+    {
+        bool changed = false;
+        foreach (var pi in xml.DescendantNodes().OfType<XProcessingInstruction>().Where(p => p.Target.Equals("xml-stylesheet", StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            pi.Remove();
+            changed = true;
+        }
+        bool svg = xml.Root?.Name.Namespace == Svg;
+        foreach (var el in xml.Descendants())
+        {
+            if (svg && el.Name.LocalName == "style" && FetchesCss(el.Value)) throw new UnsafeDocumentException("style sheet that loads from an address");
+            foreach (var attr in el.Attributes().ToList())
+            {
+                if (attr.IsNamespaceDeclaration) continue;
+                if (attr.Name == XNamespace.Xml + "base")
+                {
+                    attr.Remove();
+                    changed = true;
+                    continue;
+                }
+                // In an SVG any presentation attribute can take url(); elsewhere only a style (VML's) holds CSS.
+                if ((svg || attr.Name.LocalName == "style") && FetchesCss(attr.Value))
+                    throw new UnsafeDocumentException($"attribute {attr.Name.LocalName} that loads from an address");
+                if (attr.Name.LocalName is not ("href" or "src")) continue;
+                string href = attr.Value.Trim();
+                if (IsInsidePackage(href, partDir, names) || InlinePicture.IsMatch(href) || href.StartsWith("cid:", StringComparison.OrdinalIgnoreCase)) continue;
+                attr.Value = Blocked;
+                report.Links++;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    // A raster picture inline in the address itself; an inline SVG could link on, so it is not one.
+    private static readonly System.Text.RegularExpressions.Regex InlinePicture = new(
+        @"^data:image/(png|jpeg|jpg|gif|bmp|webp|tiff|x-icon)[;,]", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     /// <summary>
     /// Refuses a package Word might read differently from this code: two entries with the same part
