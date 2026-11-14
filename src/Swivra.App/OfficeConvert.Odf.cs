@@ -250,7 +250,8 @@ internal static partial class OfficeConvert
     /// The cleaning matches ODF elements and attributes by their exact namespace. LibreOffice's importer
     /// is laxer: it takes any "urn:oasis:names:tc:…:xmlns:office:1.x" as the office namespace, any
     /// "http://www.w3.org/…/xforms" as XForms and OpenOffice's old manifest namespace as the manifest
-    /// one, so office:scripts in such a namespace would pass here and run there. Real documents spell
+    /// one (and may read OpenOffice 1.x's other namespaces as ODF's), so office:scripts in such a
+    /// namespace would pass here and run there. Real documents spell
     /// their elements and attributes with the 1.0 names: a part that uses another spelling is refused.
     /// </summary>
     private static void CheckOdfNamespaces(XDocument xml, string name)
@@ -269,7 +270,11 @@ internal static partial class OfficeConvert
             var m = OasisUrn.Match(uri);
             bool odd = (m.Success && uri != $"urn:oasis:names:tc:opendocument:xmlns:{m.Groups[1].Value}:1.0")
                 || (uri.StartsWith("http://www.w3.org/", StringComparison.OrdinalIgnoreCase) && uri.EndsWith("/xforms", StringComparison.OrdinalIgnoreCase) && ns != XForms)
-                || uri.Equals("http://openoffice.org/2001/manifest", StringComparison.OrdinalIgnoreCase);
+                || uri.Equals("http://openoffice.org/2001/manifest", StringComparison.OrdinalIgnoreCase)
+                // OpenOffice 1.x's own format (office, text, script, form... under openoffice.org/2000 and
+                // /2001), which LibreOffice may still map onto ODF's names; ODF 1.0 and later never use it.
+                || uri.StartsWith("http://openoffice.org/2000/", StringComparison.OrdinalIgnoreCase)
+                || uri.StartsWith("http://openoffice.org/2001/", StringComparison.OrdinalIgnoreCase);
             if (odd) throw new UnsafeDocumentException($"part {name} uses the namespace {uri}");
         }
     }
