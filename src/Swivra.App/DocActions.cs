@@ -90,18 +90,23 @@ internal static class DocActions
 
         string text = ext == ".docx" ? DocxText(path) : ReadText(path, out _);
         string output = OutPath(path, "", "pdf");
+        bool made = false; // on failure only a file this run created is removed
         try
         {
-            WritePdf(text, output);
+            using var fs = CreateOutput(ref output);
+            made = true;
+            WritePdf(text, fs, Path.GetFileNameWithoutExtension(output));
         }
         catch
         {
-            TryDelete(output);
+            if (made) TryDelete(output);
             throw;
         }
-        return Done(output, ext == ".docx"
-            ? Lang.T("yalnız metin, düzen ve görseller yok", "text only, no layout or images")
-            : Lang.T("düz metin", "plain text"));
+        // A .docx lands here when no office program is installed, or when the one installed failed:
+        // the user should not go looking for a program they have, as with PDF to Word.
+        return Done(output, ext != ".docx" ? Lang.T("düz metin", "plain text")
+            : OfficeConvert.Available ? Lang.T("yalnız metin · Word/LibreOffice dönüştüremedi", "text only · Word/LibreOffice could not convert it")
+            : Lang.T("yalnız metin, düzen ve görseller yok", "text only, no layout or images"));
     }
 
     private static ActionResult ToText(string path)
@@ -109,8 +114,20 @@ internal static class DocActions
         string ext = Ext(path);
         if (ext == ".docx")
         {
+            string text = DocxText(path);
             string output = OutPath(path, "", "txt");
-            File.WriteAllText(output, DocxText(path), new UTF8Encoding(false));
+            bool made = false;
+            try
+            {
+                using var fs = CreateOutput(ref output);
+                made = true;
+                fs.Write(new UTF8Encoding(false).GetBytes(text));
+            }
+            catch
+            {
+                if (made) TryDelete(output);
+                throw;
+            }
             return Done(output, Lang.T("yalnız metin", "text only"));
         }
         return ViaOffice(path, "txt") ?? throw NeedOffice(ext, "txt");
@@ -123,13 +140,16 @@ internal static class DocActions
         {
             string text = ReadText(path, out _);
             string output = OutPath(path, "", "docx");
+            bool made = false;
             try
             {
-                WriteDocx(text, output);
+                using var fs = CreateOutput(ref output);
+                made = true;
+                WriteDocx(text, fs);
             }
             catch
             {
-                TryDelete(output);
+                if (made) TryDelete(output);
                 throw;
             }
             return Done(output, Lang.T("düz metin", "plain text"));
@@ -137,13 +157,30 @@ internal static class DocActions
         return ViaOffice(path, "docx") ?? throw NeedOffice(ext, "docx");
     }
 
+    /// <summary>
+    /// Creates the output file, never over an existing one: its name was picked a moment ago and another
+    /// run (two wheels can work in the same folder) may have taken it since; then the next free name is used.
+    /// </summary>
+    private static FileStream CreateOutput(ref string output)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try { return new FileStream(output, FileMode.CreateNew, FileAccess.ReadWrite); }
+            catch (IOException) when (attempt < 5 && File.Exists(output))
+            {
+                output = FileActions.UniquePath(Path.GetDirectoryName(output)!, Path.GetFileNameWithoutExtension(output), Path.GetExtension(output).TrimStart('.'));
+            }
+        }
+    }
+
     /// <summary>Word first, then LibreOffice (OfficeConvert); null when neither is there or both failed.</summary>
     private static ActionResult? ViaOffice(string path, string ext)
     {
         string target = OutPath(path, "", ext);
         var r = OfficeConvert.Convert(path, target);
-        // What the cleaning changed matters more to the user than which program converted.
-        return r is null ? null : Done(r.Path, r.Note ?? r.Engine) with { Cleaned = r.Note is not null };
+        // What the cleaning changed matters more to the user than which program converted. A binary .doc
+        // that went to Word as it is carries a note too, but nothing was cleaned.
+        return r is null ? null : Done(r.Path, r.Note ?? r.Engine) with { Cleaned = r.Note is not null && !r.Uncleaned };
     }
 
     // Installed but failed is not the same as missing: the user should not go looking for a program they have.
@@ -177,7 +214,7 @@ internal static class DocActions
 
     private static IEnumerable<string> Lines(string text) => text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
 
-    private static void WriteDocx(string text, string output)
+    private static void WriteDocx(string text, Stream output)
     {
         using var doc = WordprocessingDocument.Create(output, WordprocessingDocumentType.Document);
         var main = doc.AddMainDocumentPart();
@@ -261,7 +298,7 @@ internal static class DocActions
     }
 
     /// <summary>Plain text on A4 pages with word wrap and pagination. Segoe UI / Arial from the system covers Turkish.</summary>
-    private static void WritePdf(string text, string output)
+    private static void WritePdf(string text, Stream output, string title)
     {
         EnsureFontResolver();
         const double margin = 56, size = 11, lineH = size * 1.4;
@@ -314,8 +351,8 @@ internal static class DocActions
             Emit(cur.ToString().TrimEnd());
         }
         gfx?.Dispose();
-        doc.Info.Title = Path.GetFileNameWithoutExtension(output);
-        doc.Save(output);
+        doc.Info.Title = title;
+        doc.Save(output, closeStream: false);
     }
 
     /// <summary>Words with their trailing spaces, so measuring keeps the spacing.</summary>
@@ -348,8 +385,13 @@ internal static class DocActions
         {
             if (ext == ".docx")
             {
-                SafeFile.CopyWritable(path, output);
-                made = true;
+                // A copy made here, not File.Copy: a new file (never over one another run just made) that is not read-only.
+                using (var dst = CreateOutput(ref output))
+                {
+                    made = true;
+                    using var src = SafeFile.OpenRead(path);
+                    src.CopyTo(dst);
+                }
                 count = MaskDocx(output, out skipped);
             }
             else
@@ -358,7 +400,7 @@ internal static class DocActions
                 string masked = MaskText(text, out count);
                 if (count > 0)
                 {
-                    using var fs = new FileStream(output, FileMode.CreateNew, FileAccess.Write);
+                    using var fs = CreateOutput(ref output);
                     made = true;
                     fs.Write(enc.GetPreamble());
                     fs.Write(enc.GetBytes(masked));
@@ -374,7 +416,7 @@ internal static class DocActions
         string skippedNote = skipped == 0 ? "" : Lang.T($" · {skipped} gömülü nesne kontrol edilemedi", skipped == 1 ? " · 1 embedded object not checked" : $" · {skipped} embedded objects not checked");
         if (count == 0)
         {
-            TryDelete(output);
+            if (made) TryDelete(output);
             return new ActionResult(false, Lang.T("Gizle", "Hide"), Lang.T("Kapatılacak hassas veri bulunamadı", "No sensitive data found to cover") + skippedNote);
         }
         return Done(output, Lang.T($"{count} alan kapatıldı", count == 1 ? "1 item covered" : $"{count} items covered") + skippedNote);
