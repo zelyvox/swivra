@@ -201,14 +201,19 @@ internal sealed class SwivraContext : ApplicationContext
     /// <summary>Exit from the tray. A file being processed would be cut halfway, so that is asked first.</summary>
     private void Exit()
     {
-        if (_runsInFlight > 0)
+        // A download to a phone counts too, in the panel or handed to the tray ("Close when done").
+        bool sending = _draining is not null || _share is { } s && s.Current.Count > 0;
+        if (_runsInFlight > 0 || sending)
         {
             var answer = MessageBox.Show(
-                Lang.T("Bir dosya işlemi sürüyor; çıkarsan yarıda kesilir. Yine de çıkılsın mı?",
-                       "A file is still being processed; exiting cuts it off halfway. Exit anyway?"),
+                _runsInFlight > 0
+                    ? Lang.T("Bir dosya işlemi sürüyor; çıkarsan yarıda kesilir. Yine de çıkılsın mı?",
+                             "A file is still being processed; exiting cuts it off halfway. Exit anyway?")
+                    : Lang.T("Telefona gönderim sürüyor; çıkarsan yarıda kesilir. Yine de çıkılsın mı?",
+                             "A file is still being sent to a phone; exiting cuts it off halfway. Exit anyway?"),
                 "Swivra", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
             if (answer != DialogResult.Yes) return;
-            Log.Write($"exit while {_runsInFlight} run(s) in flight");
+            Log.Write($"exit while {_runsInFlight} run(s) in flight, sending to phone={sending}");
         }
         ExitThread();
     }
@@ -305,7 +310,8 @@ internal sealed class SwivraContext : ApplicationContext
         if (_panel)
         {
             // The panel is clicked like any window; a click outside it means "never mind".
-            if (_overlay.Bounds.Contains(downAt)) return;
+            // The release of the drop that opened this panel began in Explorer: it is no click at all.
+            if (_presses == _panelPress || _overlay.Bounds.Contains(downAt)) return;
             if (IsRunShown()) HideRunningWheel(); // cropping or locking already runs: let it finish unseen, not "never mind"
             else CancelWheel();
             return;
@@ -319,6 +325,7 @@ internal sealed class SwivraContext : ApplicationContext
     /// </summary>
     private void OnLeftDown(Point pt)
     {
+        _presses++;
         if (IsRunShown() && !_panel && !_overlay.Bounds.Contains(pt)) HideRunningWheel();
     }
 
@@ -440,6 +447,10 @@ internal sealed class SwivraContext : ApplicationContext
 
     private int _awaitingPage;
 
+    // Left-button presses seen so far, and the count when the panel opened: only a press made after
+    // that can be a click outside the panel.
+    private int _presses, _panelPress;
+
     // The wheel whose run is under way (0: none), so a press outside or Esc can put it away meanwhile.
     private int _runSession;
     // Runs not finished yet, from any wheel: exiting now would cut them, so Exit asks first.
@@ -473,6 +484,7 @@ internal sealed class SwivraContext : ApplicationContext
                 break;
             case "panel-size":
                 _panel = true;
+                _panelPress = _presses;
                 var origin = _overlay.ShowPanel(msg.GetProperty("w").GetInt32(), msg.GetProperty("h").GetInt32());
                 bool focused = msg.TryGetProperty("focus", out var fc) && fc.GetBoolean() && _overlay.TakeFocus();
                 _overlay.Post(new { type = "panel-open", ox = origin.X, oy = origin.Y, focused });
@@ -796,6 +808,13 @@ internal sealed class SwivraContext : ApplicationContext
     /// <summary>Shows the wheel at screen center with a fake file, for checking the look.</summary>
     private void RunDemo(string? shotPath)
     {
+        // Without its page the window would show as an empty disc that nothing takes away again.
+        if (!_overlay.Ready)
+        {
+            Log.Write("demo ignored: wheel page not ready");
+            if (_overlay.Broken) TellRestart();
+            return;
+        }
         Rectangle area = Screen.PrimaryScreen!.WorkingArea;
         var center = new Point(area.Left + area.Width / 2, area.Top + area.Height / 2);
         Log.Write($"demo at {center} shot={shotPath ?? "-"}");

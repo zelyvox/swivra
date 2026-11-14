@@ -115,8 +115,9 @@ internal sealed class OverlayForm : Form
             try { core.Reload(); }
             catch (Exception ex)
             {
+                // Often the browser is dying too and its own event follows: a new control, not a restart notice yet.
                 Log.Write($"webview reload failed: {ex.Message}");
-                GiveUp();
+                _ = RecreateAsync();
             }
         };
         core.NavigationCompleted += (_, args) =>

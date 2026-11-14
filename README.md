@@ -33,7 +33,7 @@ There are three wheels. The key you press decides which one opens.
 
 ## Highlights
 
-- **Chains:** Rest on a slice for about half a second and that step joins a chain. When you drop the file, every step in the chain runs in order. For example: rotate, then remove location data, then convert to JPG.
+- **Chains:** Rest on a slice for about half a second and that step joins a chain. When you drop the file, every step in the chain runs in order. For example: rotate, then remove location data, then convert to JPG. WhatsApp, Mail and To phone send the file as it is, so they run alone, not at the end of a chain.
 - **Sensitive-data radar:** While you drag, Swivra looks inside the file. If it finds location data, a camera model, a Turkish ID number, an IBAN, an e-mail address or a phone number, the edge of the wheel turns orange. For PDFs, the first 20 pages are scanned.
 - **Real redaction:** In PDFs, hidden items are covered with black boxes and the pages are turned into images, so the covered text cannot be copied back out. In text and Word files the items are replaced with block characters.
 - **Your original is never changed:** The result is always saved next to the original under a new name, for example `Holiday-clean.jpg`.
@@ -61,6 +61,7 @@ The app is not code-signed, so Windows SmartScreen may warn you the first time. 
 
 - To cancel, drop the file in the center of the wheel.
 - In the crop and password panels, **Enter** confirms and **Esc** cancels.
+- A long job (a big Word file can take minutes) does not hold the screen: press **Esc** or click anywhere outside the wheel and it goes away while the work continues. A tray notice tells you when it is done.
 - To change the language, right-click the tray icon and use **Dil / Language**. On first start, Swivra follows your Windows display language.
 - Swivra only works while it is running. On first start it asks whether to start with Windows; you can change this later with **Start with Windows** in the tray menu.
 - The tray menu also has **Show the wheel (demo)**, **Open logs** and **Exit**.
