@@ -176,7 +176,7 @@ internal static class PdfRedact
     {
         using var ms = new MemoryStream(bytes);
         SKBitmap bmp;
-        lock (Pdfium.Gate) bmp = PDFtoImage.Conversion.ToImage(ms, index, options: PageOnly);
+        using (Pdfium.Enter()) bmp = PDFtoImage.Conversion.ToImage(ms, index, options: PageOnly);
         double ew = pb.W * Dpi / 72, eh = pb.H * Dpi / 72;
         if (Math.Abs(bmp.Width - ew) > Math.Max(2, ew * 0.005) || Math.Abs(bmp.Height - eh) > Math.Max(2, eh * 0.005))
         {

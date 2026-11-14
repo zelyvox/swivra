@@ -209,6 +209,13 @@ internal static class PdfActions
                 Lang.T($"{ex.Page}. sayfadaki yazının yeri kesin bulunamadı; kutular kaçabileceği için gizlenmiş dosya verilmedi",
                        $"Where the text on page {ex.Page} is drawn could not be worked out; no redacted file was made because the boxes could miss"));
         }
+        catch (Pdfium.BusyException)
+        {
+            Cleanup(created);
+            Log.Write($"pdf not processed {path}: an earlier PDFium call never returned");
+            return new ActionResult(false, Lang.T("Olmadı", "Failed"),
+                Lang.T("PDF motoru önceki bir dosyada takılı kaldı · Swivra'yı kapatıp yeniden aç", "The PDF engine is stuck on an earlier file · exit Swivra and open it again"));
+        }
         catch (PdfTree.TreeException ex)
         {
             Cleanup(created);
@@ -518,7 +525,7 @@ internal static class PdfActions
         try { using var check = UglyToad.PdfPig.PdfDocument.Open(bytes); PdfTree.Check(check); }
         catch (Exception ex) when (ex is not PdfTree.TreeException) { /* PdfPig cannot open it: PDFium decides, as before */ }
         int count;
-        using (var ms = new MemoryStream(bytes)) lock (Pdfium.Gate) count = PDFtoImage.Conversion.GetPageCount(ms);
+        using (var ms = new MemoryStream(bytes)) using (Pdfium.Enter()) count = PDFtoImage.Conversion.GetPageCount(ms);
         if (count < 1) throw new PdfFailure(NoPages());
 
         string folder = "";
@@ -541,7 +548,7 @@ internal static class PdfActions
         {
             using var ms = new MemoryStream(bytes);
             SKBitmap page;
-            lock (Pdfium.Gate) page = PDFtoImage.Conversion.ToImage(ms, i, options: options);
+            using (Pdfium.Enter()) page = PDFtoImage.Conversion.ToImage(ms, i, options: options);
             using SKBitmap bmp = page;
             using var image = SKImage.FromBitmap(bmp);
             using var data = ext == "jpg" ? image.Encode(SKEncodedImageFormat.Jpeg, JpgQuality) : image.Encode(SKEncodedImageFormat.Png, 100);

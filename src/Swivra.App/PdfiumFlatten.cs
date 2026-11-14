@@ -12,6 +12,25 @@ internal static class Pdfium
     /// <summary>Held around every PDFium call: PDFtoImage conversions and the raw calls below.</summary>
     public static readonly object Gate = new();
 
+    // No single PDFium call takes this long on a page that can be drawn at all. A call that never returns
+    // (a drawing the checks did not catch) keeps the gate for good; the next job must say so, not wait unseen.
+    private static readonly TimeSpan Patience = TimeSpan.FromMinutes(3);
+
+    /// <summary>The gate could not be had: an earlier PDFium call is stuck and holds it.</summary>
+    public sealed class BusyException() : Exception("PDFium is held by a call that does not return");
+
+    /// <summary>Takes the gate for a using block; throws <see cref="BusyException"/> instead of waiting without end.</summary>
+    public static Held Enter()
+    {
+        if (!Monitor.TryEnter(Gate, Patience)) throw new BusyException();
+        return default;
+    }
+
+    public readonly struct Held : IDisposable
+    {
+        public void Dispose() => Monitor.Exit(Gate);
+    }
+
     /// <summary>
     /// A copy of the PDF in which every note and form field is burned into its page as it is displayed
     /// (appearance streams only, nothing regenerated) and the security is removed, so an owner-locked file is
@@ -20,7 +39,7 @@ internal static class Pdfium
     /// </summary>
     public static byte[]? Flatten(byte[] pdf)
     {
-        lock (Gate)
+        using (Enter())
         {
             try
             {
@@ -186,7 +205,7 @@ internal static class Pdfium
     /// </summary>
     public static bool ReadText(byte[] pdf, Action<int, TextLayer?> each)
     {
-        lock (Gate)
+        using (Enter())
         {
             try
             {
