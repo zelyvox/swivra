@@ -761,12 +761,42 @@ internal static partial class OfficeConvert
     private static void KeepResult(XElement field) =>
         field.Attributes().Where(a => a.Name.LocalName == "dirty").Remove();
 
-    private sealed class FieldCode
+    private sealed class FieldCode(XElement begin)
     {
-        public XElement? Begin; // the fldChar that opens the field
+        public readonly XElement Begin = begin; // the fldChar that opens the field
+        public readonly HashSet<XElement> Above = begin.Ancestors().ToHashSet(); // where its code is read from
         public readonly List<XElement> Pieces = new();
         public readonly System.Text.StringBuilder Head = new(); // instruction text before the first nested field
+        public int HeadPieces; // how many pieces that text is
         public bool Nested, Collecting = true;
+        public int FirstWrapped = -1; // the first piece Word may skip (see Plain), -1 when none
+        public bool Reshaped; // a begin, separate or end inside the code sits where Word may skip it
+    }
+
+    // Elements Word reads straight through when it joins a field's code: runs, tracked insertions,
+    // links, content controls, paragraphs and tables. Anything else (markup-compatibility wrappers,
+    // ignorable or unknown elements, tracked deletions, properties) Word may skip, so a piece below
+    // one may not be part of the code Word reads.
+    private static readonly HashSet<string> ReadThrough = new(StringComparer.Ordinal)
+    {
+        "r", "ins", "moveTo", "hyperlink", "smartTag", "customXml", "sdt", "sdtContent", "fldSimple", "bdo", "dir", "p", "tbl", "tr", "tc",
+    };
+
+    /// <summary>
+    /// True when Word certainly reads <paramref name="e"/> (a w:instrText or w:fldChar) as part of the
+    /// field opened above it: it is in the WordprocessingML namespace and nothing between it and that
+    /// field's begin (or, for a field's own begin, its paragraph) is a wrapper Word may skip. A
+    /// w:delInstrText is deleted text, which Word does not read as code.
+    /// </summary>
+    private static bool Plain(XElement e, HashSet<XElement>? above)
+    {
+        if (e.Name.Namespace != W || e.Name.LocalName == "delInstrText") return false;
+        for (var a = e.Parent; a is not null; a = a.Parent)
+        {
+            if (above is not null ? above.Contains(a) : a.Name == W + "p") return true;
+            if (a.Name.Namespace != W || !ReadThrough.Contains(a.Name.LocalName)) return false;
+        }
+        return false; // no paragraph above: not where Word reads a field
     }
 
     /// <summary>
@@ -774,6 +804,14 @@ internal static partial class OfficeConvert
     /// next), so the pieces of each field (fldChar begin … separate/end, nesting followed) are joined
     /// before the check. A field whose name could come from a nested field cannot be read here and only
     /// prints. A changed instruction goes into its first piece, the others are emptied.
+    ///
+    /// Word does not read everything that is in the XML: it takes one branch of an mc:AlternateContent,
+    /// skips mc:Ignorable elements and does not read deleted code, while this join reads all of it. So
+    /// "INCLUDE" + [ignorable "X"] + "TEXT" is harmless here and INCLUDETEXT in Word. Every field whose
+    /// code has a piece, a begin, a separate or an end where Word may skip it is therefore made inert,
+    /// unless the plain pieces in front already spell a name that never loads anything. A begin, separate
+    /// or end Word may skip does not open or close anything here: the field goes on collecting, so
+    /// everything Word might read as its code is in its pieces and emptied with them.
     /// </summary>
     private static int NeutralizeFields(XDocument xml)
     {
@@ -787,26 +825,31 @@ internal static partial class OfficeConvert
                 if (open.Count > 0 && open.Peek().Collecting)
                 {
                     var f = open.Peek();
+                    if (f.FirstWrapped < 0 && !Plain(e, f.Above)) f.FirstWrapped = f.Pieces.Count;
                     f.Pieces.Add(e);
-                    if (!f.Nested) f.Head.Append(e.Value);
+                    if (!f.Nested) { f.Head.Append(e.Value); f.HeadPieces++; }
                 }
                 else e.Value = Neutralize(e.Value, ref cut); // outside any field: checked on its own
                 continue;
             }
             if (name != "fldChar") continue;
+            var top = open.Count > 0 ? open.Peek() : null;
+            bool plain = Plain(e, top?.Above);
+            // Word may see a different nesting: every field whose code is still being read is affected.
+            if (!plain) foreach (var f in open) if (f.Collecting) f.Reshaped = true;
             switch ((string?)e.Attributes().FirstOrDefault(a => a.Name.LocalName == "fldCharType"))
             {
                 case "begin":
-                    if (open.Count > 0 && open.Peek().Collecting) open.Peek().Nested = true;
-                    open.Push(new FieldCode { Begin = e });
+                    if (top is { Collecting: true }) top.Nested = true;
+                    open.Push(new FieldCode(e) { Reshaped = !plain });
                     break;
-                case "separate" when open.Count > 0 && open.Peek().Collecting:
-                    cut += Finish(open.Peek());
-                    open.Peek().Collecting = false;
+                case "separate" when plain && top is { Collecting: true }:
+                    cut += Finish(top);
+                    top.Collecting = false;
                     break;
-                case "end" when open.Count > 0:
-                    var done = open.Pop();
-                    if (done.Collecting) cut += Finish(done);
+                case "end" when plain && top is not null:
+                    open.Pop();
+                    if (top.Collecting) cut += Finish(top);
                     break;
             }
         }
@@ -818,17 +861,45 @@ internal static partial class OfficeConvert
         return cut;
     }
 
+    /// <summary>
+    /// For a field Word may read differently: the plain pieces before the first one Word may skip (and
+    /// before any nested field) already hold a name that never loads anything, followed by its delimiter,
+    /// so every reading Word could make starts with that name. Fetching names glued or spelled with
+    /// look-alike letters in any reading (see <see cref="LooseFetching"/>, <see cref="Fold"/>) still make it inert.
+    /// </summary>
+    private static bool NameFixed(FieldCode f)
+    {
+        if (f.Reshaped || f.FirstWrapped <= 0) return false;
+        int n = f.Nested ? Math.Min(f.FirstWrapped, f.HeadPieces) : f.FirstWrapped;
+        string lead = string.Concat(f.Pieces.Take(n).Select(p => p.Value));
+        var m = SafeField.Match(lead);
+        if (!m.Success || m.Length >= lead.Length) return false; // the name must end inside the plain pieces
+        string all = string.Concat(f.Pieces.Select(p => p.Value));
+        string plainOnly = string.Concat(f.Pieces.Where((p, i) => i < f.FirstWrapped || Plain(p, f.Above)).Select(p => p.Value));
+        return !LooseFetching.IsMatch(Fold(all)) && !LooseFetching.IsMatch(Fold(plainOnly));
+    }
+
     private static int Finish(FieldCode f)
     {
         if (f.Pieces.Count == 0) return 0;
         int cut = 0;
-        string result = Neutralize(string.Concat(f.Pieces.Select(p => p.Value)), ref cut);
-        if (cut == 0 && f.Nested && !NamedField.IsMatch(f.Head.ToString())) { result = Inert; cut = 1; }
+        string result;
+        if (f.Reshaped || f.FirstWrapped >= 0)
+        {
+            if (NameFixed(f)) return 0;
+            result = Inert;
+            cut = 1;
+        }
+        else
+        {
+            result = Neutralize(string.Concat(f.Pieces.Select(p => p.Value)), ref cut);
+            if (cut == 0 && f.Nested && !NamedField.IsMatch(f.Head.ToString())) { result = Inert; cut = 1; }
+        }
         if (cut == 0) return 0;
         f.Pieces[0].Value = result;
         f.Pieces[0].SetAttributeValue(XNamespace.Xml + "space", "preserve");
         foreach (var p in f.Pieces.Skip(1)) p.Value = "";
-        if (f.Begin is not null) KeepResult(f.Begin);
+        KeepResult(f.Begin);
         return cut;
     }
 
