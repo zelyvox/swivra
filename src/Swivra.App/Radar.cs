@@ -246,13 +246,14 @@ internal static partial class Radar
     {
         try
         {
-            byte[] bytes = SafeFile.ReadAll(path);
-            using var doc = UglyToad.PdfPig.PdfDocument.Open(bytes);
+            // Read from the file as a stream, as before OCR: a drag must not load a large PDF whole for the text alone.
+            using var stream = SafeFile.OpenRead(path);
+            using var doc = UglyToad.PdfPig.PdfDocument.Open(stream);
             PdfTree.Check(doc);   // before any page content is read: a looping tree would end the app, not throw
             var pages = doc.GetPages().Take(MaxPdfPages).ToList();
             // Symbol-font characters folded back, as Hide searches them: digits in such a font are found too.
             ScanText(PdfRedact.Fold(string.Join("\n", pages.Select(p => UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor.ContentOrderTextExtractor.GetText(p)))), found);
-            ScanPdfImageText(path, bytes, doc, pages, found);
+            ScanPdfImageText(path, doc, pages, found);
         }
         catch (PdfTree.TreeException ex)
         {
@@ -274,15 +275,23 @@ internal static partial class Radar
     private const int PdfImageTextMaxPixels = 2_000_000;
     // The radar never waits behind another PDF job for the engine.
     private static readonly TimeSpan PdfEngineWait = TimeSpan.FromMilliseconds(200);
+    // PDFium draws from the bytes in memory, so they are read only once a page for OCR turns up, and only for a file up
+    // to this size; above it the radar reads the text alone (Hide still reads every image). The bytes come on top of
+    // the 330 MB or so that drawing and reading a page takes: measured, a 58 MB PDF peaked at 521 MB while dragged.
+    private const long PdfImageTextMaxBytes = 64L * 1024 * 1024;
+    // A page drawn for the radar has at most this many pixels, whatever its size in points (a 7200 pt page at 150 DPI
+    // would be 225 MP: measured, a 1265 MB peak, 384 MB with this cap): its areas are read at most at
+    // PdfImageTextMaxPixels anyway.
+    private const long PdfImageTextMaxRender = 12_000_000;
 
     /// <summary>OCR over the image areas (or the whole page, without letters) of the first pages that have some.</summary>
-    private static void ScanPdfImageText(string path, byte[] bytes, UglyToad.PdfPig.PdfDocument doc, List<UglyToad.PdfPig.Content.Page> pages, List<string> found)
+    private static void ScanPdfImageText(string path, UglyToad.PdfPig.PdfDocument doc, List<UglyToad.PdfPig.Content.Page> pages, List<string> found)
     {
         if (found.Count >= 4) return;   // every kind already found: OCR cannot add one
         var clock = System.Diagnostics.Stopwatch.StartNew();
         int done = 0;
         var kinds = new List<HitKind>();
-        var options = new PDFtoImage.RenderOptions(Dpi: PdfImageTextDpi, WithAnnotations: false, WithFormFill: false);
+        byte[]? bytes = null;
         try
         {
             foreach (var page in pages)
@@ -290,7 +299,16 @@ internal static partial class Radar
                 if (done >= PdfImageTextPages || clock.Elapsed >= PdfImageTextBudget || kinds.Distinct().Count() == 4) break;
                 var areas = PdfRedact.OcrAreas(doc, page);
                 if (areas.Count == 0) continue;
+                if (bytes is null)
+                {
+                    long size = new FileInfo(path).Length;
+                    if (size > PdfImageTextMaxBytes) { Log.Write($"radar pdf image text skipped {path}: {size / (1024 * 1024)} MB file"); break; }
+                    bytes = SafeFile.ReadAll(path);
+                }
                 done++;
+                double pts = Math.Max(1, page.Width) * Math.Max(1, page.Height);
+                int dpi = (int)Math.Max(1, Math.Min(PdfImageTextDpi, 72 * Math.Sqrt(PdfImageTextMaxRender / pts)));
+                var options = new PDFtoImage.RenderOptions(Dpi: dpi, WithAnnotations: false, WithFormFill: false);
                 SkiaSharp.SKBitmap bmp;
                 using (var ms = new MemoryStream(bytes))
                 {
