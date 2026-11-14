@@ -211,6 +211,12 @@ internal static partial class Radar
         {
             ScanText(string.Join("\n", PdfActions.ExtractPages(path, MaxPdfPages)), found);
         }
+        catch (PdfTree.TreeException ex)
+        {
+            // Not "nothing found": the text was never read, and such a file is built to break readers.
+            Log.Write($"radar pdf refused {path}: {ex.Message}");
+            found.Add(Lang.T("PDF okunamadı, gözle kontrol et", "PDF could not be read, check it by eye"));
+        }
         catch (Exception ex)
         {
             Log.Write($"radar pdf skipped {path}: {ex.Message}"); // password or corrupt: no findings
