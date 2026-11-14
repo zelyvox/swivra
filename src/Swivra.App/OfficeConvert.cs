@@ -562,8 +562,7 @@ internal static partial class OfficeConvert
             }
             if (!changed) continue;
             xml.DocumentType?.Remove();
-            using var wr = entry.Open();
-            wr.SetLength(0);
+            using var wr = Recreate(entry).Open();
             xml.Save(wr, SaveOptions.DisableFormatting);
         }
         foreach (var part in flatten.Keys) zip.GetEntry(part)?.Delete();
@@ -984,9 +983,26 @@ internal static partial class OfficeConvert
 
     private static void Overwrite(ZipArchiveEntry entry, ReadOnlySpan<byte> data)
     {
-        using var w = entry.Open();
-        w.SetLength(0);
+        using var w = Recreate(entry).Open();
         w.Write(data);
+    }
+
+    /// <summary>
+    /// A new, empty entry in place of <paramref name="entry"/>, to write its new contents into. Opening the
+    /// old entry for writing in an archive opened for update would first inflate its old contents into
+    /// memory (a nested package would be held twice). The new entry goes to the end of the archive:
+    /// nothing rewritten here is an ODF mimetype (which must stay first, stored), and OOXML does not
+    /// depend on the order of its parts.
+    /// </summary>
+    private static ZipArchiveEntry Recreate(ZipArchiveEntry entry)
+    {
+        var zip = entry.Archive;
+        string name = entry.FullName;
+        var time = entry.LastWriteTime;
+        entry.Delete();
+        var fresh = zip.CreateEntry(name, CompressionLevel.Optimal);
+        fresh.LastWriteTime = time;
+        return fresh;
     }
 
     /// <summary>
