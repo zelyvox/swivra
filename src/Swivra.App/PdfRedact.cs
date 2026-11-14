@@ -314,7 +314,7 @@ internal static class PdfRedact
             if (!draws) continue;
             visible = true;
             if (!a.HasNormalAppearance) noLook = true;
-            if (texts.Any(t => Radar.FindAll(t).Count > 0)) boxes.Add(Pad(map.Map(a.Rectangle), map.Width, map.Height));
+            if (texts.Any(t => Radar.FindAll(t).Count > 0)) AddPadded(boxes, map.Map(a.Rectangle), map.Width, map.Height);
         }
         return new NoteScan(count, visible, noLook);
     }
@@ -423,11 +423,11 @@ internal static class PdfRedact
                 if (run is XRect p && Overlaps(p, cur)) run = Union(p, cur);
                 else
                 {
-                    if (run is XRect done) boxes.Add(Pad(done, map.Width, map.Height));
+                    if (run is XRect done) AddPadded(boxes, done, map.Width, map.Height);
                     run = cur;
                 }
             }
-            if (run is XRect last) boxes.Add(Pad(last, map.Width, map.Height));
+            if (run is XRect last) AddPadded(boxes, last, map.Width, map.Height);
         }
         return (boxes, hits.Count, found);
     }
@@ -694,11 +694,15 @@ internal static class PdfRedact
         }
     }
 
-    private static XRect Pad(XRect r, double maxW, double maxH)
+    /// <summary>
+    /// Adds the box, padded and clipped to the drawn page. A match wholly outside the page is not drawn, so there is
+    /// nothing to paint: it still counts as an item, only its box is left out (clipping it would give a negative size).
+    /// </summary>
+    private static void AddPadded(List<XRect> boxes, XRect r, double maxW, double maxH)
     {
         double x0 = Math.Max(0, r.X - PadPoints), y0 = Math.Max(0, r.Y - PadPoints);
         double x1 = Math.Min(maxW, r.X + r.Width + PadPoints), y1 = Math.Min(maxH, r.Y + r.Height + PadPoints);
-        return new XRect(x0, y0, x1 - x0, y1 - y0);
+        if (x1 > x0 && y1 > y0) boxes.Add(new XRect(x0, y0, x1 - x0, y1 - y0));
     }
 }
 
