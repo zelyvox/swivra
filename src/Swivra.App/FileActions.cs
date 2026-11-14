@@ -38,6 +38,9 @@ internal sealed record StepOptions(Rectangle? Crop = null, string? Password = nu
     public static readonly StepOptions None = new();
 }
 
+/// <summary>An error whose message is already worded for the user (both languages) and is shown as the result detail.</summary>
+internal sealed class UserFacingException(string message) : Exception(message);
+
 /// <summary>
 /// Runs a chain of wheel steps on one or more files. Originals are never modified;
 /// output goes next to them under a new, non-colliding name.
@@ -161,6 +164,11 @@ internal static class FileActions
                 Log.Write($"action failed {path}: {ex.InnerException?.Message}");
                 return new ActionResult(false, Lang.T("Açılamadı", "Could not open"), ex.Message);
             }
+            catch (UserFacingException ex)
+            {
+                Log.Write($"action refused {path}: {ex.Message}");
+                return new ActionResult(false, Lang.T("Olmadı", "Failed"), ex.Message);
+            }
             catch (Exception ex)
             {
                 Log.Write($"action failed {path}: {ex}");
@@ -177,13 +185,22 @@ internal static class FileActions
 
     private static string Label(string step) => Labels.GetValueOrDefault(step, step);
 
-    /// <summary>An animated GIF or a multi-page TIFF: only the first frame or page is converted, and the note says so.</summary>
+    /// <summary>An animated GIF/WebP/APNG or a multi-page TIFF: only the first frame or page is converted, and the note says so.</summary>
     private static string? ExtraFrames(string path)
     {
         string ext = Path.GetExtension(path).ToLowerInvariant();
-        if (ext is not (".gif" or ".tif" or ".tiff")) return null;
+        if (ext is not (".gif" or ".tif" or ".tiff" or ".webp" or ".png")) return null;
         try
         {
+            if (ext == ".webp")
+            {
+                using var ws = SafeFile.OpenRead(path);
+                using var codec = SkiaSharp.SKCodec.Create(ws);
+                return codec is { FrameCount: > 1 } ? Lang.T("yalnız ilk kare", "first frame only") : null;
+            }
+            if (ext == ".png")
+                return IsApng(path) ? Lang.T("yalnız ilk kare", "first frame only") : null;
+
             using var s = SafeFile.OpenRead(path);
             using var img = Image.FromStream(s, false, false);
             var dim = ext == ".gif" ? FrameDimension.Time : FrameDimension.Page;
@@ -191,6 +208,27 @@ internal static class FileActions
             return ext == ".gif" ? Lang.T("yalnız ilk kare", "first frame only") : Lang.T("yalnız ilk sayfa", "first page only");
         }
         catch { return null; }
+    }
+
+    /// <summary>True when an acTL chunk comes before the first IDAT (that is what makes a PNG animated). Walks the chunk headers only.</summary>
+    private static bool IsApng(string path)
+    {
+        using var s = SafeFile.OpenRead(path);
+        byte[] sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        byte[] buf = new byte[8];
+        if (s.Read(buf, 0, 8) != 8 || !buf.AsSpan().SequenceEqual(sig)) return false;
+        long pos = 8;
+        while (pos + 12 <= s.Length)
+        {
+            s.Position = pos;
+            if (s.Read(buf, 0, 8) != 8) return false;
+            long len = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(buf);
+            string type = System.Text.Encoding.ASCII.GetString(buf, 4, 4);
+            if (type == "acTL") return true;
+            if (type is "IDAT" or "IEND") return false;
+            pos += 8 + len + 4; // header, data, CRC
+        }
+        return false;
     }
 
     private static string RunImage(string path, List<string> steps, StepOptions options)
@@ -242,7 +280,7 @@ internal static class FileActions
 
             if (maxWidth is int mw && work.Width > mw)
             {
-                int h = (int)Math.Round(work.Height * (mw / (double)work.Width));
+                int h = Math.Max(1, (int)Math.Round(work.Height * (mw / (double)work.Width))); // a very wide, flat image would round to 0
                 var resized = new Bitmap(mw, h);
                 using (var g = Graphics.FromImage(resized))
                 {

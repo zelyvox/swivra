@@ -14,6 +14,7 @@ namespace Swivra.App;
 internal static class ImageActions
 {
     private const int WebpQuality = 82;
+    private const int WebpMaxSide = 16383; // format limit of the WebP bitstream
 
     // A4 in PDF points; pages keep the image aspect but never exceed A4 on the long side.
     private const double A4Long = 842, A4Short = 595;
@@ -25,9 +26,18 @@ internal static class ImageActions
         bmp.Save(ms, ImageFormat.Png);
         using SKBitmap sk = SKBitmap.Decode(ms.ToArray());
         using SKImage img = SKImage.FromBitmap(sk);
-        using SKData data = img.Encode(SKEncodedImageFormat.Webp, WebpQuality);
-        using var fs = File.Create(target);
-        data.SaveTo(fs);
+        // Encode before the file exists: Skia returns null above 16383 px per side, and a refusal must leave nothing behind.
+        using SKData? data = sk.Width > WebpMaxSide || sk.Height > WebpMaxSide ? null : img.Encode(SKEncodedImageFormat.Webp, WebpQuality);
+        if (data is null)
+            throw new UserFacingException(Lang.T("WebP en fazla 16383 piksel kenarı destekler", "WebP supports at most 16383 pixels per side"));
+        using var fs = new FileStream(target, FileMode.CreateNew, FileAccess.Write);
+        try { data.SaveTo(fs); }
+        catch
+        {
+            fs.Dispose();
+            SafeFile.TryDelete(target);
+            throw;
+        }
     }
 
     /// <summary>
@@ -60,7 +70,15 @@ internal static class ImageActions
         using (var gfx = XGraphics.FromPdfPage(page))
         using (var xi = XImage.FromStream(ms))
             gfx.DrawImage(xi, 0, 0, pw, ph);
-        doc.Save(target);
+        // CreateNew: never over a file; a half-written PDF is removed again.
+        using var fs = new FileStream(target, FileMode.CreateNew, FileAccess.Write);
+        try { doc.Save(fs, false); }
+        catch
+        {
+            fs.Dispose();
+            SafeFile.TryDelete(target);
+            throw;
+        }
     }
 
     /// <summary>True when at least one pixel is not fully opaque. Scans the alpha bytes (early exit), no GetPixel.</summary>
