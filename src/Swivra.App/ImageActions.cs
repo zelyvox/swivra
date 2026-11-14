@@ -9,7 +9,7 @@ using SkiaSharp;
 namespace Swivra.App;
 
 /// <summary>
-/// Image encoders that GDI+ cannot do (WebP, PDF) and the offline background remover.
+/// Image encoders that GDI+ cannot do (WebP, PDF), painting over what Hide found and the offline background remover.
 /// </summary>
 internal static class ImageActions
 {
@@ -123,6 +123,56 @@ internal static class ImageActions
         foreach (var p in bmp.PropertyItems)
             try { flat.SetPropertyItem(p); } catch { /* some tags are not writable */ }
         return flat;
+    }
+
+    // ---------- hide ----------
+
+    /// <summary>
+    /// Paints each polygon opaque black. Without anti-aliasing: a soft edge would leave half-covered pixels, and the
+    /// 2 px outline puts every pixel the polygon's edge passes through inside the black, not only those whose centre is.
+    /// SourceCopy: the black replaces the pixel, alpha included, so it stays opaque on a cut-out too.
+    /// </summary>
+    public static void Cover(Bitmap bmp, IEnumerable<PointF[]> polygons)
+    {
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = SmoothingMode.None;
+        g.PixelOffsetMode = PixelOffsetMode.None;
+        g.CompositingMode = CompositingMode.SourceCopy;
+        using var brush = new SolidBrush(Color.Black);
+        using var pen = new Pen(Color.Black, 2) { LineJoin = LineJoin.Miter };
+        foreach (var p in polygons)
+        {
+            if (p.Length < 3) continue;
+            g.FillPolygon(brush, p);
+            g.DrawPolygon(pen, p);
+        }
+    }
+
+    /// <summary>
+    /// Zeroes the colour of fully transparent pixels. Viewers do not show it, but it is still in a PNG or WebP: text
+    /// under the transparency could be brought back, and OCR (which reads what a viewer shows) never saw it.
+    /// </summary>
+    public static void ClearUnderTransparent(Bitmap bmp)
+    {
+        if (bmp.PixelFormat is not (PixelFormat.Format32bppArgb or PixelFormat.Format32bppPArgb)) return;
+        var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadWrite, bmp.PixelFormat);
+        try
+        {
+            byte[] row = new byte[data.Width * 4];
+            for (int y = 0; y < data.Height; y++)
+            {
+                IntPtr at = IntPtr.Add(data.Scan0, y * data.Stride);
+                System.Runtime.InteropServices.Marshal.Copy(at, row, 0, row.Length);
+                bool changed = false;
+                for (int x = 0; x < row.Length; x += 4)
+                    if (row[x + 3] == 0 && (row[x] | row[x + 1] | row[x + 2]) != 0) { row[x] = row[x + 1] = row[x + 2] = 0; changed = true; }
+                if (changed) System.Runtime.InteropServices.Marshal.Copy(row, 0, at, row.Length);
+            }
+        }
+        finally
+        {
+            bmp.UnlockBits(data);
+        }
     }
 
     // ---------- background removal (u2netp via ONNX Runtime, CPU) ----------
