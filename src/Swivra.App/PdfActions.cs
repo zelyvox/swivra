@@ -102,8 +102,9 @@ internal static class PdfActions
                             // Not worth it: drop the attempt and carry on with the unchanged input.
                             Cleanup([cmpTarget]);
                             created.Remove(cmpTarget);
+                            if (input == path && last) return new ActionResult(true, Lang.T("Zaten küçük", "Already small"), Lang.T("Daha fazla küçülmüyor", "Cannot shrink it further"));
+                            notes.Add(Lang.T("daha fazla küçülmedi", "did not shrink further"));
                             if (!last) break;
-                            if (input == path) return new ActionResult(true, Lang.T("Zaten küçük", "Already small"), Lang.T("Daha fazla küçülmüyor", "Cannot shrink it further"));
                             // Earlier steps already produced a file (in temp); it becomes the final output.
                             string keep = FileActions.UniquePath(origDir, name + suffix, "pdf");
                             SafeFile.CopyWritable(input, keep);
@@ -199,7 +200,9 @@ internal static class PdfActions
         {
             Cleanup(created);
             Log.Write($"pdf open/process failed {path}: {ex}");
-            return new ActionResult(false, Lang.T("Açılamadı", "Could not open"), Lang.T("PDF parolalı ya da bozuk", "The PDF is password-protected or damaged"));
+            return IsPasswordOrDamaged(ex)
+                ? new ActionResult(false, Lang.T("Açılamadı", "Could not open"), Lang.T("PDF parolalı ya da bozuk", "The PDF is password-protected or damaged"))
+                : new ActionResult(false, Lang.T("Olmadı", "Failed"), Lang.T("PDF işlenemedi", "Could not process the PDF"));
         }
         finally
         {
@@ -221,6 +224,20 @@ internal static class PdfActions
         if (o.NotePages > 0)
             w.Add(Lang.T($"{o.NotePages} sayfadaki notlar okunamadı, gözle kontrol et", $"notes on {o.NotePages} page(s) could not be read, check them by eye"));
         return w;
+    }
+
+    /// <summary>True when a library refused the file itself: a password it cannot open with, or a broken PDF structure.</summary>
+    private static bool IsPasswordOrDamaged(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is UglyToad.PdfPig.Exceptions.PdfDocumentEncryptedException or UglyToad.PdfPig.Core.PdfDocumentFormatException
+                or UglyToad.PdfPig.Core.PdfDocumentStackDepthException or PdfReaderException
+                or PDFtoImage.Exceptions.PdfPasswordProtectedException or PDFtoImage.Exceptions.PdfUnsupportedSecuritySchemeException
+                or PDFtoImage.Exceptions.PdfInvalidFormatException)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>Merges the PDFs in the given order into one file next to the first.</summary>
@@ -451,6 +468,7 @@ internal static class PdfActions
     {
         using var doc = PdfReader.Open(input, PdfDocumentOpenMode.Import);
         int count = doc.PageCount;
+        if (count < 1) throw new PdfFailure(NoPages());
         int digits = Math.Max(2, count.ToString().Length);
         string folder = FileActions.UniqueDir(dir, baseName + Lang.T("-bolum", "-split"));
         Directory.CreateDirectory(folder);
@@ -469,7 +487,7 @@ internal static class PdfActions
         byte[] bytes = SafeFile.ReadAll(input);
         int count;
         using (var ms = new MemoryStream(bytes)) count = PDFtoImage.Conversion.GetPageCount(ms);
-        if (count < 1) throw new InvalidDataException("pdf has no pages");
+        if (count < 1) throw new PdfFailure(NoPages());
 
         string folder = "";
         string single = "";
@@ -483,7 +501,6 @@ internal static class PdfActions
         else
         {
             single = FileActions.UniquePath(dir, baseName, ext);
-            created.Add(single);
         }
 
         // The page as it is seen: notes and filled-in form fields are drawn too.
@@ -494,13 +511,31 @@ internal static class PdfActions
             using SKBitmap bmp = PDFtoImage.Conversion.ToImage(ms, i, options: options);
             using var image = SKImage.FromBitmap(bmp);
             using var data = ext == "jpg" ? image.Encode(SKEncodedImageFormat.Jpeg, JpgQuality) : image.Encode(SKEncodedImageFormat.Png, 100);
+            if (data is null) throw new InvalidOperationException($"page {i + 1} could not be encoded");
             string target = count > 1
                 ? Path.Combine(folder, $"{baseName}-{(i + 1).ToString().PadLeft(digits, '0')}.{ext}")
                 : single;
-            using var fs = File.Create(target);
-            data.SaveTo(fs);
+            WriteNew(target, data.SaveTo);
+            if (count == 1) created.Add(single);   // only once it is ours: a file that appeared meanwhile is never cleaned up
         }
         return count > 1 ? (folder, true) : (single, false);
+    }
+
+    private static ActionResult NoPages() => new(false, Lang.T("Olmadı", "Failed"), Lang.T("PDF'te sayfa yok", "The PDF has no pages"));
+
+    /// <summary>Writes a file that must not exist yet (never over someone's file); a half-written one is removed.</summary>
+    private static void WriteNew(string target, Action<Stream> write)
+    {
+        var fs = new FileStream(target, FileMode.CreateNew, FileAccess.Write);
+        try
+        {
+            using (fs) write(fs);
+        }
+        catch
+        {
+            SafeFile.TryDelete(target);
+            throw;
+        }
     }
 
     private static string ExtractTxt(string input, string dir, string baseName, List<string> created)
@@ -509,9 +544,10 @@ internal static class PdfActions
         if (pages.All(string.IsNullOrWhiteSpace))
             throw new PdfFailure(new ActionResult(false, Lang.T("Metin yok", "No text"), Lang.T("Taranmış PDF olabilir", "It may be a scanned PDF")));
         string target = FileActions.UniquePath(dir, baseName, "txt");
-        created.Add(target);
         string nl = Environment.NewLine;
-        File.WriteAllText(target, string.Join(nl + nl, pages.Select(p => p.Trim())), new UTF8Encoding(false));
+        byte[] text = new UTF8Encoding(false).GetBytes(string.Join(nl + nl, pages.Select(p => p.Trim())));
+        WriteNew(target, fs => fs.Write(text));
+        created.Add(target);
         return target;
     }
 
