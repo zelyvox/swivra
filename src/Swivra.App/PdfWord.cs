@@ -79,6 +79,19 @@ internal static class PdfWord
         return pages;
     }
 
+    /// <summary>Drops characters XML cannot hold (PDF text can carry C0 controls); intact surrogate pairs stay, a lone surrogate goes.</summary>
+    private static string XmlSafe(string text)
+    {
+        var sb = new System.Text.StringBuilder(text.Length);
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (i + 1 < text.Length && System.Xml.XmlConvert.IsXmlSurrogatePair(text[i + 1], c)) { sb.Append(c).Append(text[++i]); continue; }
+            if (System.Xml.XmlConvert.IsXmlChar(c)) sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
     private static void WriteDocx(string target, List<List<string>> pages)
     {
         using var word = WordprocessingDocument.Create(target, WordprocessingDocumentType.Document);
@@ -89,7 +102,7 @@ internal static class PdfWord
         {
             foreach (string p in pages[i])
             {
-                var run = new Run(new Text(p) { Space = SpaceProcessingModeValues.Preserve });
+                var run = new Run(new Text(XmlSafe(p)) { Space = SpaceProcessingModeValues.Preserve });
                 body.AppendChild(new Paragraph(run));
             }
             if (i < pages.Count - 1)
