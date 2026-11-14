@@ -35,6 +35,13 @@ internal static partial class OfficeConvert
         string ext = Path.GetExtension(target).ToLowerInvariant();
         string inExt = Path.GetExtension(input).ToLowerInvariant();
         string? soffice = FindLibreOffice();
+        // No office program: nothing to clean for, and a refusal here would hide the caller's own
+        // text-only route, which never hands the file to anything that fetches.
+        if (soffice is null && !WordInstalled)
+        {
+            Log.Write("office conversion: no Word or LibreOffice installed");
+            return null;
+        }
         string? work = null, outDir = null;
         try
         {
