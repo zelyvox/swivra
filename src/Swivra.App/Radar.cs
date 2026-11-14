@@ -174,11 +174,44 @@ internal static partial class Radar
     public static List<Hit> FindAll(string text)
     {
         var hits = new List<Hit>();
-        foreach (Match m in TcCandidate().Matches(text)) if (IsValidTc(m.Value)) hits.Add(new Hit(HitKind.Tc, m.Index, m.Length));
+        foreach (Match m in DigitRun().Matches(text)) AddTcHits(m, hits);
         foreach (Match m in IbanCandidate().Matches(text)) if (IsValidIban(m.Value)) hits.Add(new Hit(HitKind.Iban, m.Index, m.Length));
         foreach (Match m in Email().Matches(text)) hits.Add(new Hit(HitKind.Email, m.Index, m.Length));
         foreach (Match m in Phone().Matches(text)) hits.Add(new Hit(HitKind.Phone, m.Index, m.Length));
         return hits;
+    }
+
+    /// <summary>
+    /// TC numbers inside one run of digit groups ("12345678950", "123 456 789 50", "1 2 3 ... 0" from boxed form cells).
+    /// A candidate is whole groups adding up to exactly 11 digits, so it never starts or ends inside a group and
+    /// a longer number never yields one; the checksum decides. The hit spans from its first to its last digit.
+    /// </summary>
+    private static void AddTcHits(Match run, List<Hit> hits)
+    {
+        string s = run.Value;
+        var groups = new List<(int Start, int End)>();
+        for (int i = 0; i < s.Length;)
+        {
+            if (!char.IsAsciiDigit(s[i])) { i++; continue; }
+            int start = i;
+            while (i < s.Length && char.IsAsciiDigit(s[i])) i++;
+            groups.Add((start, i));
+        }
+        for (int g = 0; g < groups.Count; g++)
+        {
+            var digits = new StringBuilder();
+            for (int k = g; k < groups.Count && digits.Length < 11; k++)
+            {
+                digits.Append(s, groups[k].Start, groups[k].End - groups[k].Start);
+                if (digits.Length != 11) continue;
+                if (IsValidTc(digits.ToString()))
+                {
+                    hits.Add(new Hit(HitKind.Tc, run.Index + groups[g].Start, groups[k].End - groups[g].Start));
+                    g = k;   // next candidate starts after this one
+                }
+                break;
+            }
+        }
     }
 
     public static void ScanText(string text, List<string> found)
@@ -211,7 +244,7 @@ internal static partial class Radar
 
     public static bool IsValidIban(string raw)
     {
-        string s = string.Concat(raw.Where(c => !char.IsWhiteSpace(c))).ToUpperInvariant();
+        string s = string.Concat(raw.Where(c => !char.IsWhiteSpace(c) && c != '-')).ToUpperInvariant();
         if (s.Length != 26 || !s.StartsWith("TR")) return false;
         string rearranged = s[4..] + s[..4];
         int rem = 0;
@@ -223,18 +256,23 @@ internal static partial class Radar
         return rem == 1;
     }
 
-    [GeneratedRegex(@"(?<!\d)[1-9]\d{10}(?!\d)")]
-    private static partial Regex TcCandidate();
+    // Digit groups joined by up to two spaces, dots or dashes on one line: "123 456 789 50", "123.456.789.50",
+    // and form cells, which come back from a PDF as "1 2 3 4 5 6 7 8 9 5 0". Separators and digits never
+    // overlap, so the match is linear; AddTcHits picks the 11-digit candidates out of it.
+    [GeneratedRegex(@"(?<!\d)\d+(?:(?:[^\S\r\n]|[.\-]){1,2}\d+)*")]
+    private static partial Regex DigitRun();
 
-    // Up to two spaces between any two digits, not only between groups of four: a long IBAN that wraps
+    // Up to two spaces or dashes between any two digits, not only between groups of four: a long IBAN that wraps
     // onto the next line in a PDF comes back as "TR33000610051978645 7841326" (the line break becomes a space,
-    // next to a typed one it is two). Bounded, so no backtracking blow-up; mod-97 still decides.
-    [GeneratedRegex(@"TR\d{2}(?:\s{0,2}\d){22}", RegexOptions.IgnoreCase)]
+    // next to a typed one it is two), and some forms write "TR33-0006-...". Bounded, so no backtracking blow-up; mod-97 still decides.
+    [GeneratedRegex(@"TR\d{2}(?:[\s\-]{0,2}\d){22}", RegexOptions.IgnoreCase)]
     private static partial Regex IbanCandidate();
 
     [GeneratedRegex(@"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")]
     private static partial Regex Email();
 
-    [GeneratedRegex(@"(?<!\d)(?:\+90\s?|0)5\d{2}\s?\d{3}\s?\d{2}\s?\d{2}(?!\d)")]
+    // 05xx mobile numbers with +90 or a leading 0, the area code optionally in brackets, groups split by a space, dot or dash:
+    // "0532 123 45 67", "(0532) 123 45 67", "0532-123-45-67", "+90 (532) 123 45 67", "0 532 123 45 67".
+    [GeneratedRegex(@"(?<!\d)(?:\+90[\s.\-]?\(?|\(0|0[\s.\-]?\(?)5\d{2}\)?[\s.\-]?\d{3}[\s.\-]?\d{2}[\s.\-]?\d{2}(?!\d)")]
     private static partial Regex Phone();
 }
