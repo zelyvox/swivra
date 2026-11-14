@@ -406,15 +406,16 @@ internal static class PdfRedact
             }
             var pb = pages[i];
             bool read = true, text = false;
+            var pageClock = System.Diagnostics.Stopwatch.StartNew(); // the page budget is for all its areas together
             using (bmp)
             {
                 foreach (OcrArea area in areas)
                 {
-                    TimeSpan left = OcrDocBudget - clock.Elapsed;
+                    TimeSpan left = OcrDocBudget - clock.Elapsed, pageLeft = OcrPageBudget - pageClock.Elapsed;
                     List<Ocr.Finding>? findings;
                     try
                     {
-                        findings = ReadArea(bmp, area, left < OcrPageBudget ? left : OcrPageBudget, 0, out bool seen);
+                        findings = ReadArea(bmp, area, left < pageLeft ? left : pageLeft, 0, out bool seen);
                         text |= seen;
                     }
                     catch (Exception ex) when (ex is not OutOfMemoryException)
