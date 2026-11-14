@@ -426,8 +426,8 @@ internal static class DocActions
             if (made) TryDelete(output);
             throw;
         }
-        // Binary embedded objects cannot be looked into; say so rather than suggest the file is clean.
-        string skippedNote = skipped == 0 ? "" : Lang.T($" · {skipped} gömülü nesne kontrol edilemedi", skipped == 1 ? " · 1 embedded object not checked" : $" · {skipped} embedded objects not checked");
+        // Binary embedded objects, parts and text that cannot be masked; say so rather than suggest the file is clean.
+        string skippedNote = skipped == 0 ? "" : Lang.T($" · {skipped} öğe kontrol edilemedi", skipped == 1 ? " · 1 item not checked" : $" · {skipped} items not checked");
         if (count == 0)
         {
             if (made) TryDelete(output);
@@ -551,6 +551,7 @@ internal static class DocActions
                 MaskRuns<DeletedFieldCode>(p, c, preserveSpace: true);
                 MaskRuns<DocumentFormat.OpenXml.Math.Text>(p, c, preserveSpace: true);
             }
+            MaskUnknownText(root, c, preserveSpace: true); // a Strict text box, a paragraph under an ignorable wrapper
             foreach (var f in root.Descendants<SimpleField>())
                 f.Instruction = c.Mask(f.Instruction?.Value);
             // Legacy form fields keep their default, help and status text in w:val attributes.
@@ -596,6 +597,7 @@ internal static class DocActions
         if (wb.SharedStringTablePart?.SharedStringTable is { } sst)
         {
             foreach (var item in sst.Elements<SharedStringItem>()) MaskRuns<SText>(item, c, preserveSpace: true);
+            MaskUnknownText(sst, c, preserveSpace: true);
             sst.Save();
             c.Handled.Add(wb.SharedStringTablePart);
         }
@@ -615,11 +617,13 @@ internal static class DocActions
                 cell.DataType = CellValues.InlineString;
                 cell.InlineString = new InlineString(new SText(masked));
             }
+            MaskUnknownText(ws.Worksheet, c, preserveSpace: true);
             ws.Worksheet.Save();
             c.Handled.Add(ws);
             if (ws.WorksheetCommentsPart?.Comments is { } comments)
             {
                 foreach (var ct in comments.Descendants<CommentText>()) MaskRuns<SText>(ct, c, preserveSpace: true);
+                MaskUnknownText(comments, c, preserveSpace: true);
                 comments.Save();
                 c.Handled.Add(ws.WorksheetCommentsPart);
             }
@@ -644,6 +648,7 @@ internal static class DocActions
         {
             if (part.RootElement is not OpenXmlPartRootElement root) continue;
             foreach (var p in root.Descendants<DocumentFormat.OpenXml.Drawing.Paragraph>()) MaskRuns<DocumentFormat.OpenXml.Drawing.Text>(p, c, preserveSpace: false);
+            MaskUnknownText(root, c, preserveSpace: false);
             MaskAttributes(root, name => name is "descr" or "title", c);
             MaskHyperlinks(part, c);
             root.Save();
@@ -794,12 +799,14 @@ internal static class DocActions
             if (masked == text) continue;
             string value = el.Ancestors().Any(a => a.LocalName == "numDim") ? "0" : masked;
             if (el is OpenXmlLeafTextElement leaf) leaf.Text = value;
+            else if (el is OpenXmlUnknownElement unknown) ReplaceText(unknown, value, preserveSpace: false);
             else
             {
                 Log.Write($"hide: chart element {el.LocalName} not masked");
                 c.Unchecked++;
             }
         }
+        MaskUnknownText(root, c, preserveSpace: false); // text between child elements
         MaskAttributes(root, name => name == "name", c);
         root.Save();
     }
@@ -854,6 +861,7 @@ internal static class DocActions
             bool number = v.Ancestors().Any(a => a is DocumentFormat.OpenXml.Drawing.Charts.NumberingCache or DocumentFormat.OpenXml.Drawing.Charts.NumberLiteral);
             v.Text = number ? "0" : masked;
         }
+        MaskUnknownText(root, c, preserveSpace: false);
         root.Save();
     }
 
@@ -1050,16 +1058,29 @@ internal static class DocActions
         Type paragraph = p.GetType();
         var texts = p.Descendants<T>().Where(t => t.Ancestors().First(a => a.GetType() == paragraph) == p).ToList();
         if (texts.Count == 0) return;
-        string full = string.Concat(texts.Select(t => t.Text));
+        var pieces = texts.Select(t => t.Text).ToList();
+        string full = string.Concat(pieces);
         var spans = MergeSpans(Radar.FindSensitiveSpans(full));
         if (spans.Count == 0) return;
         c.Note(full, spans);
 
+        var masked = SpreadMask(pieces, spans);
+        for (int i = 0; i < texts.Count; i++)
+        {
+            texts[i].Text = masked[i];
+            if (preserveSpace) texts[i].SetAttribute(PreserveSpace);
+        }
+    }
+
+    /// <summary>The pieces of one text split across runs, each span of it replaced by the mask in the first piece the span touches.</summary>
+    private static List<string> SpreadMask(List<string> pieces, List<(int Start, int Length)> spans)
+    {
+        var result = new List<string>(pieces.Count);
         int pos = 0, si = 0;
-        foreach (var t in texts)
+        foreach (string piece in pieces)
         {
             var sb = new StringBuilder();
-            foreach (char ch in t.Text)
+            foreach (char ch in piece)
             {
                 while (si < spans.Count && pos >= spans[si].Start + spans[si].Length) si++;
                 if (si < spans.Count && pos >= spans[si].Start)
@@ -1069,9 +1090,85 @@ internal static class DocActions
                 else sb.Append(ch);
                 pos++;
             }
-            t.Text = sb.ToString();
-            if (preserveSpace) t.SetAttribute(PreserveSpace);
+            result.Add(sb.ToString());
         }
+        return result;
+    }
+
+    /// <summary>
+    /// Text the SDK does not know the shape of is read as unknown elements, which the typed passes never
+    /// see: a text box in Word's Strict save (wp:wsp/wp:txbx/wne:txbxContent/w:p), a paragraph under an
+    /// ignorable wrapper. The text leaves (t, delText, instrText) of an unknown paragraph (local name p)
+    /// are masked as a whole, one kind at a time, as <see cref="MaskRuns{T}"/> does; any other unknown
+    /// element holding text is masked on its own. Text between child elements cannot be rewritten
+    /// through the SDK: when it holds a value, it counts as not checked.
+    /// </summary>
+    private static void MaskUnknownText(OpenXmlElement root, Covered c, bool preserveSpace)
+    {
+        var groups = new Dictionary<(OpenXmlElement Paragraph, string Kind), List<OpenXmlUnknownElement>>();
+        var order = new List<(OpenXmlElement Paragraph, string Kind)>();
+        var single = new List<OpenXmlUnknownElement>();
+        foreach (var e in root.Descendants<OpenXmlUnknownElement>())
+        {
+            if (e.ChildElements.Count > 0 || string.IsNullOrEmpty(e.Text)) continue;
+            // The nearest paragraph, typed or not: a typed one already had its own typed runs masked.
+            var owner = e.Ancestors().FirstOrDefault(a => a is Paragraph or DocumentFormat.OpenXml.Drawing.Paragraph || (a is OpenXmlUnknownElement && a.LocalName == "p"));
+            if (owner is OpenXmlUnknownElement && e.LocalName is "t" or "delText" or "instrText" or "delInstrText")
+            {
+                var key = (owner, e.NamespaceUri + " " + e.LocalName);
+                if (!groups.TryGetValue(key, out var leaves)) { groups[key] = leaves = new(); order.Add(key); }
+                leaves.Add(e);
+            }
+            else single.Add(e);
+        }
+        foreach (var key in order)
+        {
+            var leaves = groups[key];
+            var pieces = leaves.Select(l => l.Text).ToList();
+            string full = string.Concat(pieces);
+            var spans = MergeSpans(Radar.FindSensitiveSpans(full));
+            if (spans.Count == 0) continue;
+            c.Note(full, spans);
+            var masked = SpreadMask(pieces, spans);
+            for (int i = 0; i < leaves.Count; i++)
+                if (masked[i] != pieces[i]) ReplaceText(leaves[i], masked[i], preserveSpace);
+        }
+        foreach (var leaf in single)
+        {
+            string text = leaf.Text;
+            string masked = c.Mask(text)!;
+            if (masked != text) ReplaceText(leaf, masked, preserveSpace);
+        }
+        foreach (var node in root.Descendants<OpenXmlMiscNode>())
+        {
+            if (node.XmlNodeType is not (System.Xml.XmlNodeType.Text or System.Xml.XmlNodeType.CDATA or System.Xml.XmlNodeType.SignificantWhitespace)) continue;
+            if (Radar.FindSensitiveSpans(System.Net.WebUtility.HtmlDecode(node.OuterXml)).Any())
+            {
+                Log.Write($"hide: text between the elements of {node.Parent?.LocalName} not masked");
+                c.Unchecked++;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gives an unknown element that holds only text a new text. The SDK keeps such text out of reach
+    /// (setting its InnerXml leaves it as it was), so the element is replaced by a copy holding the new
+    /// text, parsed under a scratch parent, with the same name, attributes and namespace declarations.
+    /// </summary>
+    private static void ReplaceText(OpenXmlUnknownElement e, string text, bool preserveSpace)
+    {
+        string tag = string.IsNullOrEmpty(e.Prefix) ? e.LocalName : e.Prefix + ":" + e.LocalName;
+        string xmlns = string.IsNullOrEmpty(e.Prefix) ? "xmlns" : "xmlns:" + e.Prefix;
+        var holder = new OpenXmlUnknownElement("swivra", "holder", "urn:swivra");
+        holder.InnerXml = $"<{tag} {xmlns}=\"{System.Security.SecurityElement.Escape(e.NamespaceUri)}\">{System.Security.SecurityElement.Escape(text).Replace("\r", "&#13;")}</{tag}>";
+        if (holder.FirstChild is not OpenXmlUnknownElement fresh || fresh.Text != text) throw new InvalidOperationException("masked text could not be written");
+        fresh.Remove();
+        foreach (var d in fresh.NamespaceDeclarations.ToList()) fresh.RemoveNamespaceDeclaration(d.Key); // declared where it is written, if needed
+        foreach (var d in e.NamespaceDeclarations) fresh.AddNamespaceDeclaration(d.Key, d.Value);
+        fresh.SetAttributes(e.GetAttributes());
+        if (preserveSpace) fresh.SetAttribute(PreserveSpace);
+        e.InsertAfterSelf(fresh);
+        e.Remove();
     }
 
     // ---------- zip: compress and lock ----------
