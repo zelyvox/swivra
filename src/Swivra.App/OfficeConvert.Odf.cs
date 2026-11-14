@@ -116,12 +116,11 @@ internal static partial class OfficeConvert
         {
             string name = entry.FullName;
             if (!xmlParts.Contains(name)) continue; // pictures and other binary parts, mimetype, the manifest
-            byte[] bytes = ReadCapped(entry, MaxChunkBytes) ?? throw new UnsafeDocumentException($"part {name} too large");
+            byte[] bytes = ReadCapped(entry, MaxXmlBytes) ?? throw new UnsafeDocumentException($"part {name} too large to read as XML");
             XDocument xml;
             try
             {
-                using var s = new MemoryStream(bytes);
-                xml = LoadXml(s);
+                xml = LoadXml(bytes, name);
             }
             catch (System.Xml.XmlException ex)
             {
@@ -178,7 +177,7 @@ internal static partial class OfficeConvert
         }
 
         var manifestEntry = zip.GetEntry("META-INF/manifest.xml") ?? throw new UnsafeDocumentException("no manifest");
-        byte[] manifestBytes = ReadCapped(manifestEntry, MaxChunkBytes) ?? throw new UnsafeDocumentException("manifest too large");
+        byte[] manifestBytes = ReadCapped(manifestEntry, MaxXmlBytes) ?? throw new UnsafeDocumentException("manifest too large");
         XDocument manifest = ParseOdfPart(manifestBytes, manifestEntry.FullName);
         CheckOdfNamespaces(manifest, manifestEntry.FullName);
         if (manifest.Root?.Name != OdfManifest + "manifest") throw new UnsafeDocumentException("manifest in another namespace");
@@ -279,8 +278,7 @@ internal static partial class OfficeConvert
     {
         try
         {
-            using var s = new MemoryStream(bytes);
-            return LoadXml(s);
+            return LoadXml(bytes, name);
         }
         catch (System.Xml.XmlException ex) { throw new UnsafeDocumentException($"part {name} is not well-formed XML ({ex.Message})"); }
     }
