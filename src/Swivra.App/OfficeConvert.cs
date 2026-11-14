@@ -295,10 +295,34 @@ internal static partial class OfficeConvert
     /// </summary>
     private static void CutPackage(Stream stream, int depth, Cleaning report)
     {
+        // A read-only pass first: the limits are checked before anything is inflated, and the parts that
+        // need reading are picked by name, content type or first character. An archive opened for update
+        // keeps every entry it opens inflated in memory until it closes, so pictures, fonts and other
+        // binary parts are never opened there.
+        List<ChunkRef> refs;
+        var toRead = new Dictionary<string, bool>(StringComparer.Ordinal); // part -> Word reads it as XML
+        HashSet<string> partNames;
+        using (var peek = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true))
+        {
+            CheckEntries(peek);
+            var xmlTypes = ContentTypes.Read(peek);
+            refs = AltChunkRefs(peek);
+            partNames = peek.Entries.Select(e => e.FullName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in peek.Entries)
+            {
+                string name = e.FullName;
+                // Word reads a part as XML by its content type (or name); those must parse.
+                bool xmlPart = name.EndsWith(".rels", StringComparison.OrdinalIgnoreCase) || name.Equals("[Content_Types].xml", StringComparison.OrdinalIgnoreCase)
+                    || name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".svg", StringComparison.OrdinalIgnoreCase) || xmlTypes.IsXml(name);
+                if (xmlPart) { toRead[name] = true; continue; }
+                bool looks;
+                try { using var s = e.Open(); looks = LooksLikeXml(s); }
+                catch (InvalidDataException) { looks = true; } // unreadable: read again below, where it fails as before
+                if (looks) toRead[name] = false;
+            }
+        }
+        stream.Position = 0;
         using var zip = new ZipArchive(stream, ZipArchiveMode.Update, leaveOpen: true);
-        CheckEntries(zip);
-        var xmlTypes = ContentTypes.Read(zip);
-        var refs = AltChunkRefs(zip);
 
         // Chunk part name -> paragraphs to put in its place (null: a placeholder line instead of its text).
         var flatten = new Dictionary<string, List<string>?>(StringComparer.Ordinal);
@@ -375,11 +399,9 @@ internal static partial class OfficeConvert
             bool rels = name.EndsWith(".rels", StringComparison.OrdinalIgnoreCase);
             bool types = name.Equals("[Content_Types].xml", StringComparison.OrdinalIgnoreCase);
             // Any part may hold a story, under any name: _rels/.rels and the content types decide, not
-            // the extension. So every part that is XML by its bytes is checked.
+            // the extension. So every part that is XML by its bytes is checked (picked in the first pass).
+            if (!toRead.TryGetValue(name, out bool xmlPart)) continue;
             byte[] bytes = ReadCapped(entry, MaxChunkBytes) ?? throw new InvalidDataException($"part {name} too large");
-            // Word reads a part as XML by its content type (or name); those must parse.
-            bool xmlPart = rels || types || name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) || xmlTypes.IsXml(name);
-            if (!xmlPart && !LooksLikeXml(bytes)) continue;
             XDocument xml;
             try
             {
@@ -392,7 +414,8 @@ internal static partial class OfficeConvert
                 // Skipping it would leave whatever it links to in place; Word's parser may read it anyway.
                 throw new InvalidDataException($"part {name} is not well-formed XML ({ex.Message})");
             }
-            bool changed = false;
+            // Writing the part back drops a DOCTYPE the parser skipped; see MayHideDoctype.
+            bool changed = MayHideDoctype(bytes);
             if (rels)
             {
                 foreach (var rel in xml.Descendants().Where(e => e.Name.LocalName == "Relationship").ToList())
@@ -468,6 +491,7 @@ internal static partial class OfficeConvert
                 }
             }
             if (!changed) continue;
+            xml.DocumentType?.Remove();
             using var wr = entry.Open();
             wr.SetLength(0);
             xml.Save(wr, SaveOptions.DisableFormatting);
@@ -475,17 +499,26 @@ internal static partial class OfficeConvert
         foreach (var part in flatten.Keys) zip.GetEntry(part)?.Delete();
     }
 
+    // Real documents have a few hundred parts at most and inflate to tens of megabytes; a package past
+    // either limit is refused before any part is inflated (a 1 MB file can declare gigabytes of zeros).
+    private const int MaxEntries = 10_000;
+    private const long MaxPackageBytes = 512L * 1024 * 1024;
+
     /// <summary>
     /// Refuses a package Word might read differently from this code: two entries with the same part
     /// name (case and escapes aside) could each be the one Word picks, and an entry that inflates past
-    /// the size limit would not fit in memory.
+    /// the size limit would not fit in memory. Also one with more entries, or more inflated bytes in
+    /// all, than any real document. Sizes are the declared ones: the archive reader stops each entry there.
     /// </summary>
     private static void CheckEntries(ZipArchive zip)
     {
+        if (zip.Entries.Count > MaxEntries) throw new InvalidDataException($"{zip.Entries.Count} entries");
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        long total = 0;
         foreach (var e in zip.Entries)
         {
             if (e.Length > MaxChunkBytes) throw new InvalidDataException($"part {e.FullName} too large");
+            if ((total += e.Length) > MaxPackageBytes) throw new InvalidDataException("package inflates past the size limit");
             if (!seen.Add(ResolvePart("", e.FullName) ?? e.FullName)) throw new InvalidDataException($"duplicate part {e.FullName}");
         }
     }
@@ -537,13 +570,79 @@ internal static partial class OfficeConvert
         }
     }
 
-    /// <summary>XML by its first character: after a BOM and blank space, a '&lt;'.</summary>
-    private static bool LooksLikeXml(byte[] data)
+    private static bool LooksLikeXml(byte[] data) => LooksLikeXml(new MemoryStream(data, writable: false));
+
+    /// <summary>
+    /// XML by its first character: after a BOM and blank space, a '&lt;'. UTF-16 and UTF-32 count without
+    /// a BOM too, as XML parsers detect them: the zero bytes around an ASCII character give the width and
+    /// the byte order away. Reads the stream only as far as that character.
+    /// </summary>
+    private static bool LooksLikeXml(Stream s)
     {
-        int i = data.AsSpan().StartsWith("﻿"u8) ? 3 : 0;
-        if (data.Length >= 2 && (data[0], data[1]) is (0xFF, 0xFE) or (0xFE, 0xFF)) return true; // UTF-16
-        while (i < data.Length && data[i] is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n') i++;
-        return i < data.Length && data[i] == '<';
+        var head = new byte[4];
+        int n = s.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+        if (n >= 2 && (head[0], head[1]) is (0xFF, 0xFE) or (0xFE, 0xFF)) return true; // UTF-16 (and UTF-32LE) BOM
+        if (n >= 4 && head is [0, 0, 0xFE, 0xFF]) return true; // UTF-32BE BOM
+        int width = 1, low = 0, skip = 0; // bytes per character, and where its ASCII byte sits
+        if (n >= 3 && head is [0xEF, 0xBB, 0xBF, ..]) skip = 3;
+        else if (n >= 4)
+            (width, low) = head switch
+            {
+                [not 0, 0, 0, 0] => (4, 0),
+                [0, 0, 0, not 0] => (4, 3),
+                [not 0, 0, _, _] => (2, 0),
+                [0, not 0, _, _] => (2, 1),
+                _ => (1, 0),
+            };
+        var buffer = new byte[4096];
+        head.AsSpan(0, n).CopyTo(buffer);
+        int have = n, pos = skip;
+        while (true)
+        {
+            if (have - pos < width)
+            {
+                // keep the partial character, read more
+                int rest = have - pos;
+                Buffer.BlockCopy(buffer, pos, buffer, 0, rest);
+                have = rest + s.ReadAtLeast(buffer.AsSpan(rest), buffer.Length - rest, throwOnEndOfStream: false);
+                pos = 0;
+                if (have < width) return false;
+            }
+            var ch = buffer.AsSpan(pos, width);
+            for (int b = 0; b < width; b++)
+                if (b != low && ch[b] != 0) return false; // not ASCII: not '<' and not blank
+            pos += width;
+            if (ch[low] is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n') continue;
+            return ch[low] == '<';
+        }
+    }
+
+    /// <summary>
+    /// The parser skips a DOCTYPE without a trace, so whether a part had one is read from its bytes: a
+    /// part that is not plainly UTF-8 (a BOM-less UTF-16 or UTF-32 one, or one that declares another
+    /// encoding) cannot be searched that way and counts as having one. Such a part is written back, and
+    /// a DOCTYPE never reaches the office program's own parser, whatever the encoding.
+    /// </summary>
+    private static bool MayHideDoctype(byte[] bytes)
+    {
+        var data = bytes.AsSpan();
+        if (data.StartsWith("﻿"u8)) data = data[3..];
+        else if (data.Length >= 2 && (data[0] == 0 || data[1] == 0 || data[0] >= 0xFE)) return true; // UTF-16/32, with or without a BOM
+        if (data.StartsWith("<?xml"u8))
+        {
+            int end = data[..Math.Min(data.Length, 256)].IndexOf("?>"u8);
+            if (end < 0) return true;
+            var decl = System.Text.Encoding.ASCII.GetString(data[..end]);
+            var enc = System.Text.RegularExpressions.Regex.Match(decl, @"encoding\s*=\s*[""']([^""']*)[""']");
+            if (enc.Success && enc.Groups[1].Value.ToLowerInvariant() is not ("utf-8" or "utf8" or "us-ascii" or "ascii")) return true;
+        }
+        for (int i = data.IndexOf("<!"u8); i >= 0; )
+        {
+            if (data.Length - i >= 9 && System.Text.Encoding.ASCII.GetString(data.Slice(i + 2, 7)).Equals("DOCTYPE", StringComparison.OrdinalIgnoreCase)) return true;
+            int next = data[(i + 2)..].IndexOf("<!"u8);
+            i = next < 0 ? -1 : i + 2 + next;
+        }
+        return false;
     }
 
     /// <summary>
