@@ -496,7 +496,7 @@ internal static class PdfActions
     {
         byte[] bytes = SafeFile.ReadAll(input);
         int count;
-        using (var ms = new MemoryStream(bytes)) count = PDFtoImage.Conversion.GetPageCount(ms);
+        using (var ms = new MemoryStream(bytes)) lock (Pdfium.Gate) count = PDFtoImage.Conversion.GetPageCount(ms);
         if (count < 1) throw new PdfFailure(NoPages());
 
         string folder = "";
@@ -518,7 +518,9 @@ internal static class PdfActions
         for (int i = 0; i < count; i++)
         {
             using var ms = new MemoryStream(bytes);
-            using SKBitmap bmp = PDFtoImage.Conversion.ToImage(ms, i, options: options);
+            SKBitmap page;
+            lock (Pdfium.Gate) page = PDFtoImage.Conversion.ToImage(ms, i, options: options);
+            using SKBitmap bmp = page;
             using var image = SKImage.FromBitmap(bmp);
             using var data = ext == "jpg" ? image.Encode(SKEncodedImageFormat.Jpeg, JpgQuality) : image.Encode(SKEncodedImageFormat.Png, 100);
             if (data is null) throw new InvalidOperationException($"page {i + 1} could not be encoded");
