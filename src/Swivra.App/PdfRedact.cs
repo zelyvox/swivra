@@ -14,13 +14,15 @@ using UglyToad.PdfPig.Tokens;
 namespace Swivra.App;
 
 /// <summary>
-/// Real redaction of what the radar finds. PdfPig locates the matches (letter boxes, note texts, form field values),
-/// PDFium renders every page as it is displayed (crop, rotation, notes and filled-in fields included), opaque boxes are
+/// Real redaction of what the radar finds. PDFium first flattens a copy of the file: every note and form field is
+/// burned into its page as it is displayed. PdfPig locates the matches in that copy's page content, PDFium renders
+/// the copy's pages without notes or form fields (so what is drawn is exactly what was searched), opaque boxes are
 /// painted into the pixels and the pages are written as images into a brand-new PDF (PDFsharp).
 /// Nothing of the original text, metadata, annotations or form fields survives, so there is nothing to extract.
-/// Embedded images are not read (no OCR): the outcome counts those pages so the user is told to check them.
-/// A note whose text cannot be read (a stamp, ink or signature that is only a drawing) is left out of the output
-/// and counted too: drawing it could show a number nobody searched.
+/// Note texts and field values that are not shown (a closed pop-up, a field without an appearance) are searched too:
+/// a match there still counts and still produces the image-only file, which cannot carry them.
+/// Embedded images are not read (no OCR) and letters without a Unicode value cannot be searched: the outcome
+/// counts those pages so the user is told to check them.
 /// </summary>
 internal static class PdfRedact
 {
@@ -34,9 +36,12 @@ internal static class PdfRedact
     private const double MinImageLong = 30, MinImageShort = 6;
 
     /// <param name="Items">Number of matches covered (page text, notes and form fields).</param>
+    /// <param name="Written">True when the redacted file was written: there were matches, or notes had to be left out.</param>
     /// <param name="ImagePages">Pages with images large enough to hold text: they cannot be checked without OCR.</param>
-    /// <param name="NotePages">Pages with notes whose text could not be read (stamp, ink, signature...): left out of the output.</param>
-    public sealed record Outcome(int Items, int ImagePages, int NotePages);
+    /// <param name="UnreadPages">Pages with letters that have no Unicode value (Type 3 or broken fonts): drawn, but not searchable.</param>
+    /// <param name="LeftOutPages">The file could not be flattened: pages whose visible notes and form fields were left out of the output.</param>
+    /// <param name="NoLookPages">Pages with visible notes or form fields that have no appearance of their own: flattening drops them.</param>
+    public sealed record Outcome(int Items, bool Written, int ImagePages, int UnreadPages, int LeftOutPages, int NoLookPages);
 
     /// <summary>PDFium drew a page at a different size than the page box the boxes were measured in: painting would miss.</summary>
     public sealed class AlignmentException(int page) : Exception($"rendered size of page {page} does not match its page box")
@@ -44,62 +49,57 @@ internal static class PdfRedact
         public int Page { get; } = page;
     }
 
-    /// <summary>Everything needed to paint one page: displayed size in points, the boxes to black out and the unread notes to leave out (origin top-left).</summary>
-    private sealed record PageBoxes(double W, double H, List<XRect> Boxes, List<XRect> LeaveOut);
+    /// <summary>Everything needed to paint one page: displayed size in points and the boxes to black out (origin top-left).</summary>
+    private sealed record PageBoxes(double W, double H, List<XRect> Boxes);
 
     /// <summary>
     /// Finds matches on every page; when there are any, writes the redacted image-only PDF to <paramref name="target"/>.
-    /// With no matches nothing is written and Items is 0.
+    /// With no matches nothing is written, unless the file could not be flattened and notes or form fields had to be
+    /// left out: then the output is the only copy in which everything shown was searched.
     /// </summary>
     public static Outcome Hide(string input, string target)
     {
-        byte[] bytes = SafeFile.ReadAll(input);
+        byte[] original = SafeFile.ReadAll(input);
+        byte[]? flat = Pdfium.Flatten(original);
 
         var perPage = new List<PageBoxes>();
-        int items = 0, imagePages = 0, notePages = 0;
-        using (var doc = PigDocument.Open(bytes))
+        int items = 0, imagePages = 0, unreadPages = 0, leftOutPages = 0, noLookPages = 0;
+        using (var orig = PigDocument.Open(original))
+        using (var copy = OpenCopy(flat, orig.NumberOfPages))
         {
-            foreach (Page page in doc.GetPages())
+            if (copy is null) flat = null;
+            PigDocument drawn = flat is null ? orig : copy!;
+            for (int n = 1; n <= orig.NumberOfPages; n++)
             {
-                var map = PageMap.For(doc, page);
-                var (boxes, count) = Locate(page, map);
-                var leaveOut = new List<XRect>();
-                int noteCount = LocateNotes(doc, page, map, boxes, leaveOut);
-                items += count + noteCount;
-                if (leaveOut.Count > 0) notePages++;
+                // Page content comes from the copy that is drawn; note texts and field values from the original,
+                // where the notes still are (flattening removes them from the copy).
+                Page page = drawn.GetPage(n), source = flat is null ? page : orig.GetPage(n);
+                var map = PageMap.For(drawn, page);
+                var (boxes, count, found) = Locate(page, map);
+                var notes = ScanNotes(orig, source, flat is null ? map : PageMap.For(orig, source), boxes, found);
+                items += count + notes.Hits;
+                if (notes.Visible && flat is null) leftOutPages++;
+                if (notes.NoLook && flat is not null) noLookPages++;
+                if (HasUnreadableLetters(page)) unreadPages++;
                 if (page.GetImages().Any(CanHoldText)) imagePages++;
-                perPage.Add(new PageBoxes(map.Width, map.Height, boxes, leaveOut));
+                perPage.Add(new PageBoxes(map.Width, map.Height, boxes));
             }
         }
-        if (items == 0) return new Outcome(0, imagePages, notePages);
+        bool written = items > 0 || leftOutPages > 0;
+        if (!written) return new Outcome(0, false, imagePages, unreadPages, 0, noLookPages);
 
         using var output = new PdfSharp.Pdf.PdfDocument();
         output.Info.Creator = "Swivra";
-        // Notes and filled-in fields are drawn: they were searched above, and dropping them would lose real content.
-        var withNotes = new PDFtoImage.RenderOptions(Dpi: Dpi, WithAnnotations: true, WithFormFill: true);
-        var pageOnly = new PDFtoImage.RenderOptions(Dpi: Dpi);
+        byte[] bytes = flat ?? original;
         for (int i = 0; i < perPage.Count; i++)
         {
             var pb = perPage[i];
-            using SKBitmap bmp = Render(bytes, i, withNotes, pb);
+            using SKBitmap bmp = Render(bytes, i, pb);
             double sx = bmp.Width / pb.W, sy = bmp.Height / pb.H;
             SKRect Px(XRect r) => SKRect.Create((float)(r.X * sx), (float)(r.Y * sy), (float)(r.Width * sx), (float)(r.Height * sy));
             using (var canvas = new SKCanvas(bmp))
             using (var paint = new SKPaint { Color = SKColors.Black, Style = SKPaintStyle.Fill, IsAntialias = false })
             {
-                if (pb.LeaveOut.Count > 0)
-                {
-                    // Unread notes: their area comes from a render without any notes, as if they were not there.
-                    using SKBitmap plain = Render(bytes, i, pageOnly, pb);
-                    using SKImage plainImage = SKImage.FromBitmap(plain);
-                    foreach (XRect r in pb.LeaveOut)
-                    {
-                        canvas.Save();
-                        canvas.ClipRect(Px(r));
-                        canvas.DrawImage(plainImage, 0, 0, SKSamplingOptions.Default);
-                        canvas.Restore();
-                    }
-                }
                 foreach (XRect b in pb.Boxes)
                     canvas.DrawRect(Px(b), paint);
             }
@@ -116,17 +116,41 @@ internal static class PdfRedact
             gfx.DrawImage(xi, 0, 0, pb.W, pb.H);
         }
         output.Save(target);
-        return new Outcome(items, imagePages, notePages);
+        return new Outcome(items, true, imagePages, unreadPages, leftOutPages, noLookPages);
     }
+
+    /// <summary>The flattened copy for PdfPig, or null (notes and fields are then left out) when it does not read back whole.</summary>
+    private static PigDocument? OpenCopy(byte[]? flat, int pages)
+    {
+        if (flat is null) return null;
+        PigDocument? doc = null;
+        try
+        {
+            doc = PigDocument.Open(flat);
+            if (doc.NumberOfPages == pages) return doc;
+            Log.Write($"pdf flatten: {doc.NumberOfPages} pages read back, expected {pages}");
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            Log.Write($"pdf flatten: copy unreadable: {ex.Message}");
+        }
+        doc?.Dispose();
+        return null;
+    }
+
+    // Page content only: no notes and no form fields. In the flattened copy they are already part of the page;
+    // without flattening they were never searched as drawn, so they must not appear.
+    private static readonly PDFtoImage.RenderOptions PageOnly = new(Dpi: Dpi, WithAnnotations: false, WithFormFill: false);
 
     /// <summary>
     /// One page as PDFium draws it: its crop area with /Rotate applied, where the boxes were measured. If the size
     /// disagrees, PDFium saw another page box and every box would land in the wrong place, so the work stops.
     /// </summary>
-    private static SKBitmap Render(byte[] bytes, int index, PDFtoImage.RenderOptions options, PageBoxes pb)
+    private static SKBitmap Render(byte[] bytes, int index, PageBoxes pb)
     {
         using var ms = new MemoryStream(bytes);
-        SKBitmap bmp = PDFtoImage.Conversion.ToImage(ms, index, options: options);
+        SKBitmap bmp;
+        lock (Pdfium.Gate) bmp = PDFtoImage.Conversion.ToImage(ms, index, options: PageOnly);
         double ew = pb.W * Dpi / 72, eh = pb.H * Dpi / 72;
         if (Math.Abs(bmp.Width - ew) > Math.Max(2, ew * 0.005) || Math.Abs(bmp.Height - eh) > Math.Max(2, eh * 0.005))
         {
@@ -231,65 +255,76 @@ internal static class PdfRedact
             && Math.Max(pw, ph) >= MinImageLong && Math.Min(pw, ph) >= MinImageShort;
     }
 
-    // Notes whose look comes only from their own text (searched below) or carries no text at all.
-    private static readonly HashSet<AnnotationType> TextOrPlainNotes = new()
-    {
-        AnnotationType.Text, AnnotationType.FreeText, AnnotationType.Link, AnnotationType.Popup, AnnotationType.Widget,
-        AnnotationType.Highlight, AnnotationType.Underline, AnnotationType.Squiggly, AnnotationType.StrikeOut,
-    };
+    /// <param name="Hits">Matches in note texts and field values that the page content does not already show.</param>
+    /// <param name="Visible">The page has notes or form fields that are drawn when the page is displayed.</param>
+    /// <param name="NoLook">Some of them have no appearance of their own: flattening, which burns appearances only, drops them.</param>
+    private readonly record struct NoteScan(int Hits, bool Visible, bool NoLook);
 
     /// <summary>
-    /// Searches the notes and form fields of a page: note text (/Contents, rich text /RC) and field values (/V, inherited from
-    /// parent fields, list options, button captions). A note or field with a match is blacked out whole and counts its matches.
-    /// A visible note drawn from an appearance whose text is not known (stamp, ink, shape, signature) goes to
-    /// <paramref name="leaveOut"/>: it is not drawn, since what it shows was never searched.
+    /// Searches the notes and form fields of a page: note text (/Contents, rich text /RC) and field values (/V, /DV and
+    /// list options, inherited from parent fields, rich values, button captions). What they show is in the flattened
+    /// page content and searched there; this finds what is not shown (a closed pop-up, a field without an appearance,
+    /// a default value) so such a file is never called clean. A match already found in the page content is not counted
+    /// twice. A visible note or field with a match is also blacked out whole where it sits.
     /// </summary>
-    private static int LocateNotes(PigDocument doc, Page page, PageMap map, List<XRect> boxes, List<XRect> leaveOut)
+    private static NoteScan ScanNotes(PigDocument doc, Page page, PageMap map, List<XRect> boxes, HashSet<string> found)
     {
         int count = 0;
+        bool visible = false, noLook = false;
         foreach (Annotation a in page.GetAnnotations())
         {
             var dict = a.AnnotationDictionary;
             var texts = new List<string>();
-            bool unread = false;
             if (!string.IsNullOrEmpty(a.Content)) texts.Add(a.Content);
             if (TextOf(doc, Get(doc, dict, "RC"), out string? rich)) texts.Add(StripMarkup(rich!));
-            else if (Get(doc, dict, "RC") is not null) unread = true;
-
-            bool signature = false;
             if (a.Type == AnnotationType.Widget)
             {
-                signature = Inherited(doc, dict, "FT") is NameToken { Data: "Sig" };
-                foreach (string key in new[] { "V", "RV", "Opt" })
-                {
-                    var value = Inherited(doc, dict, key);
-                    if (value is null) continue;
-                    if (TextOf(doc, value, out string? v)) texts.Add(key == "RV" ? StripMarkup(v!) : v!);
-                    else unread = true;
-                }
+                foreach (string key in new[] { "V", "DV", "RV", "Opt" })
+                    if (TextOf(doc, Inherited(doc, dict, key), out string? v)) texts.Add(key == "RV" ? StripMarkup(v!) : v!);
                 if (Resolve(doc, Get(doc, dict, "MK")) is DictionaryToken mk)
                     foreach (string key in new[] { "CA", "RC", "AC" })
                         if (TextOf(doc, Get(doc, mk, key), out string? caption)) texts.Add(caption!);
             }
 
-            int hits = texts.Sum(t => Radar.FindAll(t).Count);
+            int hits = 0;
+            foreach (string t in texts)
+                foreach (var h in Radar.FindAll(t))
+                    if (found.Add(Key(t, h))) hits++;
             count += hits;
+
             if ((a.Flags & (AnnotationFlags.Hidden | AnnotationFlags.NoView)) != 0) continue;   // not drawn
-            if (a.HasNormalAppearance && (signature || !TextOrPlainNotes.Contains(a.Type))) unread = true;
-            if (hits == 0 && !unread) continue;
-            // A NoRotate / NoZoom note is drawn from its corner at its own size and angle, not stretched over its
-            // rectangle: on a turned or scaled page it can stick out, so its area is widened by its size each way.
-            XRect r = map.Map(a.Rectangle);
-            if ((a.Flags & (AnnotationFlags.NoRotate | AnnotationFlags.NoZoom)) != 0)
-            {
-                double grow = Math.Max(r.Width, r.Height);
-                r = new XRect(r.X - grow, r.Y - grow, r.Width + 2 * grow, r.Height + 2 * grow);
-            }
-            r = Pad(r, map.Width, map.Height);
-            if (hits > 0) boxes.Add(r);
-            else leaveOut.Add(r);
+            // A link or pop-up without an appearance of its own draws nothing on the page.
+            bool draws = a.HasNormalAppearance || a.Type is not (AnnotationType.Link or AnnotationType.Popup);
+            if (!draws) continue;
+            visible = true;
+            if (!a.HasNormalAppearance) noLook = true;
+            if (texts.Any(t => Radar.FindAll(t).Count > 0)) boxes.Add(Pad(map.Map(a.Rectangle), map.Width, map.Height));
         }
-        return count;
+        return new NoteScan(count, visible, noLook);
+    }
+
+    /// <summary>A match as kind plus its letters and digits only, so the same number spelled with other separators is one item.</summary>
+    private static string Key(string text, Radar.Hit h) =>
+        h.Kind + ":" + new string(text.AsSpan(h.Index, h.Length).ToArray().Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    /// <summary>
+    /// True when the page draws letters PdfPig cannot turn into text (no value, a control character, U+FFFD or a
+    /// private-use code: Type 3 or embedded fonts without a Unicode map). They are drawn but cannot be searched.
+    /// </summary>
+    private static bool HasUnreadableLetters(Page page)
+    {
+        foreach (Letter l in page.Letters)
+        {
+            if (string.IsNullOrEmpty(l.Value)) return true;
+            foreach (Rune r in l.Value.EnumerateRunes())
+            {
+                if (r.Value == 0xFFFD) return true;
+                var cat = Rune.GetUnicodeCategory(r);
+                if (cat == System.Globalization.UnicodeCategory.PrivateUse) return true;
+                if (cat == System.Globalization.UnicodeCategory.Control && !Rune.IsWhiteSpace(r)) return true;
+            }
+        }
+        return false;
     }
 
     private static IToken? Get(PigDocument doc, DictionaryToken dict, string key) =>
@@ -352,15 +387,17 @@ internal static class PdfRedact
     /// The text is rebuilt from the letters in drawing order (a space wherever the letters are not neighbours),
     /// so it works for rotated pages and for IBANs or phone numbers written with spaces; each matched character maps back to its letter box.
     /// </summary>
-    private static (List<XRect> Boxes, int Count) Locate(Page page, PageMap map)
+    private static (List<XRect> Boxes, int Count, HashSet<string> Found) Locate(Page page, PageMap map)
     {
         var rects = new List<PdfRectangle?>();   // one entry per character of the text; null for separators
         string text = PageText(page, rects);
 
         var boxes = new List<XRect>();
         var hits = Radar.FindAll(text);
+        var found = new HashSet<string>();
         foreach (var hit in hits)
         {
+            found.Add(Key(text, hit));
             XRect? run = null;
             for (int i = hit.Index; i < hit.Index + hit.Length; i++)
             {
@@ -375,7 +412,7 @@ internal static class PdfRedact
             }
             if (run is XRect last) boxes.Add(Pad(last, map.Width, map.Height));
         }
-        return (boxes, hits.Count);
+        return (boxes, hits.Count, found);
     }
 
     /// <summary>Page text rebuilt from the letters in drawing order (also used for the text-only Word export of rotated pages); <paramref name="rects"/> gets one box per character.</summary>
