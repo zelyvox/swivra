@@ -486,7 +486,8 @@ internal static class PdfActions
             created.Add(single);
         }
 
-        var options = new PDFtoImage.RenderOptions(Dpi: RenderDpi);
+        // The page as it is seen: notes and filled-in form fields are drawn too.
+        var options = new PDFtoImage.RenderOptions(Dpi: RenderDpi, WithAnnotations: true, WithFormFill: true);
         for (int i = 0; i < count; i++)
         {
             using var ms = new MemoryStream(bytes);
