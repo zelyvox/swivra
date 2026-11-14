@@ -6,7 +6,8 @@ namespace Swivra.App;
 
 /// <summary>
 /// Looks for sensitive data inside a file before it is shared. Runs fully offline.
-/// v0: image EXIF (GPS, camera model), plain-text files and the text of the first PDF pages (TC kimlik no, IBAN, e-mail, phone).
+/// v0: image EXIF (GPS, camera model) and the text in an image's pixels (OCR), plain-text files and the text of the first
+/// PDF pages (TC kimlik no, IBAN, e-mail, phone).
 /// </summary>
 internal static partial class Radar
 {
@@ -35,12 +36,15 @@ internal static partial class Radar
 
     private static void ScanImage(string path, List<string> found)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         bool gps;
         string? model;
+        long pixels = 0; // unknown for the formats only WIC reads
         try
         {
             using var stream = File.OpenRead(path);
             using var img = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: false);
+            pixels = (long)img.Width * img.Height;
             var ids = img.PropertyIdList;
             gps = ids.Contains(0x0002) || ids.Contains(0x0004);
             model = ids.Contains(0x0110) ? Encoding.ASCII.GetString(img.GetPropertyItem(0x0110)!.Value ?? []).Trim('\0', ' ') : null;
@@ -55,6 +59,39 @@ internal static partial class Radar
         if (gps) found.Add(Lang.T("Konum bilgisi", "Location"));
         if (model is not null)
             found.Add(model.Length > 0 ? Lang.T($"Cihaz modeli: {model}", $"Device model: {model}") : Lang.T("Cihaz modeli", "Device model"));
+        ScanImageText(path, pixels, clock, found);
+    }
+
+    // The radar runs while the file is still being dragged: the whole image scan, decoding included, gets this long.
+    // A large photo that does not fit simply adds no text findings.
+    private static readonly TimeSpan ImageTextBudget = TimeSpan.FromSeconds(3);
+    // Read at most this many pixels: a 4000x3000 photo takes 5 s at full size and about 1.6 s at 3 MP, where text under
+    // ~20 px in it is lost. A dense A4 scan at 300 DPI takes about 3 s even here (2.7 s at 2.5 MP, with its small print
+    // lost), so it may run out of budget; fewer pixels would not save it.
+    private const int ImageTextMaxPixels = 3_000_000;
+    // Decoding alone would take more memory than the scan is worth (a 50 MP photo is fine, a crafted 30000x30000 PNG is not).
+    private const long ImageTextMaxSourcePixels = 64_000_000;
+
+    /// <summary>Text in the pixels (a photographed ID card, a screenshot of a receipt), read by OCR with Radar's patterns.</summary>
+    private static void ScanImageText(string path, long pixels, System.Diagnostics.Stopwatch clock, List<string> found)
+    {
+        if (pixels > ImageTextMaxSourcePixels)
+        {
+            Log.Write($"radar image text skipped {path}: {pixels} pixels");
+            return;
+        }
+        Ocr.Page? page;
+        try
+        {
+            using var bmp = ImageIO.Load(path, out PropertyItem[] _);
+            page = Ocr.Read(bmp, ImageTextBudget - clock.Elapsed, maxPixels: ImageTextMaxPixels);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            Log.Write($"radar image text skipped {path}: {ex.Message}");
+            return;
+        }
+        if (page is not null) AddKinds(Ocr.FindSensitive(page).Select(f => f.Kind), found); // null: not read, as before OCR
     }
 
     private const int MaxMetaChunkBytes = 8 * 1024 * 1024; // one metadata chunk or segment read into memory, at most
@@ -273,13 +310,20 @@ internal static partial class Radar
         }
     }
 
-    public static void ScanText(string text, List<string> found)
+    public static void ScanText(string text, List<string> found) => AddKinds(FindAll(text).Select(h => h.Kind), found);
+
+    /// <summary>One label per kind found, in a fixed order, none twice.</summary>
+    private static void AddKinds(IEnumerable<HitKind> hits, List<string> found)
     {
-        var kinds = FindAll(text).Select(h => h.Kind).ToHashSet();
-        if (kinds.Contains(HitKind.Tc)) found.Add(Lang.T("TC kimlik no", "Turkish ID number"));
-        if (kinds.Contains(HitKind.Iban)) found.Add("IBAN");
-        if (kinds.Contains(HitKind.Email)) found.Add(Lang.T("E-posta", "Email"));
-        if (kinds.Contains(HitKind.Phone)) found.Add(Lang.T("Telefon", "Phone"));
+        var kinds = hits.ToHashSet();
+        void Add(HitKind kind, string label)
+        {
+            if (kinds.Contains(kind) && !found.Contains(label)) found.Add(label);
+        }
+        Add(HitKind.Tc, Lang.T("TC kimlik no", "Turkish ID number"));
+        Add(HitKind.Iban, "IBAN");
+        Add(HitKind.Email, Lang.T("E-posta", "Email"));
+        Add(HitKind.Phone, Lang.T("Telefon", "Phone"));
     }
 
     /// <summary>Spans (start, length) of every sensitive item in the text, for masking.</summary>
