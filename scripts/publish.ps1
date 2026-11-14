@@ -34,7 +34,8 @@ if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }
 # ONNX Runtime also drops its import libraries (.lib); they are only for native linking.
 Get-ChildItem $app -Recurse -Include *.pdb, *.xml, *.lib | Remove-Item -Force
 
-# License texts that must travel with the binaries (see THIRD-PARTY-NOTICES.md).
+# License texts that must travel with the binaries (see THIRD-PARTY-NOTICES.md). A missing one stops the
+# release: a zip without them must not be published.
 $nuget = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path $HOME '.nuget/packages' }
 $dotnetRoot = Split-Path -Parent (Get-Command dotnet).Source
 $licenses = Join-Path $app 'licenses'
@@ -54,7 +55,8 @@ $licenseFiles = @(
 )
 foreach ($f in $licenseFiles) {
     $src = Join-Path $nuget $f.From
-    if (Test-Path $src) { Copy-Item $src (Join-Path $licenses $f.To) } else { Write-Warning "License file not found: $src" }
+    if (-not (Test-Path $src)) { throw "License file not found: $src (a package version changed? update the list above)" }
+    Copy-Item $src (Join-Path $licenses $f.To)
 }
 # Texts that have no file inside the NuGet packages (PdfPig, PDFium and its bundled code, PDFsharp, model weights, ...) are kept in the repo.
 $thirdParty = Join-Path $root 'third-party-licenses'
@@ -62,7 +64,8 @@ if (-not (Test-Path $thirdParty)) { throw "third-party-licenses/ is missing: $th
 Copy-Item (Join-Path $thirdParty '*') $licenses -Recurse -Force
 foreach ($f in @('LICENSE.txt', 'ThirdPartyNotices.txt')) {
     $src = Join-Path $dotnetRoot $f
-    if (Test-Path $src) { Copy-Item $src (Join-Path $licenses "dotnet-$f") } else { Write-Warning "License file not found: $src" }
+    if (-not (Test-Path $src)) { throw "License file not found: $src" }
+    Copy-Item $src (Join-Path $licenses "dotnet-$f")
 }
 
 if (-not (Test-Path (Join-Path $app 'Swivra.exe'))) { throw 'Swivra.exe is missing from the publish output' }
