@@ -528,6 +528,9 @@ internal static class PdfRedact
     {
         private const int MaxDepth = 32;
 
+        /// <summary>Resources in effect: a form's own, then the ones it was drawn with, out to the page's.</summary>
+        private sealed record Scope(DictionaryToken Dict, Scope? Outer);
+
         /// <summary>Linear part of a PDF matrix [a b c d]; translation never changes a distance.</summary>
         private readonly record struct Lin(double A, double B, double C, double D)
         {
@@ -543,7 +546,7 @@ internal static class PdfRedact
 
         public static double Of(PigDocument doc, Page page)
         {
-            DictionaryToken? resources = InheritedDict(doc, page.Dictionary, NameToken.Resources);
+            Scope? resources = InheritedDict(doc, page.Dictionary, NameToken.Resources) is DictionaryToken r ? new Scope(r, null) : null;
             byte[]? content;
             try
             {
@@ -557,7 +560,7 @@ internal static class PdfRedact
             return Walk(doc, content, resources, new State(0, 0, Lin.Identity), 0, new HashSet<IndirectReference>());
         }
 
-        private static double Walk(PigDocument doc, byte[] content, DictionaryToken? resources, State start, int depth, HashSet<IndirectReference> open)
+        private static double Walk(PigDocument doc, byte[] content, Scope? resources, State start, int depth, HashSet<IndirectReference> open)
         {
             // Nothing can disagree in a stream that starts in agreement and never sets a rise or draws a form.
             if (start.Agrees && !Has(content, "Ts") && !Has(content, "Do")) return 0;
@@ -597,10 +600,14 @@ internal static class PdfRedact
                                 drift = Math.Max(drift, Math.Abs(s.PigRise - s.DrawnRise) * Math.Sqrt(full.C * full.C + full.D * full.D));
                             }
                             break;
-                        case "Do" when operands.Count > 0 && operands[^1] is NameToken name:
-                            double inner = Form(doc, resources, name, s, depth, open);
-                            if (double.IsNaN(inner)) return double.NaN;
-                            drift = Math.Max(drift, inner);
+                        case "Do":
+                            // Every name given: with more than one, PdfPig draws the first and PDFium the last.
+                            foreach (NameToken name in operands.OfType<NameToken>())
+                            {
+                                double inner = Form(doc, resources, name, s, depth, open);
+                                if (double.IsNaN(inner)) return double.NaN;
+                                drift = Math.Max(drift, inner);
+                            }
                             break;
                     }
                     operands.Clear();
@@ -614,14 +621,17 @@ internal static class PdfRedact
         }
 
         /// <summary>A form XObject drawn with state <paramref name="s"/>: PdfPig keeps the rise, scaling and leading, PDFium starts at 0, 100 and 0.</summary>
-        private static double Form(PigDocument doc, DictionaryToken? resources, NameToken name, State s, int depth, HashSet<IndirectReference> open)
+        private static double Form(PigDocument doc, Scope? resources, NameToken name, State s, int depth, HashSet<IndirectReference> open)
         {
+            bool matters = s.PigRise != 0 || s.PigTz != 100 || s.PigTL != 0;
+            // Looked up like both libraries do: the form's own resources first, then the ones it was drawn with, up to the page's.
             IToken? entry = null;
-            if (resources is not null && Get(doc, resources, "XObject") is DictionaryToken xobjects) xobjects.TryGet(name, out entry);
+            for (Scope? r = resources; r is not null && entry is null; r = r.Outer)
+                if (Get(doc, r.Dict, "XObject") is DictionaryToken xobjects) xobjects.TryGet(name, out entry);
+            if (entry is null) return matters ? double.NaN : 0;   // not found: where it is drawn, if anywhere, is unknown
             var reference = entry as IndirectReferenceToken;
             if (Resolve(doc, entry) is not StreamToken form || Get(doc, form.StreamDictionary, "Subtype") is not NameToken { Data: "Form" })
                 return 0;   // an image, or nothing: no text
-            bool matters = s.PigRise != 0 || s.PigTz != 100 || s.PigTL != 0;
             if (depth >= MaxDepth || (reference is not null && open.Contains(reference.Data)))
                 return matters ? double.NaN : 0;   // PdfPig does not draw past this either; refuse only when it could matter
             byte[] content;
@@ -637,7 +647,7 @@ internal static class PdfRedact
             if (Get(doc, form.StreamDictionary, "Matrix") is ArrayToken { Length: 6 } mt
                 && mt.Data.Select(t => Resolve(doc, t)).OfType<NumericToken>().Select(t => t.Double).ToArray() is { Length: 6 } m)
                 ctm = new Lin(m[0], m[1], m[2], m[3]).Times(ctm);
-            var own = Get(doc, form.StreamDictionary, "Resources") as DictionaryToken ?? resources;
+            Scope? own = Get(doc, form.StreamDictionary, "Resources") is DictionaryToken d ? new Scope(d, resources) : resources;
             if (reference is not null) open.Add(reference.Data);
             try
             {
