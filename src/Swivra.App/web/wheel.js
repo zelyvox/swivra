@@ -212,6 +212,8 @@ function renderCenter() {
     subEl.textContent = h.ready ? h.prev : t('Yakında', 'Coming soon');
     const pos = S.chain.findIndex(c => c.id === h.id);
     if (pos >= 0) setHint(t(`Zincirde ${pos + 1}. adım · bırak`, `Step ${pos + 1} in chain · drop`), 'done');
+    // The phone gets the files as they are, so it never runs after a chain (the host refuses it too).
+    else if (S.chain.length && h.id === 'tel') setHint(t('Zincirle olmaz: Telefona tek başına', 'Not with a chain: To phone runs alone'));
     else if (S.chain.length) setHint(t(`Bırak: ${S.chain.length + 1} adım birden`, `Drop: ${S.chain.length + 1} steps at once`));
     else if (h.ready && !h.tool) setHint(t('Beklersen zincire eklenir', 'Hold to add to chain'), 'waiting');
   } else if (S.chain.length) {
@@ -291,6 +293,9 @@ const handlers = {
     document.documentElement.style.setProperty('--backdrop', m.src ? `url("${m.src}")` : 'none');
   },
   open(m) {
+    // The last close may still have its hide pending, and a panel may be left up: neither may touch this wheel.
+    clearTimeout(hideTimer);
+    Panel.reset();
     Object.assign(S, { open: true, mode: m.mode || 'convert', file: null, count: 0, sens: [], chain: [], busy: false });
     wheel.className = 'wheel';
     badgeEl.textContent = '';
@@ -316,7 +321,8 @@ const handlers = {
   radar(m) {
     S.sens = m.sens || [];
     wheel.classList.toggle('sensitive', S.sens.length > 0);
-    renderCenter();
+    // A slow scan can land after the drop: the center then says "Working" or the result, which it must keep.
+    if (!S.busy) renderCenter();
   },
   over(m) {
     if (!S.open || S.busy) return;
@@ -344,7 +350,8 @@ const handlers = {
       subEl.textContent = t('Açılıyor', 'Opening');
       setHint('');
       Panel.steps = steps;
-      post({ type: 'tool', tool: cur.id });
+      // The host needs the chain to refuse a tool that cannot follow one (To phone) with a clear result.
+      post({ type: 'tool', tool: cur.id, steps });
       return;
     }
     if (steps[steps.length - 1] !== cur.id) steps.push(cur.id);
@@ -388,9 +395,17 @@ const handlers = {
     S.open = false;
     clearTimeout(dwellTimer);
     wheel.classList.add('closing');
-    setTimeout(() => { wheel.className = 'wheel hidden'; }, 170);
+    hideLater(() => { wheel.className = 'wheel hidden'; });
   }
 };
+
+// The hide that follows a closing animation. Only one is pending at a time and open() cancels it,
+// or a wheel opened within those 170 ms would be hidden by the old one's timer.
+let hideTimer = 0;
+function hideLater(fn) {
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => { hideTimer = 0; fn(); }, 170);
+}
 
 // ---------- tool panels ----------
 // A `tool` slice that gets the drop grows the wheel into a panel. Each tool lays out its own
@@ -436,7 +451,17 @@ const Panel = {
     if (this.tool.closed) this.tool.closed();
     panelEl.classList.remove('opening');
     panelEl.classList.add('closing');
-    setTimeout(() => { panelEl.className = 'panel hidden'; wheel.className = 'wheel hidden'; baseW = 340; fit(); }, 170);
+    hideLater(() => { panelEl.className = 'panel hidden'; wheel.className = 'wheel hidden'; baseW = 340; fit(); });
+  },
+
+  // At once, no animation: a new wheel opens and nothing of an earlier panel may stay (its size, its body).
+  reset() {
+    if (this.open) {
+      this.open = false;
+      if (this.tool && this.tool.closed) this.tool.closed();
+    }
+    panelEl.className = 'panel hidden';
+    baseW = 340; fit();
   },
 
   run(extra) {
