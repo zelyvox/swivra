@@ -540,7 +540,7 @@ internal static partial class OfficeConvert
                 }
                 report.Links += cut;
                 changed |= cut > 0;
-                changed |= CutXmlLinks(xml, PartDir(name), partNames, report);
+                changed |= CutXmlLinks(xml, PartDir(name), partNames, report, MayBeSvg(name, bytes, xml));
                 foreach (var chunk in xml.Descendants().Where(e => e.Name.LocalName == "altChunk").ToList())
                 {
                     // Word reads r:id only (the Strict one in a Strict part). Another "id" beside it, or none,
@@ -582,10 +582,13 @@ internal static partial class OfficeConvert
     /// importers follow them. Every href or src that does not name a part of this package is pointed at
     /// <see cref="Blocked"/>; inline raster pictures (data:image/...) and cid: names, which reach nothing,
     /// stay. xml:base and xml-stylesheet instructions go; CSS that loads from an address is refused, in a
-    /// style element or any attribute, whatever its namespace: an SVG importer may take a picture without
-    /// (or under another) namespace as SVG all the same, and url(#id) inside the picture still passes.
+    /// style element or an attribute that takes CSS (style, and the presentation attributes that take
+    /// url()), whatever its namespace. In a part that may reach an SVG importer (<paramref name="svg"/>,
+    /// see <see cref="MayBeSvg"/>) every attribute counts: the importer may take a picture without (or
+    /// under another) namespace as SVG all the same. url(#id) inside the picture still passes. Elsewhere
+    /// other attributes are left alone, so alt text that mentions "url(" does not refuse the document.
     /// </summary>
-    private static bool CutXmlLinks(XDocument xml, string partDir, HashSet<string> names, Cleaning report)
+    private static bool CutXmlLinks(XDocument xml, string partDir, HashSet<string> names, Cleaning report, bool svg)
     {
         bool changed = false;
         foreach (var pi in xml.DescendantNodes().OfType<XProcessingInstruction>().Where(p => p.Target.Equals("xml-stylesheet", StringComparison.OrdinalIgnoreCase)).ToList())
@@ -605,8 +608,8 @@ internal static partial class OfficeConvert
                     changed = true;
                     continue;
                 }
-                // style="", and SVG presentation attributes (fill, filter, mask, clip-path, marker-*) that take url().
-                if (FetchesCss(attr.Value))
+                // style="" (VML's too), and SVG presentation attributes (fill, filter, mask, clip-path, marker-*) that take url().
+                if ((svg || CssAttributes.Contains(attr.Name.LocalName)) && FetchesCss(attr.Value))
                     throw new UnsafeDocumentException($"attribute {attr.Name.LocalName} that loads from an address");
                 if (attr.Name.LocalName is not ("href" or "src")) continue;
                 string href = attr.Value.Trim();
@@ -617,6 +620,43 @@ internal static partial class OfficeConvert
             }
         }
         return changed;
+    }
+
+    // Attributes that carry CSS, by local name in any namespace: style, and the SVG presentation
+    // attributes whose value may be a url().
+    private static readonly HashSet<string> CssAttributes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "style", "fill", "stroke", "filter", "clip-path", "mask", "marker", "marker-start", "marker-mid", "marker-end", "cursor",
+    };
+
+    /// <summary>
+    /// A part that may reach an SVG importer: one named .svg, or one with "svg" anywhere in it, in any
+    /// case (an svg element in any namespace or none, "&lt;svg" in a comment or processing instruction:
+    /// LibreOffice picks its SVG filter by looking for that text). Searched in the bytes and in the parsed
+    /// document, so neither an encoding nor a character reference hides it.
+    /// </summary>
+    private static bool MayBeSvg(string name, byte[] bytes, XDocument xml)
+    {
+        if (name.EndsWith(".svg", StringComparison.OrdinalIgnoreCase)) return true;
+        for (int i = 0; i + 2 < bytes.Length; i++)
+            if ((bytes[i] | 0x20) == 's' && (bytes[i + 1] | 0x20) == 'v' && (bytes[i + 2] | 0x20) == 'g') return true;
+        foreach (var node in xml.DescendantNodes())
+        {
+            bool found = node switch
+            {
+                XElement e => Has(e.Name.LocalName) || Has(e.Name.NamespaceName)
+                    || e.Attributes().Any(a => Has(a.Name.LocalName) || Has(a.Name.NamespaceName) || Has(a.Value)),
+                XText t => Has(t.Value), // CDATA too
+                XComment c => Has(c.Value),
+                XProcessingInstruction p => Has(p.Target) || Has(p.Data),
+                XDocumentType d => Has(d.Name) || Has(d.PublicId) || Has(d.SystemId) || Has(d.InternalSubset),
+                _ => false,
+            };
+            if (found) return true;
+        }
+        return false;
+
+        static bool Has(string? s) => s is not null && s.Contains("svg", StringComparison.OrdinalIgnoreCase);
     }
 
     // A raster picture inline in the address itself; an inline SVG could link on, so it is not one.
