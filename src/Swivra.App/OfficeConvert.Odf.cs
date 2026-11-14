@@ -48,7 +48,17 @@ internal static partial class OfficeConvert
     // trusted signature is what could let macros run).
     private static readonly string[] CodeStorages = ["Basic/", "Scripts/", "Dialogs/", "Configurations2/"];
 
-    private static bool IsCodeStorage(string path) => CodeStorages.Any(c => path.StartsWith(c, StringComparison.OrdinalIgnoreCase));
+    private static bool IsCodeStorage(string path) => CodeStorageRoot(path) is not null;
+
+    /// <summary>"Object 1/Basic/" for "Object 1/Basic/Standard/Module1.xml": the code storage an entry is in, at any folder level.</summary>
+    private static string? CodeStorageRoot(string path)
+    {
+        var segs = path.Split('/');
+        for (int i = 0; i < segs.Length - 1; i++) // folders only: the last segment is the entry's own name
+            if (CodeStorages.Any(c => c.AsSpan(0, c.Length - 1).Equals(segs[i], StringComparison.OrdinalIgnoreCase)))
+                return string.Join('/', segs.Take(i + 1)) + "/";
+        return null;
+    }
 
     // "" is a plain folder (older OpenOffice lists "Pictures/" that way).
     private static bool SubDocumentOk(string mediaType) => mediaType is "" or
@@ -83,7 +93,72 @@ internal static partial class OfficeConvert
     private static void CleanOdf(string path, Cleaning report)
     {
         using var file = new FileStream(path, FileMode.Open, FileAccess.ReadWrite);
+        // Everything that only reads happens in a read-only pass: an archive opened for update keeps every
+        // entry it opens inflated in memory until it closes, so pictures are never opened there.
+        var (manifest, manifestBytes, xmlParts) = CheckOdf(file);
+        file.Position = 0;
         using var zip = new ZipArchive(file, ZipArchiveMode.Update);
+
+        // Code and signatures go as a whole; a storage counts once. A sub-document ("Object 1/") has its
+        // own Basic, Scripts and the rest, so they are found at any folder level.
+        var storages = zip.Entries.Select(e => CodeStorageRoot(e.FullName)).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (string storage in storages)
+        {
+            foreach (var e in zip.Entries.Where(e => e.FullName.StartsWith(storage, StringComparison.OrdinalIgnoreCase)).ToList()) e.Delete();
+            report.Macros++;
+        }
+        foreach (var e in zip.Entries.Where(e => ("/" + e.FullName).Contains("/META-INF/", StringComparison.OrdinalIgnoreCase)
+                     && e.FullName.EndsWith("signatures.xml", StringComparison.OrdinalIgnoreCase)).ToList())
+            e.Delete();
+
+        var names = zip.Entries.Select(e => e.FullName).ToHashSet(StringComparer.Ordinal);
+        foreach (var entry in zip.Entries.ToList())
+        {
+            string name = entry.FullName;
+            if (!xmlParts.Contains(name)) continue; // pictures and other binary parts, mimetype, the manifest
+            byte[] bytes = ReadCapped(entry, MaxChunkBytes) ?? throw new UnsafeDocumentException($"part {name} too large");
+            XDocument xml;
+            try
+            {
+                using var s = new MemoryStream(bytes);
+                xml = LoadXml(s);
+            }
+            catch (System.Xml.XmlException ex)
+            {
+                // Markup this parser rejects (an internal DTD entity, XML 1.1) may still be read by another
+                // parser, an SVG importer say, with whatever it hides: refused, never passed on uncleaned.
+                throw new UnsafeDocumentException($"part {name} is not well-formed XML ({ex.Message})");
+            }
+            bool changed = CleanOdfXml(xml, PartDir(name), names, report);
+            // Sub-documents have their own settings.xml.
+            if (name == "settings.xml" || name.EndsWith("/settings.xml", StringComparison.Ordinal)) changed |= CleanOdfSettings(xml, report);
+            // A DOCTYPE is dropped by the parser (never resolved here); writing the part back removes it, so an
+            // external DTD it names never reaches the office program's own parser, in whatever encoding.
+            if (MayHideDoctype(bytes)) changed = true;
+            if (changed) Overwrite(entry, SaveXml(xml));
+        }
+
+        // The manifest must match the package, or LibreOffice asks to repair it (and the conversion fails).
+        bool manifestChanged = MayHideDoctype(manifestBytes);
+        foreach (var fe in manifest.Descendants(OdfManifest + "file-entry").ToList())
+        {
+            string? full = (string?)fe.Attribute(OdfManifest + "full-path");
+            if (full is null or "/") continue;
+            bool exists = full.EndsWith('/') ? names.Any(n => n.StartsWith(full, StringComparison.Ordinal)) : names.Contains(full);
+            if (exists) continue;
+            fe.Remove();
+            manifestChanged = true;
+        }
+        if (manifestChanged) Overwrite(zip.GetEntry("META-INF/manifest.xml")!, SaveXml(manifest));
+    }
+
+    /// <summary>
+    /// The read-only checks of <see cref="CleanOdf"/>: limits, type, entry names, sub-documents, OLE and
+    /// nested packages. Returns the parsed manifest and the parts to read as XML.
+    /// </summary>
+    private static (XDocument Manifest, byte[] ManifestBytes, HashSet<string> XmlParts) CheckOdf(Stream file)
+    {
+        using var zip = new ZipArchive(file, ZipArchiveMode.Read, leaveOpen: true);
         try { CheckEntries(zip); }
         catch (InvalidDataException ex) { throw new UnsafeDocumentException(ex.Message); }
 
@@ -102,7 +177,8 @@ internal static partial class OfficeConvert
         }
 
         var manifestEntry = zip.GetEntry("META-INF/manifest.xml") ?? throw new UnsafeDocumentException("no manifest");
-        XDocument manifest = ParseOdfPart(manifestEntry);
+        byte[] manifestBytes = ReadCapped(manifestEntry, MaxChunkBytes) ?? throw new UnsafeDocumentException("manifest too large");
+        XDocument manifest = ParseOdfPart(manifestBytes, manifestEntry.FullName);
         if (manifest.Descendants(OdfManifest + "encryption-data").Any()) throw new UnsafeDocumentException("encrypted ODF");
         // A sub-document loads its own module: a spreadsheet brings formulas that fetch, a presentation its
         // sounds. Charts, formulas, drawings and text are what a text document embeds. The manifest may name
@@ -133,82 +209,43 @@ internal static partial class OfficeConvert
                 throw new UnsafeDocumentException($"embedded {type} at {entryPath}");
         // An OLE object (binary storage, or inline in the XML) cannot be looked into; on Windows LibreOffice
         // may start its server to draw it, and it can carry a link moniker to a share.
+        var head = new byte[8]; // one buffer for every entry (a stackalloc here would grow the stack per entry)
+        var xmlParts = new HashSet<string>(StringComparer.Ordinal);
         foreach (var e in zip.Entries.Where(e => !e.FullName.EndsWith('/')))
         {
-            Span<byte> head = stackalloc byte[8];
             int got;
             using (var s = e.Open()) got = s.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
-            if (got >= 8 && head.SequenceEqual(OleSignature)) throw new UnsafeDocumentException($"OLE object {e.FullName}");
+            if (got >= 8 && head.AsSpan().SequenceEqual(OleSignature)) throw new UnsafeDocumentException($"OLE object {e.FullName}");
             // A gzip part (an .svgz picture) is opened by the SVG importer by its content; it is not read here.
             if (got >= 2 && head[0] == 0x1F && head[1] == 0x8B) throw new UnsafeDocumentException($"compressed part {e.FullName}");
             // A package inside the package: real ODF stores sub-documents as folders, never as a nested ZIP.
             if (got >= 4 && head[0] == 'P' && head[1] == 'K' && head[2] == 3 && head[3] == 4) throw new UnsafeDocumentException($"nested package {e.FullName}");
-        }
 
-        // Code and signatures go as a whole; a storage counts once.
-        foreach (string storage in CodeStorages)
-        {
-            var inside = zip.Entries.Where(e => e.FullName.StartsWith(storage, StringComparison.OrdinalIgnoreCase)).ToList();
-            if (inside.Count == 0) continue;
-            foreach (var e in inside) e.Delete();
-            report.Macros++;
-        }
-        foreach (var e in zip.Entries.Where(e => e.FullName.StartsWith("META-INF/", StringComparison.OrdinalIgnoreCase)
-                     && e.FullName.EndsWith("signatures.xml", StringComparison.OrdinalIgnoreCase)).ToList())
-            e.Delete();
-
-        var names = zip.Entries.Select(e => e.FullName).ToHashSet(StringComparer.Ordinal);
-        foreach (var entry in zip.Entries.ToList())
-        {
-            string name = entry.FullName;
-            if (name == "mimetype" || name.EndsWith('/') || name.Equals("META-INF/manifest.xml", StringComparison.OrdinalIgnoreCase)) continue;
-            byte[] bytes = ReadCapped(entry, MaxChunkBytes) ?? throw new UnsafeDocumentException($"part {name} too large");
-            bool xmlByName = name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".rdf", StringComparison.OrdinalIgnoreCase);
-            if (!xmlByName && !LooksLikeXml(bytes)) continue; // pictures and other binary parts
-            XDocument xml;
-            try
+            string name = e.FullName;
+            if (name == "mimetype" || name.Equals("META-INF/manifest.xml", StringComparison.OrdinalIgnoreCase)) continue;
+            // XML by its name or its manifest type (such a part must parse), or by its first character.
+            bool xmlByName = name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".rdf", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith(".svg", StringComparison.OrdinalIgnoreCase)
+                || (folderTypes.TryGetValue(name, out string? partType) && partType.Split(';')[0].Trim().EndsWith("xml", StringComparison.OrdinalIgnoreCase));
+            bool looks = xmlByName;
+            if (!looks)
             {
-                using var s = new MemoryStream(bytes);
-                xml = LoadXml(s);
+                using var s = e.Open();
+                looks = LooksLikeXml(s);
             }
-            catch (System.Xml.XmlException ex)
-            {
-                // Markup this parser rejects (an internal DTD entity, XML 1.1) may still be read by another
-                // parser, an SVG importer say, with whatever it hides: refused, never passed on uncleaned.
-                throw new UnsafeDocumentException($"part {name} is not well-formed XML ({ex.Message})");
-            }
-            bool changed = CleanOdfXml(xml, PartDir(name), names, report);
-            // Sub-documents have their own settings.xml.
-            if (name == "settings.xml" || name.EndsWith("/settings.xml", StringComparison.Ordinal)) changed |= CleanOdfSettings(xml, report);
-            // A DOCTYPE is dropped by the parser (never resolved here); writing the part back removes it, so an
-            // external DTD it names never reaches the office program's own parser.
-            if (bytes.AsSpan().IndexOf("<!DOCTYPE"u8) >= 0) changed = true;
-            if (changed) Overwrite(entry, SaveXml(xml));
+            if (looks) xmlParts.Add(name);
         }
-
-        // The manifest must match the package, or LibreOffice asks to repair it (and the conversion fails).
-        bool manifestChanged = false;
-        foreach (var fe in manifest.Descendants(OdfManifest + "file-entry").ToList())
-        {
-            string? full = (string?)fe.Attribute(OdfManifest + "full-path");
-            if (full is null or "/") continue;
-            bool exists = full.EndsWith('/') ? names.Any(n => n.StartsWith(full, StringComparison.Ordinal)) : names.Contains(full);
-            if (exists) continue;
-            fe.Remove();
-            manifestChanged = true;
-        }
-        if (manifestChanged) Overwrite(manifestEntry, SaveXml(manifest));
+        return (manifest, manifestBytes, xmlParts);
     }
 
-    private static XDocument ParseOdfPart(ZipArchiveEntry entry)
+    private static XDocument ParseOdfPart(byte[] bytes, string name)
     {
-        byte[] bytes = ReadCapped(entry, MaxChunkBytes) ?? throw new UnsafeDocumentException($"part {entry.FullName} too large");
         try
         {
             using var s = new MemoryStream(bytes);
             return LoadXml(s);
         }
-        catch (System.Xml.XmlException ex) { throw new UnsafeDocumentException($"part {entry.FullName} is not well-formed XML ({ex.Message})"); }
+        catch (System.Xml.XmlException ex) { throw new UnsafeDocumentException($"part {name} is not well-formed XML ({ex.Message})"); }
     }
 
     private static byte[] SaveXml(XDocument xml)
