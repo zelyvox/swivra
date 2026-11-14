@@ -23,6 +23,9 @@ Copies of the license texts that ship with these packages are placed in the `lic
 | DocumentFormat.OpenXml and DocumentFormat.OpenXml.Framework | 3.5.1 | MIT | https://github.com/dotnet/Open-XML-SDK |
 | SharpZipLib (`ICSharpCode.SharpZipLib.dll`) | 1.4.2 | MIT | https://github.com/icsharpcode/SharpZipLib |
 | QRCoder (`QRCoder.dll`) | 1.8.1 | MIT | https://github.com/Shane32/QRCoder |
+| RapidOcrNet (`RapidOcrNet.dll`, OCR) | 4.2.0 | Apache-2.0, with a `NOTICE.txt` (see below) | https://github.com/BobLd/RapidOcrNet |
+| Clipper2 (`Clipper2Lib.dll`, used by RapidOcrNet) | 2.0.0 | BSL-1.0 (Boost Software License) | https://github.com/AngusJohnson/Clipper2 |
+| PaddleOCR PP-OCRv5 model weights (`models/v5/`: `ch_PP-OCRv5_mobile_det.onnx`, `latin_PP-OCRv5_rec_mobile_infer.onnx`, `ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx`, `ppocrv5_latin_dict.txt`; ONNX exports shipped inside the RapidOcrNet package) | PP-OCRv5 mobile; SHA-256 det `4D97C44A20D30A81AAD087D6A396B08F786C4635742AFC391F6621F5C6AE78AE`, rec `B20BD37C168A570F583AFBC8CD7925603890EFBCDC000A59E22C269D160B5F5A`, cls `54379AE5174D026780215FC748A7F31910DEE36818E63D49E17DC598ECC82DF7`, dict `7629FFD77277FD4093B556769752EE9F7C881754A8544C79A7C438CD9A93D1E6` | Apache-2.0 | https://github.com/PaddlePaddle/PaddleOCR, https://github.com/RapidAI/RapidOCR |
 
 The WebView2 **Runtime** (the Edge-based browser engine) is not part of the package. It is installed separately by Windows or by the user and is covered by its own Microsoft license.
 
@@ -38,6 +41,9 @@ The WebView2 **Runtime** (the Edge-based browser engine) is not part of the pack
 - **pdfium.dll** is Apache-2.0 (the NuGet package declares it). PDFium itself statically includes further third-party code (for example FreeType, lcms2, OpenJPEG, libjpeg-turbo, zlib, ICU). Their license texts are not in the NuGet package, so they were taken from the `pdfium-win-x64.tgz` release archive of https://github.com/bblanchon/pdfium-binaries for the same version (152.0.7961). The archive's `licenses/` folder names: abseil (Apache-2.0), AGG 2.3 (Anti-Grain Geometry, its own short permissive notice), fast_float (MIT), FreeType (FreeType License), ICU (Unicode License v3), lcms2 (MIT), libjpeg-turbo (BSD-style and IJG), OpenJPEG (BSD 2-clause), libpng (PNG Reference Library License), libtiff (permissive, BSD-like), llvm-libc (Apache-2.0 with LLVM Exceptions), simdutf (MIT), zlib (zlib License), and PDFium itself (BSD 3-clause text followed by the Apache-2.0 text). The archive's own `LICENSE` (the pdfium-binaries build scripts, MIT, Copyright Benoit Blanchon) is included too. Which of these are actually linked into `pdfium.dll` is decided by the PDFium build; this file only repeats what the archive lists. The FreeType credit line from the SkiaSharp section applies here too. Because only executable code is distributed, the IJG license also requires this statement: *This software is based in part on the work of the Independent JPEG Group.*
 - **PdfPig** is Apache-2.0. It started as a port of Apache PDFBox. Its repository `NOTICES.txt` (tag v0.1.16) states: derived from Apache Software Foundation software (PDFBox and FontBox, Copyright (c) 2002-2007 www.pdfbox.org), and includes the Adobe Glyph List and the Zapf Dingbats Glyph List (Copyright Adobe Systems Incorporated). The Adobe list license (BSD 3-clause) was taken from https://github.com/adobe-type-tools/agl-aglfn (default branch, no release tag).
 - **PDFsharp 6.2.4 and PdfSharp.WPFonts.dll** are MIT per the nuspec. PDFsharp's Pkcs dependency (`System.Security.Cryptography.Pkcs.dll`) is part of the .NET runtime (MIT).
+- **RapidOcrNet** is Apache-2.0 (nuspec license expression; the package carries no license file). Its repository `NOTICE.txt` (commit `708cae2f`, the one the 4.2.0 nuspec names) states: based on source code from RapidOCR (Apache-2.0, https://github.com/RapidAI/RapidOCR); uses parts of PdfPig (Apache-2.0, already listed above); replaced OpenCV with the PContour library and its C# port PContourNet; models from the PaddleOCR project (Apache-2.0). PContour (Copyright (c) 2021 Lingdong Huang) and PContourNet (Copyright (c) 2021 Lingdong Huang, Copyright (c) 2024 BobLd) are MIT and compiled into `RapidOcrNet.dll`; their texts are included. The RapidOCR license text (Apache-2.0, "Copyright (c) 2021 RapidOCR Authors") is included as well.
+- **Clipper2** is under the Boost Software License 1.0 (`License.txt` in the package), which requires the license text to travel with source copies only; it is included anyway.
+- **PP-OCRv5 model weights** are Apache-2.0 (PaddleOCR `LICENSE`, tag v3.0.0, the release that introduced PP-OCRv5). The three `.onnx` files are the exports that RapidOCR lists in its `default_models.yaml`, byte for byte: their SHA-256 values above are the ones published there. The dictionary has no published hash; its value above is that of the file in the RapidOcrNet 4.2.0 package.
 
 ## What the license summary shows
 
@@ -47,7 +53,7 @@ Everything is MIT, Apache-2.0 or BSD-style, except the third-party code listed i
 
 The files copied into the `licenses/` folder of the release zip are of two kinds.
 
-From the NuGet cache: WebView2 `LICENSE.txt` and `NOTICE.txt`, SkiaSharp `LICENSE.txt` and the native `THIRD-PARTY-NOTICES.txt`, the Microsoft.Extensions (Logging.Abstractions and DependencyInjection.Abstractions) `LICENSE.TXT`, ONNX Runtime `LICENSE` and `ThirdPartyNotices.txt`, QRCoder `LICENSE.txt`, and the .NET `LICENSE.txt` and `ThirdPartyNotices.txt`.
+From the NuGet cache: WebView2 `LICENSE.txt` and `NOTICE.txt`, SkiaSharp `LICENSE.txt` and the native `THIRD-PARTY-NOTICES.txt`, the Microsoft.Extensions (Logging.Abstractions and DependencyInjection.Abstractions) `LICENSE.TXT`, ONNX Runtime `LICENSE` and `ThirdPartyNotices.txt`, QRCoder `LICENSE.txt`, Clipper2 `License.txt`, and the .NET `LICENSE.txt` and `ThirdPartyNotices.txt`.
 
 From the `third-party-licenses/` folder of this repository (copied as a whole by `scripts/publish.ps1`, which fails if the folder is missing). These packages carry no license file in their NuGet package, so the texts were taken from the upstream repositories:
 
@@ -62,5 +68,10 @@ From the `third-party-licenses/` folder of this repository (copied as a whole by
 | `U-2-Net-LICENSE.txt` | U-2-Net weights (Apache-2.0) | xuebinqin/U-2-Net, default branch (master) |
 | `rembg-LICENSE.txt` | rembg ONNX export (MIT) | danielgatis/rembg, default branch (main) |
 | `pdfium-LICENSE.txt`, `pdfium-binaries-LICENSE.txt`, `pdfium-third-party/*` | `pdfium.dll` 152.0.7961 and the code it bundles | `pdfium-win-x64.tgz` of bblanchon/pdfium-binaries release chromium/7961 |
+| `RapidOcrNet-LICENSE.txt`, `RapidOcrNet-NOTICE.txt` | RapidOcrNet 4.2.0 (Apache-2.0) | BobLd/RapidOcrNet, commit 708cae2fcb88720e1d891a81b5ee3e8b2bcc139e (named in the 4.2.0 nuspec) |
+| `RapidOCR-LICENSE.txt` | RapidOCR, the code RapidOcrNet is based on (Apache-2.0) | RapidAI/RapidOCR, commit ae1d898295ecec19df7f4782f52949780e56d211 (main) |
+| `PContour-LICENSE.txt` | PContour, in `RapidOcrNet.dll` (MIT) | LingDong-/PContour, commit 6089a0ffbc67c59b976c252e1d0e2626c8bebcae (master) |
+| `PContourNet-LICENSE.txt` | PContourNet, the C# port in `RapidOcrNet.dll` (MIT) | BobLd/PContourNet, commit c3f70b08b5aa2d472bddf41c17a1633f95d55c01 (master) |
+| `PaddleOCR-LICENSE.txt` | PP-OCRv5 model weights (Apache-2.0) | PaddlePaddle/PaddleOCR, tag v3.0.0 |
 
-The Apache-2.0 files from PdfPig and U-2-Net are the unmodified standard text, as published upstream, with the appendix template unfilled (no project-specific copyright line exists in those files).
+The Apache-2.0 files from PdfPig, U-2-Net, RapidOcrNet and PaddleOCR are the unmodified standard text, as published upstream, with the appendix template unfilled (no project-specific copyright line exists in those files). The RapidOCR file starts with its own copyright line.

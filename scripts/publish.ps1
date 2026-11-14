@@ -51,14 +51,16 @@ $licenseFiles = @(
     @{ From = 'microsoft.extensions.dependencyinjection.abstractions/8.0.2/LICENSE.TXT'; To = 'Microsoft.Extensions.DependencyInjection-LICENSE.txt' },
     @{ From = 'microsoft.ml.onnxruntime/1.31.0/LICENSE'; To = 'OnnxRuntime-LICENSE.txt' },
     @{ From = 'microsoft.ml.onnxruntime/1.31.0/ThirdPartyNotices.txt'; To = 'OnnxRuntime-ThirdPartyNotices.txt' },
-    @{ From = 'qrcoder/1.8.1/LICENSE.txt'; To = 'QRCoder-LICENSE.txt' }
+    @{ From = 'qrcoder/1.8.1/LICENSE.txt'; To = 'QRCoder-LICENSE.txt' },
+    @{ From = 'clipper2/2.0.0/License.txt'; To = 'Clipper2-LICENSE.txt' }
 )
 foreach ($f in $licenseFiles) {
     $src = Join-Path $nuget $f.From
     if (-not (Test-Path $src)) { throw "License file not found: $src (a package version changed? update the list above)" }
     Copy-Item $src (Join-Path $licenses $f.To)
 }
-# Texts that have no file inside the NuGet packages (PdfPig, PDFium and its bundled code, PDFsharp, model weights, ...) are kept in the repo.
+# Texts that have no file inside the NuGet packages (PdfPig, PDFium and its bundled code, PDFsharp, RapidOcrNet and the code it
+# builds on, model weights, ...) are kept in the repo.
 $thirdParty = Join-Path $root 'third-party-licenses'
 if (-not (Test-Path $thirdParty)) { throw "third-party-licenses/ is missing: $thirdParty" }
 Copy-Item (Join-Path $thirdParty '*') $licenses -Recurse -Force
@@ -70,6 +72,8 @@ foreach ($f in @('LICENSE.txt', 'ThirdPartyNotices.txt')) {
 
 if (-not (Test-Path (Join-Path $app 'Swivra.exe'))) { throw 'Swivra.exe is missing from the publish output' }
 if (-not (Test-Path (Join-Path $app 'web/index.html'))) { throw 'web/ is missing from the publish output' }
+# RapidOcrNet's own publish target copies the OCR models; without them OCR quietly finds nothing.
+if (-not (Test-Path (Join-Path $app 'models/v5/latin_PP-OCRv5_rec_mobile_infer.onnx'))) { throw 'models/v5 (OCR) is missing from the publish output' }
 
 Compress-Archive -Path $app -DestinationPath $zip -CompressionLevel Optimal
 
