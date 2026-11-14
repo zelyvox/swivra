@@ -25,9 +25,11 @@ internal static class FileKinds
         : $"{bytes} B";
 }
 
-internal sealed record ActionResult(bool Ok, string Title, string Detail, string? OutputPath = null, string? OutputExt = null, string? ClipboardText = null, Func<bool>? OnUi = null, bool Cleaned = false);
+internal sealed record ActionResult(bool Ok, string Title, string Detail, string? OutputPath = null, string? OutputExt = null, string? ClipboardText = null, Func<bool>? OnUi = null, bool Cleaned = false, int? Hidden = null, bool Unread = false);
 // OnUi: work that needs the STA UI thread (clipboard file list, launching an app); false turns the result into a failure.
 // Cleaned: links or embedded sections were cut from a copy before an office program opened it; Detail says what.
+// Hidden: Hide ran and covered this many values (null: Hide did not run, or the step does not say how many).
+// Unread: Hide could not read part of the file (pages or images); Detail says which.
 
 /// <summary>
 /// Input that some steps need beyond the step id, filled in by a tool panel.
@@ -105,21 +107,59 @@ internal static class FileActions
         }
         else results.AddRange(files.Select(f => RunOne(f, fileSteps, copyPath, options)));
         if (results.Count == 1) return results[0];
+        return Summary(results, fileSteps, copyPath);
+    }
 
+    /// <summary>
+    /// One result for several files. Files that could not be processed are counted on their own, whatever their place
+    /// in the list: a failure is never hidden behind another file's result. With Hide in the chain it also says how many
+    /// values were hidden in all, how many files had nothing to hide or were not read whole, and asks for a look by eye.
+    /// Each file's own note does not fit inside the wheel; the counts say what happened.
+    /// </summary>
+    private static ActionResult Summary(List<ActionResult> results, List<string> fileSteps, bool copyPath)
+    {
+        bool hide = fileSteps.Contains("hide");
         // A step that succeeded but made no file (e.g. Hide with nothing to hide) counts as skipped.
         var ok = results.Where(r => r.Ok && (r.OutputPath is not null || fileSteps.Count == 0)).ToList();
-        if (ok.Count == 0) return results[0];
+        var skipped = results.Where(r => !ok.Contains(r) && (r.Ok || NothingInDocument(r))).ToList();
+        int failed = results.Count - ok.Count - skipped.Count;
+        if (ok.Count == 0 && failed == 0 && !hide) return results[0];
+
         string? clip = copyPath ? string.Join(Environment.NewLine, ok.Select(r => r.ClipboardText)) : null;
-        string? ext = ok.Select(r => r.OutputExt).Distinct().Count() == 1 ? ok[0].OutputExt : null;
+        string? ext = ok.Count > 0 && ok.Select(r => r.OutputExt).Distinct().Count() == 1 ? ok[0].OutputExt : null;
         if (fileSteps.Count == 0 && ok.Count == results.Count)
             return new ActionResult(true, Lang.T("Kopyalandı", "Copied"), Lang.T($"{ok.Count} yol panoda", $"{ok.Count} paths copied"), ClipboardText: clip);
-        string detail = ok.Count == results.Count
-            ? Lang.T($"{ok.Count} dosya hazır", $"{ok.Count} files ready")
-            : Lang.T($"{ok.Count}/{results.Count} dosya hazır, {results.Count - ok.Count} atlandı", $"{ok.Count}/{results.Count} files ready, {results.Count - ok.Count} skipped");
-        // Each file's own note does not fit here; the count says that something was cut.
-        if (ok.Count(r => r.Cleaned) is int cleaned and > 0) detail += Lang.T($" · {cleaned} dosya temizlendi", $" · {cleaned} cleaned");
-        return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, ok[0].OutputPath, ext, clip);
+
+        var parts = new List<string>();
+        if (ok.Count > 0)
+            parts.Add(ok.Count == results.Count ? Lang.T($"{ok.Count} dosya hazır", $"{ok.Count} files ready") : Lang.T($"{ok.Count}/{results.Count} dosya hazır", $"{ok.Count}/{results.Count} files ready"));
+        // The total only when every file that Hide wrote says how many it covered (Word does not): no half count.
+        if (hide && ok.Count > 0 && ok.All(r => r.Hidden is not null))
+        {
+            int items = ok.Sum(r => r.Hidden!.Value);
+            parts.Add(Lang.T($"{items} öğe gizlendi", items == 1 ? "1 item hidden" : $"{items} items hidden"));
+        }
+        if (failed > 0) parts.Add(Lang.T($"{failed} dosya işlenemedi", failed == 1 ? "1 file could not be processed" : $"{failed} files could not be processed"));
+        if (skipped.Count > 0)
+            parts.Add(hide
+                ? Lang.T($"{skipped.Count} dosyada gizlenecek bir şey bulunamadı", skipped.Count == 1 ? "nothing to hide found in 1 file" : $"nothing to hide found in {skipped.Count} files")
+                : Lang.T($"{skipped.Count} atlandı", $"{skipped.Count} skipped"));
+        if (results.Count(r => r.Unread) is int unread and > 0) parts.Add(Lang.T($"{unread} dosya tam okunamadı", unread == 1 ? "1 file not read whole" : $"{unread} files not read whole"));
+        if (ok.Count(r => r.Cleaned) is int cleaned and > 0) parts.Add(Lang.T($"{cleaned} dosya temizlendi", $"{cleaned} cleaned"));
+        if (hide) parts.Add(Lang.T("gözle bak", "check by eye"));
+        string detail = string.Join(" · ", parts);
+
+        if (ok.Count > 0) return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, ok[0].OutputPath, ext, clip);
+        if (failed == 0) return new ActionResult(true, Lang.T("Gizle", "Hide"), detail);
+        // Nothing made: one reason, when every file failed for the same one, still fits.
+        var reasons = results.Where(r => !r.Ok && !skipped.Contains(r)).Select(r => r.Detail).Distinct().ToList();
+        if (skipped.Count == 0 && reasons.Count == 1) detail = $"{detail} · {reasons[0]}";
+        return new ActionResult(false, Lang.T("Olmadı", "Failed"), detail);
     }
+
+    /// <summary>Word's and text files' Hide reports "nothing found" as a failure; in a summary it is a file with nothing to hide.</summary>
+    private static bool NothingInDocument(ActionResult r) =>
+        !r.Ok && r.OutputPath is null && r.Title == Lang.T("Gizle", "Hide") && r.Detail.StartsWith(Lang.T("Kapatılacak hassas veri bulunamadı", "No sensitive data found to cover"), StringComparison.Ordinal);
 
     private static ActionResult RunOne(string path, List<string> fileSteps, bool copyPath, StepOptions options)
     {
@@ -133,7 +173,8 @@ internal static class FileActions
         string finalPath = path;
         string? finalExt = null;
         string? finalName = null;
-        bool cleaned = false;
+        bool cleaned = false, unread = false;
+        int? hiddenCount = null;
         if (fileSteps.Count > 0)
         {
             try
@@ -145,6 +186,8 @@ internal static class FileActions
                     finalPath = r.OutputPath!;
                     finalExt = r.OutputExt;
                     finalName = r.Detail;
+                    hiddenCount = r.Hidden;
+                    unread = r.Unread;
                 }
                 else if (kind == "doc")
                 {
@@ -162,11 +205,11 @@ internal static class FileActions
                     string? frames = ExtraFrames(path);
                     if (written is null)
                     {
-                        // Hide found nothing: no file, and no claim that the image is clean (the other steps did not run either).
+                        // Hide alone found nothing: no file, and no claim that the image is clean.
                         var none = new List<string> { Lang.T("Görselde gizlenecek bir şey bulunamadı", "Nothing to hide found in the image") };
                         if (frames is not null) none.Add(frames);
                         none.Add(HideCaveat);
-                        return new ActionResult(true, Lang.T("Gizle", "Hide"), string.Join(" · ", none));
+                        return new ActionResult(true, Lang.T("Gizle", "Hide"), string.Join(" · ", none), Hidden: 0);
                     }
                     finalPath = written;
                     finalExt = Path.GetExtension(finalPath).TrimStart('.').ToLowerInvariant();
@@ -174,8 +217,14 @@ internal static class FileActions
                     var notes = new List<string>();
                     if (hide)
                     {
-                        notes.Add(Lang.T($"{hidden} öğe gizlendi", hidden == 1 ? "1 item hidden" : $"{hidden} items hidden"));
-                        notes.Add(Lang.T("meta veri silindi", "metadata removed"));
+                        hiddenCount = hidden;
+                        // Found nothing, the other steps ran on the image as it was (as for a PDF): no "-hidden" in the name, and said.
+                        if (hidden == 0) notes.Add(Lang.T("gizlenecek bir şey bulunamadı", "nothing to hide was found"));
+                        else
+                        {
+                            notes.Add(Lang.T($"{hidden} öğe gizlendi", hidden == 1 ? "1 item hidden" : $"{hidden} items hidden"));
+                            notes.Add(Lang.T("meta veri silindi", "metadata removed"));
+                        }
                     }
                     if (fileSteps.Contains("bg") && finalExt == "png" && fileSteps.Any(s => s is "jpg" or "bmp" or "cmp"))
                         notes.Add(Lang.T("saydamlık için PNG", "PNG, to keep transparency"));
@@ -205,7 +254,7 @@ internal static class FileActions
         string name = finalName ?? Path.GetFileName(finalPath);
         if (fileSteps.Count == 0) return new ActionResult(true, Lang.T("Kopyalandı", "Copied"), Lang.T("Yol panoda", "Path copied"), ClipboardText: clip);
         string detail = copyPath ? $"{name} · {Lang.T("yolu panoda", "path copied")}" : name;
-        return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, finalPath, finalExt, clip, Cleaned: cleaned);
+        return new ActionResult(true, Lang.T("Hazır", "Ready"), detail, finalPath, finalExt, clip, Cleaned: cleaned, Hidden: hiddenCount, Unread: unread);
     }
 
     private static string Label(string step) => Labels.GetValueOrDefault(step, step);
@@ -257,7 +306,7 @@ internal static class FileActions
     }
 
     /// <summary>
-    /// Runs the image steps and writes the result; returns its path. Null only when Hide is in the chain and found
+    /// Runs the image steps and writes the result; returns its path. Null only when Hide is the only step and found
     /// nothing: then nothing is written. <paramref name="hidden"/> is the number of values Hide painted over.
     /// </summary>
     private static string? RunImage(string path, List<string> steps, StepOptions options, out int hidden)
@@ -265,7 +314,7 @@ internal static class FileActions
         hidden = 0;
         string ext = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
         if (ext == "jpeg") ext = "jpg";
-        string suffix = "";
+        string suffix = "", hideSuffix = Lang.T("-gizli", "-hidden");
         bool strip = false, compress = false, cutout = false, hide = false;
         int rotations = 0;
         int? maxWidth = null;
@@ -282,7 +331,7 @@ internal static class FileActions
                 case "rs": maxWidth = 1080; suffix += "-1080"; break;
                 case "cmp": compress = true; ext = "jpg"; suffix += Lang.T("-kucuk", "-small"); break;
                 // A blacked-out copy must not hand the original back: the EXIF thumbnail still shows it whole, GPS says where.
-                case "hide": hide = strip = true; suffix += Lang.T("-gizli", "-hidden"); break;
+                case "hide": hide = strip = true; suffix += hideSuffix; break;
             }
         }
 
@@ -318,8 +367,15 @@ internal static class FileActions
             if (hide)
             {
                 (cover, hidden) = FindToHide(work, path);
-                if (hidden == 0) return null;
-                ImageActions.Cover(work, cover);
+                if (hidden == 0)
+                {
+                    // Hide alone writes nothing then. With other steps those still run, and the name does not say hidden.
+                    if (steps.All(s => s == "hide")) return null;
+                    cover = null;
+                    int at = suffix.IndexOf(hideSuffix, StringComparison.Ordinal);
+                    if (at >= 0) suffix = suffix.Remove(at, hideSuffix.Length);
+                }
+                else ImageActions.Cover(work, cover);
             }
 
             if (maxWidth is int mw && work.Width > mw)

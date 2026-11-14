@@ -66,6 +66,9 @@ internal static class PdfActions
             string output = path;
             bool isFolder = false;
             var notes = new List<string>();   // honest remarks from earlier steps (e.g. redaction count), shown with the result
+            int? hiddenItems = null;          // Hide ran: values it covered, and whether part of the file was not read
+            bool unreadAny = false;
+            ActionResult Tag(ActionResult r) => hiddenItems is null ? r : r with { Hidden = hiddenItems, Unread = unreadAny };
 
             // The last step writes next to the original; earlier ones go to a temp folder.
             string StepTarget(int index, bool isLast, string stepSuffix)
@@ -114,7 +117,7 @@ internal static class PdfActions
                         }
                         suffix += Lang.T("-kucuk", "-small");
                         input = output = cmpTarget;
-                        if (last) return new ActionResult(true, Lang.T("Hazır", "Ready"), JoinNotes($"{Path.GetFileName(cmpTarget)} · {FileKinds.HumanSize(before)} → {FileKinds.HumanSize(after)}", notes), cmpTarget, "pdf");
+                        if (last) return Tag(new ActionResult(true, Lang.T("Hazır", "Ready"), JoinNotes($"{Path.GetFileName(cmpTarget)} · {FileKinds.HumanSize(before)} → {FileKinds.HumanSize(after)}", notes), cmpTarget, "pdf"));
                         break;
                     case "lock":
                         suffix += Lang.T("-sifreli", "-locked");
@@ -126,6 +129,8 @@ internal static class PdfActions
                         string hideTarget = StepTarget(i, last, suffix + Lang.T("-gizli", "-redacted"));
                         var hidden = PdfRedact.Hide(input, hideTarget);
                         var unread = HideWarnings(hidden);
+                        hiddenItems = hidden.Items;
+                        unreadAny = hidden.ImagePages > 0 || hidden.UnreadPages > 0;
                         if (!hidden.Written)
                         {
                             // Nothing found: no redacted file. "Nothing to hide" only when everything could be read, and
@@ -138,7 +143,7 @@ internal static class PdfActions
                                     ? Lang.T("Metinde, notlarda ve form alanlarında gizlenecek bir şey bulunamadı", "Nothing to hide found in the text, notes and form fields")
                                     : Lang.T("Gizlenecek bir şey bulunamadı", "Nothing to hide was found");
                             if (steps.Count == 1 || (last && input == path))
-                                return new ActionResult(true, Lang.T("Gizle", "Hide"), JoinNotes(nothing, [.. notes, .. unread]));
+                                return Tag(new ActionResult(true, Lang.T("Gizle", "Hide"), JoinNotes(nothing, [.. notes, .. unread])));
                             // Other steps in the chain still run, on the unredacted file, and the result says so.
                             notes.Add(unread.Count == 0 ? Lang.T("gizlenecek bir şey yoktu", "there was nothing to hide") : Lang.T("gizlenecek bir şey bulunamadı", "nothing to hide was found"));
                             notes.AddRange(unread);
@@ -166,7 +171,7 @@ internal static class PdfActions
                         using (var check = UglyToad.PdfPig.PdfDocument.Open(SafeFile.ReadAll(input))) PdfTree.Check(check);
                         var word = PdfWord.Convert(input, origDir, baseName, created);
                         if (!word.Ok) throw new PdfFailure(word);
-                        return word with { Detail = JoinNotes(word.Detail, notes) };
+                        return Tag(word with { Detail = JoinNotes(word.Detail, notes) });
                     case "split":
                         output = Split(input, origDir, baseName, created);
                         isFolder = true;
@@ -183,7 +188,7 @@ internal static class PdfActions
             }
 
             string? ext = isFolder ? null : Path.GetExtension(output).TrimStart('.').ToLowerInvariant();
-            return new ActionResult(true, Lang.T("Hazır", "Ready"), JoinNotes(Path.GetFileName(output), notes), output, ext);
+            return Tag(new ActionResult(true, Lang.T("Hazır", "Ready"), JoinNotes(Path.GetFileName(output), notes), output, ext));
         }
         catch (PdfFailure f)
         {
