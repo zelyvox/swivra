@@ -228,7 +228,11 @@ internal static class DocActions
         main.Document.Save();
     }
 
-    /// <summary>All paragraphs of the main body (tables included) as plain text, tabs and line breaks kept.</summary>
+    /// <summary>
+    /// All paragraphs of the main body (tables included) as plain text, tabs and line breaks kept. A text
+    /// box's paragraphs sit inside the paragraph that anchors it: each piece of text belongs to its nearest
+    /// paragraph only, so the box is its own line and not also spliced into the line around it.
+    /// </summary>
     internal static string DocxText(string path)
     {
         using var doc = OpenDocxRead(path);
@@ -237,8 +241,10 @@ internal static class DocActions
         var sb = new StringBuilder();
         foreach (var p in body.Descendants<Paragraph>())
         {
+            if (OtherBranch(p)) continue;
             foreach (var el in p.Descendants())
             {
+                if (el is not (Text or TabChar or Break) || el.Ancestors<Paragraph>().First() != p || OtherBranch(el)) continue;
                 switch (el)
                 {
                     case Text t: sb.Append(t.Text); break;
@@ -250,6 +256,14 @@ internal static class DocActions
         }
         return sb.ToString().TrimEnd('\n') + "\n";
     }
+
+    /// <summary>
+    /// Inside a branch of an mc:AlternateContent other than its first: the same content stored again
+    /// (a text box as DrawingML and once more as VML), which Word shows only once.
+    /// </summary>
+    private static bool OtherBranch(OpenXmlElement e) =>
+        e.Ancestors().Any(a => a is AlternateContentChoice or AlternateContentFallback
+            && a.Parent?.ChildElements.First(b => b is AlternateContentChoice or AlternateContentFallback) != a);
 
     private static WordprocessingDocument OpenDocxRead(string path)
     {
@@ -481,6 +495,7 @@ internal static class DocActions
     {
         private readonly HashSet<string> _values = new(StringComparer.OrdinalIgnoreCase);
         public int Unchecked;
+        public readonly HashSet<OpenXmlPart> Seen = new(); // embedded sections already masked or counted
         public int Depth; // embedded packages currently open, one inside the other
         public int Count => _values.Count;
 
@@ -513,6 +528,7 @@ internal static class DocActions
         if (main.EndnotesPart is { } en) stories.Add(en);
         if (main.WordprocessingCommentsPart is { } cm) stories.Add(cm);
         if (main.GlossaryDocumentPart is { } gl) stories.Add(gl);
+        foreach (var part in stories) FlattenAltChunks(part, c); // their text then gets masked with the story
         foreach (var part in stories)
         {
             if (part.RootElement is not OpenXmlPartRootElement root) continue;
@@ -616,7 +632,9 @@ internal static class DocActions
 
     /// <summary>
     /// Parts below a story: embedded Office files (masked in place), binary objects (counted as skipped),
-    /// photos (metadata removed), and the text of SmartArt and charts.
+    /// photos (metadata removed), the text of SmartArt, charts (Office 2016 ones included), drawings and
+    /// slide masters. Every part type is either handled, known to hold no user text, or counted as not
+    /// checked: none is left out without a word.
     /// </summary>
     private static void MaskInnerParts(OpenXmlPackage package, Covered c)
     {
@@ -627,16 +645,129 @@ internal static class DocActions
                 case EmbeddedPackagePart embedded: MaskEmbedded(embedded, c); break;
                 case EmbeddedObjectPart or EmbeddedControlPersistencePart or EmbeddedControlPersistenceBinaryDataPart: c.Unchecked++; break;
                 case ImagePart image: StripImageMetadata(image, c); break;
-                case ChartPart or ChartDrawingPart or DiagramDataPart or DiagramPersistLayoutPart: MaskDrawingText(part, c); break;
+                case ChartPart or ChartDrawingPart or DiagramDataPart or DiagramPersistLayoutPart or DrawingsPart
+                    or SlideLayoutPart or SlideMasterPart or NotesMasterPart or HandoutMasterPart: MaskDrawingText(part, c); break;
+                case ExtendedChartPart chartEx: MaskChartEx(chartEx, c); break;
+                // An embedded section no story points at (or one in a package this code does not flatten).
+                case AlternativeFormatImportPart chunk: if (c.Seen.Add(chunk)) c.Unchecked++; break;
+                case CustomXmlPart xmlPart: MaskXmlPart(xmlPart, c); break; // also those outside the main document
+                case NumberingDefinitionsPart numbering when numbering.Numbering is { } list:
+                    // A list label can hold literal text ("ID %1:").
+                    foreach (var lvl in list.Descendants<LevelText>()) if (lvl.Val?.Value is string v && c.Mask(v) is string m && m != v) lvl.Val = m;
+                    list.Save();
+                    break;
+                case TableDefinitionPart table when table.Table is { } t:
+                    // An Excel table repeats its header cells as column names.
+                    MaskAttributes(t, name => name is "name" or "displayName", c);
+                    t.Save();
+                    break;
+                // Handled where the document, workbook or presentation is read.
+                case MainDocumentPart or HeaderPart or FooterPart or FootnotesPart or EndnotesPart or WordprocessingCommentsPart
+                    or GlossaryDocumentPart or DocumentSettingsPart or WordprocessingPeoplePart or CoreFilePropertiesPart
+                    or ExtendedFilePropertiesPart or CustomFilePropertiesPart or ThumbnailPart or WorkbookPart or WorksheetPart
+                    or SharedStringTablePart or WorksheetCommentsPart or PresentationPart or SlidePart or NotesSlidePart:
+                    break;
+                // Formatting, ids and settings: no text of the user's.
+                case StyleDefinitionsPart or StylesWithEffectsPart or FontTablePart or FontPart or ThemePart or ThemeOverridePart
+                    or WebSettingsPart or CustomXmlPropertiesPart or ChartStylePart or ChartColorStylePart or DiagramStylePart
+                    or DiagramColorsPart or DiagramLayoutDefinitionPart or WordprocessingCommentsExPart or WordprocessingCommentsIdsPart
+                    or WordCommentsExtensiblePart or WordprocessingPrinterSettingsPart or WorkbookStylesPart or CalculationChainPart
+                    or SpreadsheetPrinterSettingsPart or PresentationPropertiesPart or ViewPropertiesPart or TableStylesPart or LabelInfoPart:
+                    break;
+                default:
+                    Log.Write($"hide: part {part.Uri} ({part.ContentType}) not checked");
+                    c.Unchecked++;
+                    break;
             }
         }
+    }
+
+    // An embedded section larger than this is not read into memory for masking.
+    private const int MaxChunkBytes = 32 * 1024 * 1024;
+
+    /// <summary>
+    /// altChunk sections (HTML, MHT, text, RTF or a whole .docx) that Word imports into a story on open.
+    /// A .docx is masked in place like an embedded file. HTML, MHT and text become plain paragraphs in
+    /// place of the chunk, which the story's own masking then covers (their formatting goes; their text
+    /// cannot be masked inside the markup with confidence). Anything else (RTF) counts as not checked.
+    /// </summary>
+    private static void FlattenAltChunks(OpenXmlPart story, Covered c)
+    {
+        if (story.RootElement is not OpenXmlPartRootElement root) return;
+        var lines = new Dictionary<AlternativeFormatImportPart, List<string>>();
+        foreach (var chunk in root.Descendants<AltChunk>().ToList())
+        {
+            if (chunk.Id?.Value is not string id || !story.TryGetPartById(id, out var target) || target is not AlternativeFormatImportPart part) continue; // imports nothing
+            if (!lines.TryGetValue(part, out var text))
+            {
+                if (c.Seen.Contains(part)) continue; // a package masked in place, or counted already
+                text = ChunkLines(part, c);
+                if (text is null) continue;
+                lines[part] = text;
+            }
+            if (text.Count == 0) chunk.InsertBeforeSelf(new Paragraph()); // a table cell must keep a paragraph
+            foreach (string line in text) chunk.InsertBeforeSelf(new Paragraph(new Run(new Text(line) { Space = SpaceProcessingModeValues.Preserve })));
+            chunk.Remove();
+        }
+        foreach (var part in lines.Keys) story.DeletePart(part);
+    }
+
+    /// <summary>The text of an altChunk as lines; null when it was masked in place as a package or could not be read (then counted).</summary>
+    private static List<string>? ChunkLines(AlternativeFormatImportPart part, Covered c)
+    {
+        c.Seen.Add(part);
+        byte[] data;
+        using (var s = part.GetStream(FileMode.Open, FileAccess.Read))
+        {
+            if (s.Length > MaxChunkBytes) { c.Unchecked++; return null; }
+            using var ms = new MemoryStream();
+            s.CopyTo(ms);
+            data = ms.ToArray();
+        }
+        if (data.Length >= 4 && data[0] == 'P' && data[1] == 'K' && data[2] == 3 && data[3] == 4)
+        {
+            MaskEmbedded(part, c);
+            return null;
+        }
+        // RTF would come out as its own control words.
+        string head = Encoding.Latin1.GetString(data, 0, Math.Min(data.Length, 64)).TrimStart('﻿', 'ï', '»', '¿', ' ', '\t', '\r', '\n');
+        var text = head.StartsWith(@"{\rt", StringComparison.Ordinal) ? null : ChunkText.Lines(data);
+        if (text is null) c.Unchecked++;
+        return text;
+    }
+
+    /// <summary>
+    /// An Office 2016 chart (cx:chartSpace: waterfall, treemap, funnel...). Rich text as in other charts;
+    /// category and series names and data points are plain text elements (and level names attributes). A
+    /// number in a numeric dimension that holds a value becomes 0, so the chart stays valid.
+    /// </summary>
+    private static void MaskChartEx(ExtendedChartPart part, Covered c)
+    {
+        if (part.RootElement is not OpenXmlPartRootElement root) return;
+        foreach (var p in root.Descendants<DocumentFormat.OpenXml.Drawing.Paragraph>()) MaskRuns<DocumentFormat.OpenXml.Drawing.Text>(p, c, preserveSpace: false);
+        foreach (var el in root.Descendants().Where(e => !e.HasChildren && e is not DocumentFormat.OpenXml.Drawing.Text).ToList())
+        {
+            string text = el.InnerText;
+            if (text.Length == 0) continue;
+            string masked = c.Mask(text)!;
+            if (masked == text) continue;
+            string value = el.Ancestors().Any(a => a.LocalName == "numDim") ? "0" : masked;
+            if (el is OpenXmlLeafTextElement leaf) leaf.Text = value;
+            else
+            {
+                Log.Write($"hide: chart element {el.LocalName} not masked");
+                c.Unchecked++;
+            }
+        }
+        MaskAttributes(root, name => name == "name", c);
+        root.Save();
     }
 
     // Real documents nest one or two levels (a chart's workbook inside a document). A crafted file can
     // nest without end; past this depth the inner files count as not checked instead of overflowing the stack.
     private const int MaxEmbedDepth = 8;
 
-    private static void MaskEmbedded(EmbeddedPackagePart part, Covered c)
+    private static void MaskEmbedded(OpenXmlPart part, Covered c)
     {
         if (c.Depth >= MaxEmbedDepth) { c.Unchecked++; return; }
         using var ms = new MemoryStream();
