@@ -74,8 +74,8 @@ The app is not code-signed, so Windows SmartScreen may warn you the first time. 
 - **Scanned documents:** Text inside scanned page images cannot be read yet, so the radar and redaction do not see it.
 - **Embedded objects in Word files:** Embedded Word, Excel and PowerPoint files are masked too, but other embedded objects (older binary OLE objects, ActiveX controls) cannot be looked into. Hide leaves them as they are and tells you how many there were.
 - **Background removal:** Runs entirely on your PC with a small AI model (U-2-Net). It works well on clear subjects; hair and fine edges are not perfect.
-- **Internet:** Swivra sends nothing to the internet. Only the To phone slice uses your local network, and only while its panel is open.
-- **Logs:** Written to `%LOCALAPPDATA%\Swivra\swivra.log`. Passwords and share links are never logged.
+- **Internet:** Swivra sends nothing to the internet. Only the To phone slice uses your local network: while its panel is open, and, if you choose **Close when done**, until the download already running ends (10 minutes at most). No new download starts once the panel is closed; the running one shows in the tray, where you can stop it.
+- **Logs:** Written to `%LOCALAPPDATA%\Swivra\swivra.log`. Passwords and share links are never logged. The log does name the files you work on, with their full paths. It stays on this PC and is never sent anywhere; look through it before you share it, for example in a bug report.
 
 ## Build from source
 

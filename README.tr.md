@@ -74,8 +74,8 @@ Uygulama dijital olarak imzalı olmadığı için Windows SmartScreen ilk açıl
 - **Taranmış belgeler:** Resim olarak taranmış sayfalardaki yazılar henüz okunamıyor. Radar ve gizleme bu yazıları görmez.
 - **Word dosyalarındaki gömülü nesneler:** Gömülü Word, Excel ve PowerPoint dosyaları da maskelenir. Ama diğer gömülü nesnelerin (eski ikili OLE nesneleri, ActiveX denetimleri) içine bakılamaz. Gizle bunları olduğu gibi bırakır ve kaç tane olduğunu söyler.
 - **Arka plan silme:** Küçük bir yapay zekâ modeliyle (U-2-Net) tamamen bilgisayarında çalışır. Belirgin nesnelerde iyi sonuç verir. Saç ve ince kenarlarda kusursuz değildir.
-- **İnternet:** Swivra internete hiçbir şey göndermez. Yalnız "Telefona" dilimi, paneli açık olduğu sürece yerel ağını kullanır.
-- **Kayıtlar:** `%LOCALAPPDATA%\Swivra\swivra.log` dosyasına yazılır. Parolalar ve paylaşım adresleri kayda yazılmaz.
+- **İnternet:** Swivra internete hiçbir şey göndermez. Yalnız "Telefona" dilimi yerel ağını kullanır: paneli açıkken ve **Bitince kapat** seçersen o an süren indirme bitene kadar (en çok 10 dakika). Panel kapandıktan sonra yeni indirme başlamaz; süren aktarım tepside görünür, oradan durdurabilirsin.
+- **Kayıtlar:** `%LOCALAPPDATA%\Swivra\swivra.log` dosyasına yazılır. Parolalar ve paylaşım adresleri kayda yazılmaz. İşlediğin dosyaların adı ve tam yolu ise kayda geçer. Kayıt yalnız bu bilgisayarda kalır, hiçbir yere gönderilmez; biriyle paylaşmadan önce (ör. hata bildirirken) içine bir göz at.
 
 ## Kaynaktan derleme
 
