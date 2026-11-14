@@ -223,7 +223,8 @@ internal static class SendActions
         {
             for (int i = 0; i < paths.Count; i++)
             {
-                var d = new MapiFileDescW { PathName = paths[i], FileName = Path.GetFileName(paths[i]) };
+                var d = new MapiFileDescW { Position = uint.MaxValue, PathName = paths[i], FileName = Path.GetFileName(paths[i]) };
+                // 0xFFFFFFFF = "not placed in the message text"; 0 would put the attachment at character 0 of the body.
                 Marshal.StructureToPtr(d, block + i * size, false);
             }
             var msg = new MapiMessageW { FileCount = (uint)paths.Count, Files = block };
