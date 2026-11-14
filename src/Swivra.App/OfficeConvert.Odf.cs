@@ -216,8 +216,9 @@ internal static partial class OfficeConvert
         var xmlParts = new HashSet<string>(StringComparer.Ordinal);
         foreach (var e in zip.Entries.Where(e => !e.FullName.EndsWith('/')))
         {
-            int got;
-            using (var s = e.Open()) got = s.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+            // Each entry is read to its end (not kept): a damaged one is refused, see CheckedRead.
+            using var s = new CheckedRead(e);
+            int got = s.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
             if (got >= 8 && head.AsSpan().SequenceEqual(OleSignature)) throw new UnsafeDocumentException($"OLE object {e.FullName}");
             // A gzip part (an .svgz picture) is opened by the SVG importer by its content; it is not read here.
             if (got >= 2 && head[0] == 0x1F && head[1] == 0x8B) throw new UnsafeDocumentException($"compressed part {e.FullName}");
@@ -225,7 +226,7 @@ internal static partial class OfficeConvert
             if (got >= 4 && head[0] == 'P' && head[1] == 'K' && head[2] == 3 && head[3] == 4) throw new UnsafeDocumentException($"nested package {e.FullName}");
 
             string name = e.FullName;
-            if (name == "mimetype" || name.Equals("META-INF/manifest.xml", StringComparison.OrdinalIgnoreCase)) continue;
+            if (name == "mimetype" || name.Equals("META-INF/manifest.xml", StringComparison.OrdinalIgnoreCase)) { s.ToEnd(); continue; }
             // XML by its name or its manifest type (such a part must parse), or by its first character.
             bool xmlByName = name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".rdf", StringComparison.OrdinalIgnoreCase)
                 || name.EndsWith(".svg", StringComparison.OrdinalIgnoreCase)
@@ -233,9 +234,10 @@ internal static partial class OfficeConvert
             bool looks = xmlByName;
             if (!looks)
             {
-                using var s = e.Open();
-                looks = LooksLikeXml(s);
+                using var again = e.Open(); // from the start: the head is already read above
+                looks = LooksLikeXml(again);
             }
+            s.ToEnd();
             if (looks) xmlParts.Add(name);
         }
         return (manifest, manifestBytes, xmlParts);
