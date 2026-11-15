@@ -60,6 +60,7 @@ internal sealed class SwivraContext : ApplicationContext
             ContextMenuStrip = new ContextMenuStrip(),
             Visible = true,
         };
+        TrayMenuStyle.Apply(_tray.ContextMenuStrip);
         _tray.ContextMenuStrip.Opening += (_, _) => MarkResultSeen();
         _tray.BalloonTipClicked += (_, _) => { if (_balloonIsResult) OpenLastResult(); };
         BuildTrayMenu();
@@ -278,6 +279,7 @@ internal sealed class SwivraContext : ApplicationContext
         var lang = new ToolStripMenuItem("Dil / Language");
         lang.DropDownItems.Add(new ToolStripMenuItem("Türkçe", null, (_, _) => SetLanguage("tr")) { Checked = Lang.IsTurkish });
         lang.DropDownItems.Add(new ToolStripMenuItem("English", null, (_, _) => SetLanguage("en")) { Checked = !Lang.IsTurkish });
+        TrayMenuStyle.Apply(lang.DropDown);
         menu.Items.Add(lang);
         var startup = new ToolStripMenuItem(Lang.T("Windows ile başlat", "Start with Windows")) { Checked = Startup.IsEnabled };
         startup.Click += (_, _) =>
