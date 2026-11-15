@@ -36,6 +36,16 @@ internal sealed class SwivraContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _shareTimer = new() { Interval = 250 };
     private PhoneShare.Activity _lastActivity;
 
+    // Work that ended with no wheel on screen. A notice lasts seconds and leaves no trace (and "do not
+    // disturb" swallows it), so the result also stays in the tray: a dot on the icon until the menu is
+    // opened, and a row in the menu until it is clicked or the next such result replaces it.
+    private sealed record BackgroundResult(bool Ok, string Title, string Detail, string? Path);
+    private BackgroundResult? _lastResult;
+    private bool _resultUnseen;
+    private bool _balloonIsResult;
+    private readonly Icon _iconPlain;
+    private Icon? _iconDone, _iconFailed;
+
     public SwivraContext(string[] args)
     {
         _args = args;
@@ -43,12 +53,15 @@ internal sealed class SwivraContext : ApplicationContext
         SafeFile.SweepTemp();
         OfficeConvert.RestoreLeftovers();
 
+        _iconPlain = TrayIcon();
         _tray = new NotifyIcon
         {
-            Icon = TrayIcon(),
+            Icon = _iconPlain,
             ContextMenuStrip = new ContextMenuStrip(),
             Visible = true,
         };
+        _tray.ContextMenuStrip.Opening += (_, _) => MarkResultSeen();
+        _tray.BalloonTipClicked += (_, _) => { if (_balloonIsResult) OpenLastResult(); };
         BuildTrayMenu();
         _shareTimer.Tick += (_, _) => ShowShareActivity();
 
@@ -145,7 +158,7 @@ internal sealed class SwivraContext : ApplicationContext
         // Every swallowed summon would repeat it; once a minute is enough to be seen.
         if (DateTime.UtcNow - _lastRestartNotice < TimeSpan.FromMinutes(1)) return;
         _lastRestartNotice = DateTime.UtcNow;
-        _tray.ShowBalloonTip(10000, Lang.T("Swivra yeniden başlatılmalı", "Swivra needs a restart"),
+        Balloon(10000, Lang.T("Swivra yeniden başlatılmalı", "Swivra needs a restart"),
             Lang.T("Çark çizilemiyor (WebView2 kapandı). Tepsiden Çıkış'a basıp Swivra'yı yeniden aç.",
                    "The wheel cannot be drawn (WebView2 stopped). Use Exit in the tray menu and open Swivra again."),
             ToolTipIcon.Error);
@@ -161,12 +174,100 @@ internal sealed class SwivraContext : ApplicationContext
         return s is null ? SystemIcons.Application : new Icon(s, SystemInformation.SmallIconSize);
     }
 
+    private void SetTrayTip()
+    {
+        string tip = _resultUnseen && _lastResult is { } r
+            ? $"Swivra · {r.Title}: {r.Detail}"
+            : Lang.T("Swivra: dosyayı sürüklerken Shift, Ctrl ya da Alt'a bas", "Swivra: press Shift, Ctrl or Alt while dragging a file");
+        _tray.Text = tip.Length > 127 ? tip[..127] : tip; // NotifyIcon refuses longer texts
+    }
+
+    /// <summary>Every tray notice goes through here, so a click on one is only read as "show me the result" when it was a result.</summary>
+    private void Balloon(int ms, string title, string text, ToolTipIcon icon, bool isResult = false)
+    {
+        _balloonIsResult = isResult;
+        _tray.ShowBalloonTip(ms, title, text, icon);
+    }
+
+    /// <summary>Work ended while no wheel was there to show it: notice, a dot on the tray icon, and a row in the tray menu.</summary>
+    private void NoteBackgroundResult(bool ok, string title, string detail, string? path, int ms)
+    {
+        _lastResult = new BackgroundResult(ok, title, detail, path);
+        _resultUnseen = true;
+        _tray.Icon = BadgedIcon(ok);
+        BuildTrayMenu();
+        Balloon(ms, "Swivra · " + title, detail, ok ? ToolTipIcon.Info : ToolTipIcon.Warning, isResult: true);
+    }
+
+    /// <summary>The tray menu was opened or the result was asked for: the dot has done its job, the menu row stays.</summary>
+    private void MarkResultSeen()
+    {
+        if (!_resultUnseen) return;
+        _resultUnseen = false;
+        _tray.Icon = _iconPlain;
+        SetTrayTip();
+    }
+
+    /// <summary>Shows the file the last background work made, selected in its folder; with no file to show, says how the work ended.</summary>
+    private void OpenLastResult()
+    {
+        if (_lastResult is not { } r) return;
+        MarkResultSeen();
+        _lastResult = null;
+        BuildTrayMenu();
+        try
+        {
+            if (r.Path is { } p && (File.Exists(p) || Directory.Exists(p)))
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo("explorer.exe") { UseShellExecute = false };
+                psi.ArgumentList.Add("/select," + p);
+                System.Diagnostics.Process.Start(psi)?.Dispose();
+                return;
+            }
+        }
+        catch (Exception ex) { Log.Write($"could not show the last result: {ex.Message}"); }
+        string text = r.Path is null ? r.Detail : $"{r.Detail}\n\n{Lang.T("Dosya artık yerinde değil.", "The file is no longer there.")}";
+        MessageBox.Show(text, "Swivra · " + r.Title, MessageBoxButtons.OK, r.Ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+    }
+
+    /// <summary>The tray icon with a dot in its corner: green when the work went well, red when it did not. Made once each.</summary>
+    private Icon BadgedIcon(bool ok)
+    {
+        if ((ok ? _iconDone : _iconFailed) is { } made) return made;
+        using var bmp = _iconPlain.ToBitmap();
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float d = Math.Max(7f, bmp.Width * 0.5f), x = bmp.Width - d, y = bmp.Height - d;
+            using var rim = new SolidBrush(Color.FromArgb(20, 16, 36));
+            using var dot = new SolidBrush(ok ? Color.FromArgb(52, 211, 120) : Color.FromArgb(240, 72, 72));
+            g.FillEllipse(rim, x - 1, y - 1, d + 1, d + 1);
+            g.FillEllipse(dot, x, y, d - 1, d - 1);
+        }
+        IntPtr h = bmp.GetHicon();
+        Icon icon;
+        try { using var borrowed = Icon.FromHandle(h); icon = (Icon)borrowed.Clone(); } // the clone owns its own handle
+        finally { DestroyIcon(h); }
+        if (ok) _iconDone = icon; else _iconFailed = icon;
+        return icon;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool DestroyIcon(IntPtr handle);
+
     /// <summary>Tray menu and tooltip in the current language; rebuilt when the language changes.</summary>
     private void BuildTrayMenu()
     {
-        _tray.Text = Lang.T("Swivra: dosyayı sürüklerken Shift, Ctrl ya da Alt'a bas", "Swivra: press Shift, Ctrl or Alt while dragging a file");
+        SetTrayTip();
         var menu = _tray.ContextMenuStrip!;
         menu.Items.Clear();
+        if (_lastResult is { } last)
+        {
+            string row = $"{Lang.T("Son iş", "Last job")}: {last.Title} · {last.Detail}";
+            if (row.Length > 80) row = row[..79] + "…";
+            menu.Items.Add(row.Replace("&", "&&"), null, (_, _) => OpenLastResult()); // a lone & would be read as a shortcut mark
+            menu.Items.Add(new ToolStripSeparator());
+        }
         if (_draining is not null)
         {
             menu.Items.Add(Lang.T("Telefona gönderimi durdur", "Stop sending to phone"), null, (_, _) => StopDraining());
@@ -337,7 +438,7 @@ internal sealed class SwivraContext : ApplicationContext
         Log.Write("wheel put away while its run goes on");
         _dropping = false;
         CloseWheel();
-        _tray.ShowBalloonTip(4000, Lang.T("Swivra çalışmayı sürdürüyor", "Swivra is still working"),
+        Balloon(4000, Lang.T("Swivra çalışmayı sürdürüyor", "Swivra is still working"),
             Lang.T("İşlem arka planda sürüyor, bitince haber vereceğim.", "It goes on in the background; you will get a notice when it is done."),
             ToolTipIcon.Info);
     }
@@ -663,7 +764,7 @@ internal sealed class SwivraContext : ApplicationContext
             ? (sent == 1 ? _drainResults[0].Name : Lang.T($"{sent} dosya", $"{sent} files"))
             : Lang.T($"{string.Join(", ", cut)} tamamlanmadı. Telefonda yeniden indirmek için dosyayı tekrar paylaş.",
                      $"{string.Join(", ", cut)} did not finish. Share the file again to download it on the phone.");
-        _tray.ShowBalloonTip(8000, title, text, cut.Count == 0 ? ToolTipIcon.Info : ToolTipIcon.Warning);
+        NoteBackgroundResult(cut.Count == 0, title, text, null, 8000);
         Log.Write($"phone share notice: {sent} sent, {cut.Count} cut");
     }
 
@@ -785,7 +886,7 @@ internal sealed class SwivraContext : ApplicationContext
                 {
                     // The work went on after the wheel closed; say how it ended rather than finish unseen.
                     Log.Write($"result for a closed wheel: ok={r.Ok} {r.Title}");
-                    _tray.ShowBalloonTip(5000, "Swivra · " + r.Title, string.IsNullOrEmpty(r.Detail) ? r.Title : r.Detail, r.Ok ? ToolTipIcon.Info : ToolTipIcon.Warning);
+                    NoteBackgroundResult(r.Ok, r.Title, string.IsNullOrEmpty(r.Detail) ? r.Title : r.Detail, r.Ok ? r.OutputPath : null, 5000);
                     return;
                 }
                 _overlay.Post(new { type = "result", ok = r.Ok, title = r.Title, detail = r.Detail, ext = r.OutputExt });
@@ -916,6 +1017,9 @@ internal sealed class SwivraContext : ApplicationContext
         _hook.Dispose();
         _tray.Visible = false;
         _tray.Dispose();
+        _iconDone?.Dispose();
+        _iconFailed?.Dispose();
+        _iconPlain.Dispose();
         _catcher.Dispose();
         _overlay.Dispose();
         base.ExitThreadCore();
