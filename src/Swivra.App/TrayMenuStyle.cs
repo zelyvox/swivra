@@ -19,6 +19,9 @@ internal static class TrayMenuStyle
 
     private const int FadeMs = 140;
 
+    // Windows 10: no round corners and no border from the window manager, so the menu draws its own edge.
+    private static bool _square;
+
     /// <summary>Styles one menu window. A submenu is its own window and needs its own call.</summary>
     public static void Apply(ToolStripDropDown menu)
     {
@@ -27,7 +30,6 @@ internal static class TrayMenuStyle
         menu.ForeColor = Ink;
         menu.Font = MenuFont;
         menu.DropShadowEnabled = false; // the classic shadow is square and would show behind the round corners
-        menu.Padding = new Padding(5, 6, 5, 6);
         if (menu is ToolStripDropDownMenu m)
         {
             m.ShowImageMargin = false;
@@ -42,7 +44,7 @@ internal static class TrayMenuStyle
         menu.Opening += (_, e) => { if (!e.Cancel && SystemInformation.UIEffectsEnabled) menu.Opacity = 0; };
         menu.Opened += (_, _) =>
         {
-            if (!SystemInformation.UIEffectsEnabled) return;
+            if (!SystemInformation.UIEffectsEnabled) { menu.Opacity = 1; return; } // effects went off since Opening: never stay see-through
             began = Environment.TickCount64;
             fade.Start();
         };
@@ -70,7 +72,7 @@ internal static class TrayMenuStyle
         try
         {
             int round = DWMWCP_ROUND;
-            DwmSetWindowAttribute(handle, DWMWA_WINDOW_CORNER_PREFERENCE, ref round, sizeof(int));
+            if (DwmSetWindowAttribute(handle, DWMWA_WINDOW_CORNER_PREFERENCE, ref round, sizeof(int)) != 0) _square = true;
             int border = Line.R | Line.G << 8 | Line.B << 16; // COLORREF is 0x00BBGGRR
             DwmSetWindowAttribute(handle, DWMWA_BORDER_COLOR, ref border, sizeof(int));
         }
@@ -93,7 +95,12 @@ internal static class TrayMenuStyle
             e.Graphics.FillRectangle(b, e.AffectedBounds);
         }
 
-        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { } // the window manager draws it
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+        {
+            if (!_square) return; // the window manager draws it
+            using var pen = new Pen(Line);
+            e.Graphics.DrawRectangle(pen, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+        }
 
         protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
 
