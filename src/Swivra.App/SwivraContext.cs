@@ -253,6 +253,7 @@ internal sealed class SwivraContext : ApplicationContext
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [System.Runtime.InteropServices.DefaultDllImportSearchPaths(System.Runtime.InteropServices.DllImportSearchPath.System32)]
     private static extern bool DestroyIcon(IntPtr handle);
 
     /// <summary>Tray menu and tooltip in the current language; rebuilt when the language changes.</summary>
@@ -260,7 +261,11 @@ internal sealed class SwivraContext : ApplicationContext
     {
         SetTrayTip();
         var menu = _tray.ContextMenuStrip!;
+        // The rows of the menu being replaced. Clear() only takes them out; an opened submenu keeps its
+        // window until its row is disposed. Not now: one of them may be the row whose click led here.
+        var old = menu.Items.Cast<ToolStripItem>().ToArray();
         menu.Items.Clear();
+        if (old.Length > 0) After(1, () => { foreach (var item in old) item.Dispose(); });
         if (_lastResult is { } last)
         {
             string row = $"{Lang.T("Son iş", "Last job")}: {last.Title} · {last.Detail}";

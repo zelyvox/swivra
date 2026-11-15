@@ -17,7 +17,8 @@ internal static class TrayMenuStyle
     private static readonly Font MenuFont = new("Segoe UI", 10f);
     private static readonly DarkRenderer Look = new();
 
-    private const int FadeMs = 140;
+    private const int OpenMs = 190;
+    private const int SlidePx = 10; // at 100% scale
 
     // Windows 10: no round corners and no border from the window manager, so the menu draws its own edge.
     private static bool _square;
@@ -35,33 +36,44 @@ internal static class TrayMenuStyle
             m.ShowImageMargin = false;
             m.ShowCheckMargin = true;
         }
-        foreach (ToolStripItem item in menu.Items) Roomy(item);
-        menu.ItemAdded += (_, e) => Roomy(e.Item);
+        foreach (ToolStripItem item in menu.Items) Roomy(item, menu);
+        menu.ItemAdded += (_, e) => Roomy(e.Item, menu);
         menu.HandleCreated += (_, _) => Round(menu.Handle);
 
-        var fade = new System.Windows.Forms.Timer { Interval = 15 };
-        long began = 0;
+        // Opening: the menu fades in while it rises the last few pixels into place (it opens above the tray).
+        // A submenu only fades: WinForms keeps it glued to its row.
+        var open = new System.Windows.Forms.Timer { Interval = 8 };
+        var clock = new System.Diagnostics.Stopwatch();
+        Point rest = default, from = default;
         menu.Opening += (_, e) => { if (!e.Cancel && SystemInformation.UIEffectsEnabled) menu.Opacity = 0; };
         menu.Opened += (_, _) =>
         {
             if (!SystemInformation.UIEffectsEnabled) { menu.Opacity = 1; return; } // effects went off since Opening: never stay see-through
-            began = Environment.TickCount64;
-            fade.Start();
+            rest = menu.Location;
+            from = menu.OwnerItem is null ? new Point(rest.X, rest.Y + Scale(SlidePx, menu)) : rest;
+            if (from != rest) menu.Location = from;
+            clock.Restart();
+            open.Start();
         };
-        fade.Tick += (_, _) =>
+        open.Tick += (_, _) =>
         {
-            double t = Math.Min(1.0, (Environment.TickCount64 - began) / (double)FadeMs);
-            menu.Opacity = 1 - Math.Pow(1 - t, 3); // ease out
-            if (t >= 1) fade.Stop();
+            double t = Math.Min(1.0, clock.Elapsed.TotalMilliseconds / OpenMs);
+            double eased = 1 - Math.Pow(1 - t, 4); // fast start, long soft landing
+            menu.Opacity = Math.Min(1.0, eased * 1.15);
+            if (from != rest) menu.Location = new Point(rest.X, from.Y + (int)Math.Round((rest.Y - from.Y) * eased));
+            if (t >= 1) open.Stop();
         };
-        // Whatever stopped the fade early, the menu must never stay see-through.
-        menu.Closed += (_, _) => { fade.Stop(); menu.Opacity = 1; };
-        menu.Disposed += (_, _) => fade.Dispose();
+        // Whatever stopped it early, the menu must never stay see-through.
+        menu.Closed += (_, _) => { open.Stop(); menu.Opacity = 1; };
+        menu.Disposed += (_, _) => open.Dispose();
     }
 
-    private static void Roomy(ToolStripItem? item)
+    /// <summary>Pixels at 100% scale, for the screen the menu is on.</summary>
+    private static int Scale(int px, Control on) => (int)Math.Round(px * on.DeviceDpi / 96.0);
+
+    private static void Roomy(ToolStripItem? item, ToolStripDropDown menu)
     {
-        if (item is ToolStripMenuItem) item.Padding = new Padding(2, 5, 2, 5);
+        if (item is ToolStripMenuItem) item.Padding = new Padding(Scale(2, menu), Scale(5, menu), Scale(2, menu), Scale(5, menu));
     }
 
     private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWA_BORDER_COLOR = 34, DWMWCP_ROUND = 2;
@@ -83,6 +95,7 @@ internal static class TrayMenuStyle
     }
 
     [DllImport("dwmapi.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 
     private sealed class DarkRenderer : ToolStripProfessionalRenderer
@@ -112,7 +125,7 @@ internal static class TrayMenuStyle
             if (!e.Item.Selected || !e.Item.Enabled) return;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             box.Inflate(-1, 0);
-            using var path = Pill(box, 6);
+            using var path = Pill(box, e.ToolStrip is { } strip ? Scale(6, strip) : 6);
             using var hover = new SolidBrush(Hover);
             g.FillPath(hover, path);
             g.SmoothingMode = SmoothingMode.Default;
@@ -134,7 +147,8 @@ internal static class TrayMenuStyle
         {
             int y = e.Item.Height / 2;
             using var pen = new Pen(Line);
-            e.Graphics.DrawLine(pen, 8, y, e.Item.Width - 8, y);
+            int inset = e.ToolStrip is { } strip ? Scale(8, strip) : 8;
+            e.Graphics.DrawLine(pen, inset, y, e.Item.Width - inset, y);
         }
 
         protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
