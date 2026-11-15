@@ -219,8 +219,9 @@ internal sealed class SwivraContext : ApplicationContext
         {
             if (r.Path is { } p && (File.Exists(p) || Directory.Exists(p)))
             {
-                var psi = new System.Diagnostics.ProcessStartInfo("explorer.exe") { UseShellExecute = false };
-                psi.ArgumentList.Add("/select," + p);
+                // Explorer only reads /select when the path alone is quoted: quoting the whole argument (what
+                // ArgumentList does for a path with a space) opens Documents instead. A path cannot hold a quote.
+                var psi = new System.Diagnostics.ProcessStartInfo("explorer.exe") { UseShellExecute = false, Arguments = $"/select,\"{p}\"" };
                 System.Diagnostics.Process.Start(psi)?.Dispose();
                 return;
             }
@@ -792,7 +793,8 @@ internal sealed class SwivraContext : ApplicationContext
             int pct = a.Total > 0 ? (int)(a.Sent * 100 / a.Total) : 0;
             string what = a.Name ?? Lang.T($"{a.Count} dosya", $"{a.Count} files");
             string tip = Lang.T($"Swivra: telefona gönderiliyor %{pct} · {what}", $"Swivra: sending to phone {pct}% · {what}");
-            _tray.Text = tip.Length > 127 ? tip[..127] : tip; // NotifyIcon refuses longer texts
+            // An unseen result keeps the tooltip; the progress comes back once the tray menu has been opened.
+            if (!_resultUnseen) _tray.Text = tip.Length > 127 ? tip[..127] : tip; // NotifyIcon refuses longer texts
         }
     }
 
