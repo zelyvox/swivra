@@ -177,10 +177,8 @@ internal sealed class SwivraContext : ApplicationContext
 
     private void SetTrayTip()
     {
-        string tip = _resultUnseen && _lastResult is { } r
-            ? $"Swivra · {r.Title}: {r.Detail}"
-            : Lang.T("Swivra: dosyayı sürüklerken Shift, Ctrl ya da Alt'a bas", "Swivra: press Shift, Ctrl or Alt while dragging a file");
-        _tray.Text = tip.Length > 127 ? tip[..127] : tip; // NotifyIcon refuses longer texts
+        // Just the name. How to summon the wheel is in the README and in the "already running" message, not on every hover.
+        _tray.Text = _resultUnseen && _lastResult is { } r ? $"Swivra · {r.Title}" : "Swivra";
     }
 
     /// <summary>Every tray notice goes through here, so a click on one is only read as "show me the result" when it was a result.</summary>
