@@ -45,6 +45,7 @@ internal sealed class SwivraContext : ApplicationContext
     private bool _balloonIsResult;
     private readonly Icon _iconPlain;
     private Icon? _iconDone, _iconFailed;
+    private readonly List<ToolStripItem> _staleRows = []; // rows of earlier tray menus, see BuildTrayMenu
 
     public SwivraContext(string[] args)
     {
@@ -61,7 +62,12 @@ internal sealed class SwivraContext : ApplicationContext
             Visible = true,
         };
         TrayMenuStyle.Apply(_tray.ContextMenuStrip);
-        _tray.ContextMenuStrip.Opening += (_, _) => MarkResultSeen();
+        _tray.ContextMenuStrip.Opening += (_, _) =>
+        {
+            foreach (var row in _staleRows) row.Dispose();
+            _staleRows.Clear();
+            MarkResultSeen();
+        };
         _tray.BalloonTipClicked += (_, _) => { if (_balloonIsResult) OpenLastResult(); };
         BuildTrayMenu();
         _shareTimer.Tick += (_, _) => ShowShareActivity();
@@ -262,10 +268,11 @@ internal sealed class SwivraContext : ApplicationContext
         SetTrayTip();
         var menu = _tray.ContextMenuStrip!;
         // The rows of the menu being replaced. Clear() only takes them out; an opened submenu keeps its
-        // window until its row is disposed. Not now: one of them may be the row whose click led here.
-        var old = menu.Items.Cast<ToolStripItem>().ToArray();
+        // window until its row is disposed. Not now, and not on a timer either: one of them may be the row
+        // whose click led here, and that click may still be waiting behind a message box. They go the next
+        // time the menu opens.
+        _staleRows.AddRange(menu.Items.Cast<ToolStripItem>());
         menu.Items.Clear();
-        if (old.Length > 0) After(1, () => { foreach (var item in old) item.Dispose(); });
         if (_lastResult is { } last)
         {
             string row = $"{Lang.T("Son iş", "Last job")}: {last.Title} · {last.Detail}";
